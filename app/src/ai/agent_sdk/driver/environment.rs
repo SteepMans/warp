@@ -1327,7 +1327,32 @@ where
         safe: ("Retrying {} environment clones once: reason=clone_failure", indexes.len()),
         full: ("Retrying environment clones once: repos={names} reason=clone_failure")
     );
-    let refreshed = match refresh.await {
+    let refreshed = refresh_clone_credentials(refresh).await;
+    delay.await;
+    let retry = execute(retry_batch).await;
+    let retry_ok = retry
+        .as_ref()
+        .is_ok_and(|retry| retry.command_result.exit_code == 0.into());
+    safe_info!(
+        safe: ("Environment clone retry finished: result_ok={retry_ok}"),
+        full: ("Environment clone retry finished: repos={names} result_ok={retry_ok}")
+    );
+    let retry_report_complete = merge_checkout_retry_report(report, retry?.report, &indexes);
+    annotate_clone_retry_failures(report, batch, &indexes, refreshed, retry_report_complete);
+    if retry_ok
+        && retry_report_complete
+        && first_report_complete
+        && report.failures().next().is_none()
+    {
+        result.command_result.exit_code = 0.into();
+    }
+    Ok(result)
+}
+
+async fn refresh_clone_credentials(
+    refresh: impl Future<Output = Result<bool, TaskGitCredentialsError>>,
+) -> bool {
+    match refresh.await {
         Ok(refreshed) => refreshed,
         Err(error) => {
             let class = match error {
@@ -1340,71 +1365,83 @@ where
             );
             false
         }
+    }
+}
+
+fn merge_checkout_retry_report(
+    report: &mut CheckoutReport,
+    retry_report: Option<CheckoutReport>,
+    indexes: &[usize],
+) -> bool {
+    let Some(retry_report) = retry_report.filter(|report| report.outcomes.len() == indexes.len())
+    else {
+        return false;
     };
-    delay.await;
-    let retry = execute(retry_batch).await;
-    let retry_ok = retry
-        .as_ref()
-        .is_ok_and(|retry| retry.command_result.exit_code == 0.into());
-    safe_info!(
-        safe: ("Environment clone retry finished: result_ok={retry_ok}"),
-        full: ("Environment clone retry finished: repos={names} result_ok={retry_ok}")
+    merge_clone_failure_identity(
+        &mut report.identity_diagnostics,
+        retry_report.identity_diagnostics,
     );
-    let mut retry = retry?;
-    let complete_report = retry
-        .report
-        .as_ref()
-        .is_some_and(|report| report.outcomes.len() == indexes.len());
-    if complete_report && let Some(retry_report) = &mut retry.report {
-        if let Some(mut identity) = retry_report.identity_diagnostics.take() {
-            if let Some(previous) = report.identity_diagnostics.take() {
-                identity.author = identity.author.or(previous.author);
-                for credential in previous.credentials {
-                    if let Some(updated) = identity
-                        .credentials
-                        .iter_mut()
-                        .find(|updated| updated.host == credential.host)
-                    {
-                        if updated.username.is_none() {
-                            updated.username = credential.username;
-                        }
-                    } else {
-                        identity.credentials.push(credential);
-                    }
+    report
+        .outcomes
+        .retain(|outcome| !indexes.contains(&outcome.request_index));
+    for mut outcome in retry_report.outcomes {
+        outcome.request_index = indexes[outcome.request_index];
+        report.outcomes.push(outcome);
+    }
+    true
+}
+
+fn merge_clone_failure_identity(
+    current: &mut Option<CloneFailureIdentityDiagnostics>,
+    latest: Option<CloneFailureIdentityDiagnostics>,
+) {
+    let Some(mut latest) = latest else {
+        return;
+    };
+    if let Some(previous) = current.take() {
+        latest.author = latest.author.or(previous.author);
+        for credential in previous.credentials {
+            if let Some(updated) = latest
+                .credentials
+                .iter_mut()
+                .find(|updated| updated.host == credential.host)
+            {
+                if updated.username.is_none() {
+                    updated.username = credential.username;
                 }
+            } else {
+                latest.credentials.push(credential);
             }
-            report.identity_diagnostics = Some(identity);
-        }
-        report
-            .outcomes
-            .retain(|outcome| !indexes.contains(&outcome.request_index));
-        for mut outcome in retry_report.outcomes.drain(..) {
-            outcome.request_index = indexes[outcome.request_index];
-            report.outcomes.push(outcome);
         }
     }
+    *current = Some(latest);
+}
+
+fn annotate_clone_retry_failures(
+    report: &mut CheckoutReport,
+    batch: &CheckoutBatch,
+    indexes: &[usize],
+    refreshed: bool,
+    retry_report_complete: bool,
+) {
+    let refresh_status = if refreshed {
+        "after a credential refresh"
+    } else {
+        "after a credential refresh was attempted or unavailable"
+    };
+    let reason = if retry_report_complete {
+        "still failed"
+    } else {
+        "failed without a complete checkout report"
+    };
     for outcome in &mut report.outcomes {
         if indexes.contains(&outcome.request_index) && outcome.failure.is_some() {
-            let refresh_status = if refreshed {
-                "after a credential refresh"
-            } else {
-                "after a credential refresh was attempted or unavailable"
-            };
-            let reason = if !complete_report {
-                "failed without a complete checkout report"
-            } else {
-                "still failed"
-            };
             outcome.diagnostics = format!(
                 "{}\n{}: clone was retried once {refresh_status} and {reason}.",
                 outcome.diagnostics, batch.repositories[outcome.request_index].checkout_name
             );
         }
     }
-    if retry_ok && complete_report && first_report_complete && report.failures().next().is_none() {
-        result.command_result.exit_code = 0.into();
-    }
-    Ok(result)
 }
 
 #[tracing::instrument(skip_all, err, fields(tags.cloud_agent = true))]
