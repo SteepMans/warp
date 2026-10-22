@@ -1075,6 +1075,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::PromptCacheExpiryWarning,
     FeatureFlag::JupyterNotebookRendering,
     FeatureFlag::MultiLevelOrchestration,
+    FeatureFlag::ChildModelRouting,
     FeatureFlag::McpJsonTreeView,
     FeatureFlag::BoxDrawingGlyphs,
     FeatureFlag::CtrlCCancelsThirdPartyHarness,
