@@ -1,6 +1,6 @@
 # Basic parser
 
-This parser is a type-driven, recursive-descent parser. This work-in-progress guide provides a friendly overview of the parser with examples. Some sections include `Did you know?` notes with tips about the parser.
+This parser uses type-driven recursive descent. This guide describes its parsing stages through examples and provides background on supporting types in the `Did you know?` sections.
 
 # Steps
 1. Lex. - [What happens when we start the parse](#what-happens-when-we-start-the-parse)
