@@ -141,11 +141,34 @@ fn claude_model_env_vars_depend_on_transport() {
     .unwrap();
     assert!(!acp_default.contains_key(OsStr::new("ANTHROPIC_CUSTOM_MODEL_OPTION")));
 
-    assert!(
-        harness_env_vars(Harness::Claude, HarnessTransport::Acp, None)
-            .unwrap()
-            .is_empty()
-    );
+    let unconfigured = harness_env_vars(Harness::Claude, HarnessTransport::Acp, None).unwrap();
+    assert!(!unconfigured.contains_key(OsStr::new("ANTHROPIC_MODEL")));
+    assert!(!unconfigured.contains_key(OsStr::new("ANTHROPIC_CUSTOM_MODEL_OPTION")));
+}
+
+#[test]
+fn claude_env_vars_disable_nonessential_traffic_on_both_transports() {
+    for transport in [HarnessTransport::Pty, HarnessTransport::Acp] {
+        let env = harness_env_vars(Harness::Claude, transport, None).unwrap();
+        assert_eq!(
+            env.get(OsStr::new("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
+                .map(|v| v.to_str()),
+            Some(Some("1")),
+            "{transport:?}"
+        );
+        assert_eq!(
+            env.get(OsStr::new("DISABLE_AUTOUPDATER"))
+                .map(|v| v.to_str()),
+            Some(Some("1")),
+            "{transport:?}"
+        );
+    }
+}
+
+#[test]
+fn codex_env_vars_are_untouched_by_the_claude_traffic_switches() {
+    let env = harness_env_vars(Harness::Codex, HarnessTransport::Pty, None).unwrap();
+    assert!(env.is_empty());
 }
 
 #[test]

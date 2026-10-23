@@ -19,6 +19,15 @@ const PLATFORM_PLUGIN_KEY: &str = "oz-harness-support@claude-code-warp";
 const MARKETPLACE_REPO: &str = "warpdotdev/claude-code-warp";
 const MARKETPLACE_NAME: &str = "claude-code-warp";
 
+/// Environment for `claude` invocations that nobody is watching. It turns off the auto-updater
+/// and, through `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, also bug reporting, error reporting,
+/// and telemetry, so a CLI start does not wait on endpoints an egress-filtered network may black-hole.
+/// The variables are harmless where that traffic would have succeeded.
+pub(crate) const CLAUDE_UNATTENDED_ENV: [(&str, &str); 2] = [
+    ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+    ("DISABLE_AUTOUPDATER", "1"),
+];
+
 // Keep in sync with the plugin version in warpdotdev/claude-code-warp.
 // (See the Versioning section of that repo's README.)
 const MINIMUM_PLUGIN_VERSION: &str = "2.4.0";
@@ -44,11 +53,14 @@ impl ClaudeCodePluginManager {
     }
 
     async fn run_logged(&self, args: &[&str], log: &mut String) -> Result<(), PluginInstallError> {
-        let env_vars = self
-            .path_env_var
-            .as_deref()
-            .map(|path| HashMap::from([("PATH".to_owned(), path.to_owned())]));
-        run_cli_command_logged("claude", args, &self.executor, env_vars, log).await
+        let mut env_vars: HashMap<String, String> = CLAUDE_UNATTENDED_ENV
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect();
+        if let Some(path) = self.path_env_var.as_deref() {
+            env_vars.insert("PATH".to_owned(), path.to_owned());
+        }
+        run_cli_command_logged("claude", args, &self.executor, Some(env_vars), log).await
     }
 }
 

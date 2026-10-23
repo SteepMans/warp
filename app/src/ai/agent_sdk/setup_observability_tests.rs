@@ -58,6 +58,22 @@ const EXPECTED: &[(SetupStep, SetupScope)] = &[
         SetupStep::ThirdPartyHarnessPreparationPlatformPluginUpdate,
         SetupScope::Run,
     ),
+    (
+        SetupStep::ThirdPartyHarnessPreparationPromptResolution,
+        SetupScope::Run,
+    ),
+    (
+        SetupStep::ThirdPartyHarnessPreparationMcpResolution,
+        SetupScope::Run,
+    ),
+    (
+        SetupStep::ThirdPartyHarnessPreparationConfigWrite,
+        SetupScope::Run,
+    ),
+    (
+        SetupStep::ThirdPartyHarnessPreparationAuthPreflight,
+        SetupScope::Run,
+    ),
 ];
 
 #[test]

@@ -35,6 +35,7 @@ use crate::ai::mcp::JSONMCPServer;
 use crate::server::server_api::ServerApi;
 use crate::server::server_api::harness_support::{HarnessSupportClient, upload_to_target};
 use crate::terminal::CLIAgent;
+use crate::terminal::cli_agent_sessions::plugin_manager::claude::CLAUDE_UNATTENDED_ENV;
 use crate::terminal::cli_agent_sessions::{CLIAgentSessionStatus, CLIAgentSessionsModel};
 use crate::terminal::model::block::{BlockId, SerializedBlock};
 use crate::util::path::resolve_executable;
@@ -575,6 +576,9 @@ pub(crate) fn task_env_vars(
 /// values the adapter advertises from Claude Code's model picker. The picker lists aliases
 /// such as `opus` and `sonnet`, so `ANTHROPIC_CUSTOM_MODEL_OPTION` adds the requested id as a
 /// picker entry and lets the protocol selection match it verbatim.
+///
+/// Every `claude` process a run starts inherits this environment: the auth preflight and the
+/// harness command run in the terminal session, and the ACP adapter spawns the CLI from there.
 pub(crate) fn harness_env_vars(
     selected_harness: Harness,
     transport: HarnessTransport,
@@ -584,6 +588,11 @@ pub(crate) fn harness_env_vars(
 
     match (selected_harness, transport) {
         (Harness::Claude, transport) => {
+            env_vars.extend(
+                CLAUDE_UNATTENDED_ENV
+                    .iter()
+                    .map(|(name, value)| (OsString::from(name), OsString::from(value))),
+            );
             if let Some(model_id) = third_party_harness_model_config
                 .map(|config| config.model_id.as_str())
                 .filter(|id| !id.is_empty())

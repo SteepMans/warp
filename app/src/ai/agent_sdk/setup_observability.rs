@@ -255,6 +255,13 @@ pub(crate) enum SetupStep {
     ThirdPartyHarnessPreparationNotificationPluginUpdate,
     ThirdPartyHarnessPreparationPlatformPluginInstall,
     ThirdPartyHarnessPreparationPlatformPluginUpdate,
+    /// Sub-steps of [`SetupStep::ThirdPartyHarnessPreparation`] after plugin setup: resolving
+    /// the server-side prompt, resolving MCP specs, writing the harness configuration and
+    /// building its runner, and the auth preflight command.
+    ThirdPartyHarnessPreparationPromptResolution,
+    ThirdPartyHarnessPreparationMcpResolution,
+    ThirdPartyHarnessPreparationConfigWrite,
+    ThirdPartyHarnessPreparationAuthPreflight,
 }
 
 macro_rules! span_and_name {
@@ -303,7 +310,11 @@ impl SetupStep {
             | Self::ThirdPartyHarnessPreparationNotificationPluginInstall
             | Self::ThirdPartyHarnessPreparationNotificationPluginUpdate
             | Self::ThirdPartyHarnessPreparationPlatformPluginInstall
-            | Self::ThirdPartyHarnessPreparationPlatformPluginUpdate => SetupScope::Run,
+            | Self::ThirdPartyHarnessPreparationPlatformPluginUpdate
+            | Self::ThirdPartyHarnessPreparationPromptResolution
+            | Self::ThirdPartyHarnessPreparationMcpResolution
+            | Self::ThirdPartyHarnessPreparationConfigWrite
+            | Self::ThirdPartyHarnessPreparationAuthPreflight => SetupScope::Run,
         }
     }
 
@@ -405,6 +416,18 @@ impl SetupStep {
             }
             Self::ThirdPartyHarnessPreparationPlatformPluginUpdate => {
                 span_and_name!("setup_third_party_harness_preparation_platform_plugin_update")
+            }
+            Self::ThirdPartyHarnessPreparationPromptResolution => {
+                span_and_name!("setup_third_party_harness_preparation_prompt_resolution")
+            }
+            Self::ThirdPartyHarnessPreparationMcpResolution => {
+                span_and_name!("setup_third_party_harness_preparation_mcp_resolution")
+            }
+            Self::ThirdPartyHarnessPreparationConfigWrite => {
+                span_and_name!("setup_third_party_harness_preparation_config_write")
+            }
+            Self::ThirdPartyHarnessPreparationAuthPreflight => {
+                span_and_name!("setup_third_party_harness_preparation_auth_preflight")
             }
         }
     }

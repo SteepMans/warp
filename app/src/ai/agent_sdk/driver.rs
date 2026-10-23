@@ -189,8 +189,13 @@ const HARNESS_EXIT_FORCE_KILL_DELAY: Duration = Duration::from_secs(14);
 /// Bound on the end-of-run wait for `LocalAgentTaskSyncModel` to finish
 /// delivering queued task status updates before the process may exit.
 const TASK_STATUS_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
-/// Timeout for individual harness auth preflight commands.
-const PREFLIGHT_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a harness auth preflight command may run before it is interrupted. The preflight
+/// only front-loads an auth failure the harness would otherwise report through its runtime
+/// error patterns, so a slow check is not worth holding the launch for.
+const PREFLIGHT_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long an interrupted preflight command gets to release the terminal before the run gives
+/// up on it.
+const PREFLIGHT_INTERRUPT_GRACE: Duration = Duration::from_secs(5);
 /// Last-resort bound for draining `PendingCliHarnessPromptQueue` when the CLI-harness plugin
 /// never reports `CLIAgentSessionsModelEvent::StatusChanged` with `CLIAgentSessionStatus::InProgress`
 /// — the normal drain signal. Finding anything still queued once this window elapses is not a
@@ -2425,10 +2430,16 @@ impl AgentDriver {
                             &task.mcp_specs,
                             harness.as_ref(),
                             &foreground,
+                            &harness_setup_events,
                         )
                         .await?;
 
-                        Self::run_preflight_checks(harness.as_ref(), &foreground).await?;
+                        harness_setup_events
+                            .record_result(
+                                SetupStep::ThirdPartyHarnessPreparationAuthPreflight,
+                                Self::run_preflight_checks(harness.as_ref(), &foreground),
+                            )
+                            .await?;
                         Ok::<_, AgentDriverError>((harness_exit_rx, runner))
                     })
                     .await?;
@@ -2751,7 +2762,11 @@ impl AgentDriver {
         Ok(())
     }
 
-    /// Run a single preflight check command and return an error if it fails.
+    /// Run a single preflight check command and return an error if it reports a failure.
+    ///
+    /// A check that outlasts [`PREFLIGHT_CHECK_TIMEOUT`] is interrupted and the run continues,
+    /// because a slow check is not an auth verdict; the run only fails if the interrupted command
+    /// does not hand the terminal back within [`PREFLIGHT_INTERRUPT_GRACE`].
     async fn run_single_preflight(
         command: &str,
         harness_name: &str,
@@ -2765,16 +2780,36 @@ impl AgentDriver {
             })
             .await??;
 
-        let command_handle = start_future.await?;
+        let mut command_handle = start_future.await?;
         let block_id = command_handle.block_id().clone();
 
-        let exit_code = match command_handle.with_timeout(PREFLIGHT_CHECK_TIMEOUT).await {
+        let exit_code = match (&mut command_handle)
+            .with_timeout(PREFLIGHT_CHECK_TIMEOUT)
+            .await
+        {
             Err(TimeoutError) => {
-                log::error!("Preflight auth check timed out for {harness_name}");
-                return Err(AgentDriverError::HarnessAuthCheckFailed {
-                    harness: harness_name.to_owned(),
-                    detail: "command timed out".to_owned(),
-                });
+                log::warn!(
+                    "Preflight auth check for {harness_name} did not finish within \
+                     {PREFLIGHT_CHECK_TIMEOUT:?}; interrupting it and continuing"
+                );
+                tracing::warn!(
+                    tags.cloud_agent = true,
+                    harness = harness_name,
+                    "preflight auth check timed out; interrupted and skipped"
+                );
+                foreground
+                    .spawn(|me, ctx| {
+                        me.terminal_driver
+                            .update(ctx, |driver, ctx| driver.send_interrupt_to_pty(ctx))
+                    })
+                    .await?;
+                return match command_handle.with_timeout(PREFLIGHT_INTERRUPT_GRACE).await {
+                    Ok(result) => result.map(|_| ()),
+                    Err(TimeoutError) => Err(AgentDriverError::HarnessAuthCheckFailed {
+                        harness: harness_name.to_owned(),
+                        detail: "command timed out".to_owned(),
+                    }),
+                };
             }
             Ok(result) => result?,
         };
@@ -3024,6 +3059,7 @@ impl AgentDriver {
         mcp_specs: &[MCPSpec],
         harness: &dyn ThirdPartyHarness,
         foreground: &ModelSpawner<Self>,
+        setup_events: &SetupClientEventReporter,
     ) -> Result<Arc<dyn harness::HarnessRunner>, AgentDriverError> {
         let (
             workspace_root,
@@ -3078,11 +3114,20 @@ impl AgentDriver {
                         skill,
                         attachments_dir: attachments_dir.clone(),
                     };
-                    let resolved = match task_id.as_ref() {
-                        Some(task_id) => server_api.resolve_prompt_for_task(task_id, request).await,
-                        None => server_api.resolve_prompt(request).await,
-                    }
-                    .map_err(AgentDriverError::PromptResolutionFailed)?;
+                    let resolved = setup_events
+                        .record_result(
+                            SetupStep::ThirdPartyHarnessPreparationPromptResolution,
+                            async {
+                                match task_id.as_ref() {
+                                    Some(task_id) => {
+                                        server_api.resolve_prompt_for_task(task_id, request).await
+                                    }
+                                    None => server_api.resolve_prompt(request).await,
+                                }
+                                .map_err(AgentDriverError::PromptResolutionFailed)
+                            },
+                        )
+                        .await?;
                     (
                         Cow::Owned(resolved.prompt),
                         resolved.system_prompt,
@@ -3109,9 +3154,17 @@ impl AgentDriver {
 
         // Resolve MCP specs into harness-native JSON format.
         let mcp_specs = mcp_specs.to_vec();
-        let resolved_mcp_servers =
-            Self::resolve_mcp_specs_to_json(&mcp_specs, secrets, managed_mcp_client, foreground)
-                .await?;
+        let resolved_mcp_servers = setup_events
+            .record_result(
+                SetupStep::ThirdPartyHarnessPreparationMcpResolution,
+                Self::resolve_mcp_specs_to_json(
+                    &mcp_specs,
+                    secrets,
+                    managed_mcp_client,
+                    foreground,
+                ),
+            )
+            .await?;
         if !resolved_mcp_servers.is_empty() {
             log::info!(
                 "Resolved {} MCP server(s) for third-party harness",
@@ -3128,25 +3181,28 @@ impl AgentDriver {
             .await
             .map_err(|_| AgentDriverError::InvalidRuntimeState)?;
 
-        let runner: Arc<dyn HarnessRunner> = harness
-            .build_runner(
-                prompt_text.as_ref(),
-                system_prompt.as_deref(),
-                resumption_prompt.as_deref(),
-                server_context.as_deref(),
-                &workspace_root,
-                &harness_working_dir,
-                task_id,
-                server_api.clone(),
-                terminal_driver,
-                resume,
-                &resolved_env_vars,
-                &skill_dirs,
-                factory_repository_contract,
-                &secrets_for_harness,
-                &resolved_mcp_servers,
-                third_party_harness_model_config.as_ref(),
-            )?
+        let runner: Arc<dyn HarnessRunner> = setup_events
+            .record_result(SetupStep::ThirdPartyHarnessPreparationConfigWrite, async {
+                harness.build_runner(
+                    prompt_text.as_ref(),
+                    system_prompt.as_deref(),
+                    resumption_prompt.as_deref(),
+                    server_context.as_deref(),
+                    &workspace_root,
+                    &harness_working_dir,
+                    task_id,
+                    server_api.clone(),
+                    terminal_driver,
+                    resume,
+                    &resolved_env_vars,
+                    &skill_dirs,
+                    factory_repository_contract,
+                    &secrets_for_harness,
+                    &resolved_mcp_servers,
+                    third_party_harness_model_config.as_ref(),
+                )
+            })
+            .await?
             .into();
         runner
             .persistence()

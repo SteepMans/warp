@@ -51,6 +51,7 @@ use crate::ai::agent::{
 };
 use crate::ai::agent_sdk::driver::environment::PrepareEnvironmentError;
 use crate::ai::agent_sdk::driver::harness::{HarnessKind, harness_kind};
+use crate::ai::agent_sdk::setup_observability::SetupClientEventReporter;
 use crate::ai::agent_sdk::task_env_vars;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::blocklist::orchestration_events::{
@@ -63,6 +64,7 @@ use crate::ai::blocklist::{
 use crate::ai::cloud_environments::{GithubRepo, SourceRepo};
 use crate::ai::llms::LLMId;
 use crate::ai::skills::SkillManager;
+use crate::server::server_api::ServerApiProvider;
 use crate::test_util::assert_eventually;
 use crate::test_util::terminal::{add_window_with_terminal, initialize_app_for_terminal_view};
 use crate::workspace::view::tests::initialize_app as initialize_workspace_test_app;
@@ -2679,7 +2681,15 @@ fn deferred_repository_semantic_acp_consumes_server_resolved_text_once() {
         options.selected_harness = Harness::Codex;
         options.harness_transport = HarnessTransport::Acp;
         let driver = app.update(|ctx| AgentDriver::create(options, ctx).unwrap());
-        let foreground = driver.update(&mut app, |_, ctx| ctx.spawner());
+        let (foreground, setup_events) = driver.update(&mut app, |_, ctx| {
+            (
+                ctx.spawner(),
+                SetupClientEventReporter::noop(
+                    ServerApiProvider::as_ref(ctx).get_ai_client(),
+                    ctx.background_executor(),
+                ),
+            )
+        });
         let HarnessKind::ThirdParty(harness) =
             harness_kind(Harness::Codex, HarnessTransport::Acp).unwrap()
         else {
@@ -2693,6 +2703,7 @@ fn deferred_repository_semantic_acp_consumes_server_resolved_text_once() {
             &[],
             harness.as_ref(),
             &foreground,
+            &setup_events,
         )
         .await
         .unwrap();
@@ -2800,7 +2811,7 @@ fn deferred_repository_semantic_skill_publication_without_initial_inventory() {
                         );
                     }
                     let driver = app.update(|ctx| AgentDriver::create(options, ctx).unwrap());
-                    let foreground = driver.update(&mut app, |driver, ctx| {
+                    let (foreground, setup_events) = driver.update(&mut app, |driver, ctx| {
                         let Some(super::WorkspaceState::Pending(workspace)) =
                             driver.workspace.take()
                         else {
@@ -2826,7 +2837,13 @@ fn deferred_repository_semantic_skill_publication_without_initial_inventory() {
                                 Some(&root.path().as_os_str().to_os_string())
                             );
                         }
-                        ctx.spawner()
+                        (
+                            ctx.spawner(),
+                            SetupClientEventReporter::noop(
+                                ServerApiProvider::as_ref(ctx).get_ai_client(),
+                                ctx.background_executor(),
+                            ),
+                        )
                     });
                     let HarnessKind::ThirdParty(harness) =
                         harness_kind(harness, transport).unwrap()
@@ -2838,6 +2855,7 @@ fn deferred_repository_semantic_skill_publication_without_initial_inventory() {
                         &[],
                         harness.as_ref(),
                         &foreground,
+                        &setup_events,
                     )
                     .await;
                     if should_activate {
