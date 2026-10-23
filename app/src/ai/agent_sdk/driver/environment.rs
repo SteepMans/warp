@@ -429,7 +429,6 @@ pub(crate) fn validate_repository_preparation_overrides(
 /// caller rather than a path-prefix inference, so non-sandbox callers that
 /// happen to pass a path like `/home/agent/...` don't silently flip into
 /// sandbox-only mode.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_environment(
     working_dir: PathBuf,
     is_sandbox: bool,
