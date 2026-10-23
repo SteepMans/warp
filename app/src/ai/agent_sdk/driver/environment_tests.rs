@@ -27,7 +27,6 @@ use super::{
 };
 use crate::ai::agent_sdk::driver::AgentDriverError;
 use crate::ai::cloud_environments::{AmbientAgentEnvironment, SourceRepo};
-use crate::server::server_api::ai::TaskGitCredentialsError;
 use crate::terminal::shell::ShellType;
 
 fn checkout_outcome(
@@ -77,7 +76,6 @@ fn clone_retry_preserves_successful_checkouts_and_all_resolved_heads() {
         ]),
     ]
     .into_iter();
-    let mut refreshes = 0;
     let mut delays = 0;
 
     let result = block_on(checkout_with_clone_retry(
@@ -87,16 +85,11 @@ fn clone_retry_preserves_successful_checkouts_and_all_resolved_heads() {
             ready(Ok(results.next().unwrap()))
         },
         async {
-            refreshes += 1;
-            Ok(true)
-        },
-        async {
             delays += 1;
         },
     ))
     .unwrap();
 
-    assert_eq!(refreshes, 1);
     assert_eq!(delays, 1);
     assert_eq!(
         passes,
@@ -130,7 +123,6 @@ fn clone_retry_preserves_successful_checkouts_and_all_resolved_heads() {
 fn clone_retry_stops_after_second_failure_and_preserves_identity() {
     let batch = checkout_batch(["first", "second"]);
     let mut attempts = 0;
-    let mut refreshes = 0;
     let result = block_on(checkout_with_clone_retry(
         &batch,
         |batch| {
@@ -156,15 +148,10 @@ fn clone_retry_stops_after_second_failure_and_preserves_identity() {
                 });
             ready(Ok(result))
         },
-        async {
-            refreshes += 1;
-            Ok(true)
-        },
         ready(()),
     ))
     .unwrap();
     assert_eq!(attempts, 2);
-    assert_eq!(refreshes, 1);
     assert_ne!(result.command_result.exit_code, 0.into());
     let repos = repository_clone_requests(
         &[
@@ -180,14 +167,8 @@ fn clone_retry_stops_after_second_failure_and_preserves_identity() {
         matches!(&error, PrepareEnvironmentError::CloneRepo { repo_name, .. } if repo_name == "warpdotdev/first, warpdotdev/second")
     );
     let message = error.to_string();
-    assert!(
-        message
-            .contains("first: clone was retried once after a credential refresh and still failed")
-    );
-    assert!(
-        message
-            .contains("second: clone was retried once after a credential refresh and still failed")
-    );
+    assert!(message.contains("first: clone was retried once and still failed"));
+    assert!(message.contains("second: clone was retried once and still failed"));
     assert!(message.contains("Author: Fixture"));
 }
 
@@ -228,7 +209,6 @@ fn clone_retry_retains_identity_for_other_failed_forges() {
     let result = block_on(checkout_with_clone_retry(
         &batch,
         |_| ready(Ok(results.next().unwrap())),
-        ready(Ok(true)),
         ready(()),
     ))
     .unwrap();
@@ -240,7 +220,7 @@ fn clone_retry_retains_identity_for_other_failed_forges() {
 }
 
 #[test]
-fn clone_retry_does_not_refresh_or_delay_other_failure_kinds() {
+fn clone_retry_does_not_retry_or_delay_other_failure_kinds() {
     let batch = checkout_batch(["failed"]);
     for kind in [
         CheckoutFailureKind::Checkout,
@@ -259,7 +239,6 @@ fn clone_retry_does_not_refresh_or_delay_other_failure_kinds() {
                     "Authentication failed",
                 )])))
             },
-            async { panic!("non-clone failures must not refresh") },
             async { panic!("non-clone failures must not delay") },
         ))
         .unwrap();
@@ -269,7 +248,7 @@ fn clone_retry_does_not_refresh_or_delay_other_failure_kinds() {
 }
 
 #[test]
-fn clone_retry_continues_after_refresh_failure_without_clearing_other_errors() {
+fn clone_retry_preserves_other_checkout_errors() {
     let batch = checkout_batch(["forbidden", "rejected"]);
     let mut results = [
         checkout_result(vec![
@@ -282,9 +261,6 @@ fn clone_retry_continues_after_refresh_failure_without_clearing_other_errors() {
     let result = block_on(checkout_with_clone_retry(
         &batch,
         |_| ready(Ok(results.next().unwrap())),
-        ready(Err(TaskGitCredentialsError::Request(anyhow::anyhow!(
-            "refresh unavailable"
-        )))),
         ready(()),
     ))
     .unwrap();
@@ -317,7 +293,6 @@ fn clone_retry_does_not_accept_a_missing_retry_report() {
     let result = block_on(checkout_with_clone_retry(
         &batch,
         |_| ready(Ok(results.next().unwrap())),
-        ready(Ok(false)),
         ready(()),
     ))
     .unwrap();

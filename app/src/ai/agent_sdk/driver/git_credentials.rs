@@ -910,7 +910,7 @@ fn apply_refreshed_credentials(response: TaskGitCredentialsResponse) -> Result<b
     tags.cloud_agent = true,
     task_id,
 ))]
-pub(super) async fn try_refresh(
+async fn try_refresh(
     task_id: &str,
     ai_client: &Arc<dyn AIClient>,
     use_factory_repositories: bool,
