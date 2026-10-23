@@ -218,6 +218,11 @@ pub(crate) enum SetupScope {
 /// Names setup operations so normal runs and standby preparation use the same tracing labels.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Sequence)]
 pub(crate) enum SetupStep {
+    /// The execution bootstrap query that returns the run's configuration, secrets, and
+    /// attachment list.
+    ExecutionBootstrapFetch,
+    /// Fetching and writing the git credentials the workspace checkout uses.
+    GitCredentialsBootstrap,
     TeamMetadataRefresh,
     WarpDriveSync,
     TaskDataFetch,
@@ -293,6 +298,8 @@ impl SetupStep {
             // git credentials through task-keyed APIs even though the server resolves both
             // from agent-scoped inputs. `AgentCredentialsFetch` is the pre-warmed equivalent.
             Self::TaskDataFetch
+            | Self::ExecutionBootstrapFetch
+            | Self::GitCredentialsBootstrap
             // Session ACLs name the requester, who is unknown before a claim.
             | Self::SharedSessionEstablishment
             | Self::ConversationResumeLoading
@@ -310,6 +317,12 @@ impl SetupStep {
     fn to_event_name_and_span(self) -> (&'static str, tracing::Span) {
         log::debug!("Starting {:?} setup step: {self:?}", self.scope());
         match self {
+            Self::ExecutionBootstrapFetch => {
+                span_and_name!("setup_execution_bootstrap_fetch")
+            }
+            Self::GitCredentialsBootstrap => {
+                span_and_name!("setup_git_credentials_bootstrap")
+            }
             Self::TeamMetadataRefresh => {
                 span_and_name!("setup_team_metadata_refresh")
             }

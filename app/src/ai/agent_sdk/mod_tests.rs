@@ -376,9 +376,16 @@ fn deferred_capability_bootstrap_subprocess() {
             .build()
             .unwrap();
         let _enter = runtime.enter();
-        let data = AgentDriverRunner::fetch_execution_task_data(&foreground, TASK_ID, "42")
-            .await
-            .unwrap();
+        let repository_contract =
+            super::RepositoryContract::for_task(Some(TASK_ID.parse().unwrap()));
+        let data = AgentDriverRunner::fetch_execution_task_data(
+            &foreground,
+            TASK_ID,
+            "42",
+            repository_contract,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             data.repository_contract.supports_deferred_repositories,
             supports_deferred_repositories
@@ -391,6 +398,14 @@ fn deferred_capability_bootstrap_subprocess() {
         });
         let args =
             parse_run_agent_args(&["agent", "run", "--task-id", TASK_ID, "--execution-id", "42"]);
+        AgentDriverRunner::bootstrap_git_credentials_for_task(
+            &foreground,
+            TASK_ID,
+            args.configure_git_credentials_with_github,
+            repository_contract.use_factory_repositories,
+        )
+        .await
+        .unwrap();
         let result = AgentDriverRunner::build_driver_options_and_task(
             &foreground,
             args,
@@ -878,9 +893,11 @@ fn legacy_execution_launch_skips_bootstrap_and_reports_team_metadata_refresh_fai
             .returning(|| Err(anyhow::anyhow!("workspace metadata unavailable")));
         app.add_singleton_model(|ctx| TeamUpdateManager::new(Arc::new(team_client), None, ctx));
         let mut ai_client = MockAIClient::new();
+        // The container-ready timeline event always posts; the team metadata and git
+        // credential setup metrics post from the background and may not land before exit.
         ai_client
             .expect_post_agent_run_client_event()
-            .times(1..=2)
+            .times(1..=3)
             .returning(|_, _| Ok(()));
         ai_client
             .expect_update_agent_task()

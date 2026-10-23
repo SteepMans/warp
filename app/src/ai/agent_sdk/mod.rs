@@ -16,6 +16,7 @@ pub use driver::AgentDriver;
 use driver::AgentDriverError;
 use driver::agent_setup::configured_skills::{self, merge_skill_dirs};
 pub(crate) use driver::harness::{ClaudeHarness, task_env_vars, validate_cli_installed};
+use futures::FutureExt as _;
 use telemetry::CliTelemetryEvent;
 use tracing::Instrument as _;
 use warp_cli::agent::{
@@ -632,6 +633,21 @@ struct RepositoryContract {
     use_factory_repositories: bool,
 }
 
+impl RepositoryContract {
+    /// The contract a run captures at launch, before any server call can change its inputs.
+    fn for_task(task_id: Option<AmbientAgentTaskId>) -> Self {
+        let supports_deferred_repositories = FeatureFlag::FactoryDeferredRepositories.is_enabled();
+        Self {
+            supports_deferred_repositories,
+            use_factory_repositories: factory_repository_contract(
+                task_id,
+                supports_deferred_repositories,
+                std::env::var_os(FACTORY_ID_ENV),
+            ),
+        }
+    }
+}
+
 fn build_execution_task_and_options(
     args: Option<&RunAgentArgs>,
     config: ExecutionConfiguration,
@@ -911,28 +927,70 @@ impl AgentDriverRunner {
                 Some(task_id) => SetupClientEventReporter::new(task_id, server_api.clone(), background),
                 None => SetupClientEventReporter::noop(server_api.clone(), background),
             };
-            setup_events
-                .post_timeline_event(OzRunTimelineEvent::WorkerContainerReady)
-                .await;
             let execution_id = args.execution_id.as_deref().filter(|id| !id.is_empty());
-            let execution_data = if FeatureFlag::CloudAgentExecutionConfig.is_enabled()
+            let execution_launch = if FeatureFlag::CloudAgentExecutionConfig.is_enabled()
                 && let (Some(task_id), Some(execution_id)) =
                     (args.task_id.as_deref(), execution_id)
             {
-                Some(Self::fetch_execution_task_data(&foreground, task_id, execution_id).await?)
+                Some((task_id, execution_id))
             } else {
                 None
             };
+            let repository_contract = RepositoryContract::for_task(task_id);
+
+            // The execution bootstrap, git credentials, and team metadata refresh need only the
+            // task identity and the workload token, so they are issued together rather than one
+            // round trip at a time. The Warp Drive wait below is for a load that started at
+            // login, so it has no round trip of its own to overlap.
+            let execution_bootstrap = async {
+                match execution_launch {
+                    Some((task_id, execution_id)) => setup_events
+                        .record_result(
+                            SetupStep::ExecutionBootstrapFetch,
+                            Self::fetch_execution_task_data(
+                                &foreground,
+                                task_id,
+                                execution_id,
+                                repository_contract,
+                            ),
+                        )
+                        .await
+                        .map(Some),
+                    None => Ok(None),
+                }
+            };
+            let git_credentials = async {
+                match args.task_id.as_deref() {
+                    Some(task_id_str) => setup_events
+                        .record_result(
+                            SetupStep::GitCredentialsBootstrap,
+                            Self::bootstrap_git_credentials_for_task(
+                                &foreground,
+                                task_id_str,
+                                args.configure_git_credentials_with_github,
+                                repository_contract.use_factory_repositories,
+                            ),
+                        )
+                        .await,
+                    None => Ok(()),
+                }
+            };
+            let team_metadata_refresh = setup_events.record_result(
+                SetupStep::TeamMetadataRefresh,
+                Self::refresh_team_metadata(&foreground, args.task_id.is_some()),
+            );
+            let worker_container_ready = setup_events
+                .post_timeline_event(OzRunTimelineEvent::WorkerContainerReady)
+                .map(Ok::<(), AgentDriverError>);
+            let (execution_data, (), (), ()) = futures::try_join!(
+                execution_bootstrap,
+                git_credentials,
+                team_metadata_refresh,
+                worker_container_ready,
+            )?;
             let execution_config = execution_data.as_ref().map(|data| &data.config);
             let has_execution_config = execution_config.is_some();
 
-            // Ensure we've synced team state before starting the driver.
-            setup_events
-                .record_result(
-                    SetupStep::TeamMetadataRefresh,
-                    Self::refresh_team_metadata(&foreground, args.task_id.is_some()),
-                )
-                .await?;
             let agent_driver_team_scope = if let Some(config) = execution_config {
                 Some(execution_config::team_scope(config.team_id.as_ref())
                     .map_err(AgentDriverError::ConfigBuildFailed)?)
@@ -1152,13 +1210,8 @@ impl AgentDriverRunner {
         foreground: &ModelSpawner<Self>,
         task_id: &str,
         execution_id: &str,
+        repository_contract: RepositoryContract,
     ) -> Result<ExecutionTaskData, AgentDriverError> {
-        let supports_deferred_repositories = FeatureFlag::FactoryDeferredRepositories.is_enabled();
-        let use_factory_repositories = factory_repository_contract(
-            task_id.parse().ok(),
-            supports_deferred_repositories,
-            std::env::var_os(FACTORY_ID_ENV),
-        );
         let (workload_token, no_isolation) =
             match warp_isolation_platform::issue_workload_token(Some(Duration::from_mins(5))).await
             {
@@ -1176,7 +1229,7 @@ impl AgentDriverRunner {
                     task_id,
                     execution_id,
                     workload_token.clone(),
-                    supports_deferred_repositories,
+                    repository_contract.supports_deferred_repositories,
                 )
             },
             retry::is_transient_graphql_or_http_error,
@@ -1200,10 +1253,7 @@ impl AgentDriverRunner {
         Ok(ExecutionTaskData {
             server_api: api,
             config: data.config,
-            repository_contract: RepositoryContract {
-                supports_deferred_repositories,
-                use_factory_repositories,
-            },
+            repository_contract,
             secrets,
             attachments: data.attachments,
         })
@@ -1414,21 +1464,9 @@ impl AgentDriverRunner {
             .as_ref()
             .map(|data| data.repository_contract.use_factory_repositories)
             .unwrap_or_else(|| {
-                factory_repository_contract(
-                    args.task_id.as_deref().and_then(|id| id.parse().ok()),
-                    FeatureFlag::FactoryDeferredRepositories.is_enabled(),
-                    std::env::var_os(FACTORY_ID_ENV),
-                )
+                RepositoryContract::for_task(args.task_id.as_deref().and_then(|id| id.parse().ok()))
+                    .use_factory_repositories
             });
-        if let Some(task_id_str) = args.task_id.as_ref() {
-            Self::bootstrap_git_credentials_for_task(
-                foreground,
-                task_id_str,
-                args.configure_git_credentials_with_github,
-                use_factory_repositories,
-            )
-            .await?;
-        }
         if let Some(ExecutionTaskData {
             server_api: execution_server_api,
             config,
