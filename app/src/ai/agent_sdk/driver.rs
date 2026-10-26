@@ -117,6 +117,7 @@ pub(crate) mod harness;
 mod harness_output_monitor;
 pub(crate) mod mcp_startup;
 pub(super) mod output;
+mod preview_retention;
 mod prewarmed;
 mod snapshot;
 pub(crate) mod terminal;
@@ -124,6 +125,7 @@ mod termination;
 
 use environment::PrepareEnvironmentError;
 pub(crate) use mcp_startup::MCP_SERVER_STARTUP_TIMEOUT;
+use preview_retention::PreviewRetention;
 pub(crate) use snapshot::upload_snapshot_for_handoff;
 use terminal::TerminalDriverEvent;
 use termination::{Interrupt, InterruptWatch, RunEndCause};
@@ -278,6 +280,7 @@ pub(crate) struct IdleTimeoutSender<T: Send + 'static> {
     /// exact moment of commitment, rather than only after the completion reaches the model
     /// thread via the oneshot and any further async plumbing (QUALITY-1801).
     on_commit: Arc<dyn Fn() + Send + Sync>,
+    preview_retention: Option<PreviewRetention>,
 }
 
 // Hand-written so cloning does not require `T: Clone`. Every field is a shared handle, so
@@ -290,6 +293,7 @@ impl<T: Send + 'static> Clone for IdleTimeoutSender<T> {
             pending: Arc::clone(&self.pending),
             wait: Arc::clone(&self.wait),
             on_commit: Arc::clone(&self.on_commit),
+            preview_retention: self.preview_retention.clone(),
         }
     }
 }
@@ -303,6 +307,7 @@ impl<T: Send + 'static> IdleTimeoutSender<T> {
             pending: Arc::new(Mutex::new(None)),
             wait: Arc::new(RealIdleWait),
             on_commit: Arc::new(|| {}),
+            preview_retention: None,
         }
     }
 
@@ -318,6 +323,7 @@ impl<T: Send + 'static> IdleTimeoutSender<T> {
         if let Ok(mut guard) = self.tx_cell.lock()
             && let Some(sender) = guard.take()
         {
+            self.generation.fetch_add(1, Ordering::SeqCst);
             (self.on_commit)();
             let _ = sender.send(value);
         }
@@ -325,34 +331,63 @@ impl<T: Send + 'static> IdleTimeoutSender<T> {
 
     /// End the run after `timeout` by sending `value`, unless cancelled before then.
     pub(crate) fn end_run_after(&self, timeout: Duration, value: T) {
+        self.schedule_idle_timeout(timeout, value, false);
+    }
+
+    fn schedule_idle_timeout(&self, timeout: Duration, value: T, retain_previews: bool) {
         // Increment the generation counter to invalidate any existing timers,
         // then capture the new generation for our timer to check against.
-        let current_gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let tx_cell = Arc::clone(&self.tx_cell);
-        let generation = Arc::clone(&self.generation);
+        let current_gen = {
+            let Ok(_guard) = self.tx_cell.lock() else {
+                return;
+            };
+            self.generation.fetch_add(1, Ordering::SeqCst) + 1
+        };
+        let sender = self.clone();
         let wait = Arc::clone(&self.wait);
-        let on_commit = Arc::clone(&self.on_commit);
 
         // Spawn a background thread that will complete the oneshot after the idle timeout,
         // unless a follow-up query resets the timer (by bumping the generation counter).
         thread::spawn(move || {
             wait.wait(timeout);
-
-            // Check if our timer generation is still current. If not, a follow-up
-            // query or other activity has "cancelled" this timer by bumping the generation.
-            if generation.load(Ordering::SeqCst) != current_gen {
-                return;
-            }
-            if let Ok(mut guard) = tx_cell.lock()
-                && let Some(sender) = guard.take()
-            {
-                // Commit before sending: this is the only signal the model layer ever gets
-                // that a deferred window has elapsed, so it must land before the completion
-                // is observable at all (QUALITY-1801).
-                on_commit();
-                let _ = sender.send(value);
+            if retain_previews && let Some(retention) = sender.preview_retention.clone() {
+                let background = retention.background.clone();
+                background
+                    .spawn(async move {
+                        sender
+                            .finish_retained_idle(current_gen, value, retention)
+                            .await;
+                    })
+                    .detach();
+            } else {
+                sender.commit_idle_timeout(current_gen, value);
             }
         });
+    }
+    async fn finish_retained_idle(&self, generation: usize, value: T, retention: PreviewRetention) {
+        while self.generation.load(Ordering::SeqCst) == generation {
+            let delay = (retention.check)().await;
+            if self.generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            match delay {
+                Some(delay) => (retention.wait)(delay).await,
+                None => {
+                    self.commit_idle_timeout(generation, value);
+                    return;
+                }
+            }
+        }
+    }
+
+    fn commit_idle_timeout(&self, generation: usize, value: T) {
+        if let Ok(mut guard) = self.tx_cell.lock()
+            && self.generation.load(Ordering::SeqCst) == generation
+            && let Some(sender) = guard.take()
+        {
+            (self.on_commit)();
+            let _ = sender.send(value);
+        }
     }
 
     /// Cancel any pending idle timers.
@@ -363,7 +398,8 @@ impl<T: Send + 'static> IdleTimeoutSender<T> {
         if let Ok(mut pending) = self.pending.lock() {
             *pending = None;
         }
-        if self.generation.load(Ordering::SeqCst) > 0 {
+        // Serialize invalidation with the final generation check and synchronous exit commitment.
+        if let Ok(_guard) = self.tx_cell.lock() {
             self.generation.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -376,7 +412,7 @@ impl<T: Send + 'static> IdleTimeoutSender<T> {
                 self.cancel_idle_timeout();
                 self.end_run_now(value);
             }
-            Some(idle_timeout) => self.end_run_after(idle_timeout, value),
+            Some(idle_timeout) => self.schedule_idle_timeout(idle_timeout, value, true),
             None => self.end_run_now(value),
         }
     }
@@ -388,10 +424,14 @@ impl<T: Clone + Send + 'static> IdleTimeoutSender<T> {
     /// Re-arming replaces the recorded outcome, so a run that fails, resumes, and fails again
     /// exits reporting its most recent failure.
     fn arm_refreshable(&self, window: Duration, value: T) {
+        if window.is_zero() {
+            self.complete_with_optional_idle(Some(window), value);
+            return;
+        }
         if let Ok(mut pending) = self.pending.lock() {
             *pending = Some((value.clone(), window));
         }
-        self.end_run_after(window, value);
+        self.schedule_idle_timeout(window, value, true);
     }
 
     /// Push an armed deadline out by its original window. Returns that window, or `None` if
@@ -401,7 +441,7 @@ impl<T: Clone + Send + 'static> IdleTimeoutSender<T> {
             let pending = self.pending.lock().ok()?;
             pending.clone()?
         };
-        self.end_run_after(window, value);
+        self.schedule_idle_timeout(window, value, true);
         Some(window)
     }
 }
@@ -654,6 +694,8 @@ pub struct AgentDriverOptions {
     pub environment_variables: HashMap<String, String>,
     /// ID of the task being executed.
     pub task_id: Option<AmbientAgentTaskId>,
+    /// Execution identity supplied by the cloud launch.
+    pub execution_id: Option<String>,
     pub use_factory_repositories: bool,
     /// Server-owned experiments retained without client interpretation.
     pub experimental: Option<serde_json::Map<String, serde_json::Value>>,
@@ -719,6 +761,7 @@ struct RunConfiguration {
     preparation_file: Option<environment_preparation::PreparationFile>,
     secrets: HashMap<String, ManagedSecretValue>,
     task_id: Option<AmbientAgentTaskId>,
+    execution_id: Option<String>,
     use_factory_repositories: bool,
     experimental: Option<serde_json::Map<String, serde_json::Value>>,
     parent_run_id: Option<String>,
@@ -755,6 +798,7 @@ fn split_run_options(
         secrets,
         environment_variables,
         task_id,
+        execution_id,
         use_factory_repositories,
         experimental,
         parent_run_id,
@@ -874,6 +918,7 @@ fn split_run_options(
             preparation_file,
             secrets,
             task_id,
+            execution_id,
             use_factory_repositories,
             experimental,
             parent_run_id,
@@ -943,6 +988,7 @@ pub struct AgentDriver {
 
     // The associated task ID for this agent run, if any.
     task_id: Option<AmbientAgentTaskId>,
+    execution_id: Option<String>,
     use_factory_repositories: bool,
     #[allow(
         dead_code,
@@ -1329,6 +1375,25 @@ impl From<PrepareEnvironmentError> for AgentDriverError {
 }
 
 impl AgentDriver {
+    fn idle_timeout_sender<T: Send + 'static>(
+        &self,
+        tx: oneshot::Sender<T>,
+        ctx: &ModelContext<Self>,
+    ) -> IdleTimeoutSender<T> {
+        let mut sender = IdleTimeoutSender::new(tx);
+        if preview_retention::is_namespace_sandbox(warp_isolation_platform::detect())
+            && let Some(task_id) = self.task_id
+        {
+            sender.preview_retention = PreviewRetention::new(
+                task_id,
+                self.execution_id.as_deref(),
+                ServerApiProvider::as_ref(ctx).get_ai_client(),
+                ctx.background_executor(),
+            );
+        }
+        sender
+    }
+
     /// Creates the driver and terminal without running workspace setup or submitting a prompt.
     #[tracing::instrument(name = "AgentDriver::create", skip_all, err, fields(
         tags.cloud_agent = true,
@@ -1433,6 +1498,7 @@ impl AgentDriver {
             _preparation_file: None,
             output_format: OutputFormat::default(),
             task_id: None,
+            execution_id: None,
             use_factory_repositories: false,
             experimental: None,
             team_scope: None,
@@ -1479,6 +1545,7 @@ impl AgentDriver {
             preparation_file,
             secrets,
             task_id,
+            execution_id,
             use_factory_repositories,
             experimental,
             parent_run_id,
@@ -1506,6 +1573,7 @@ impl AgentDriver {
         self._preparation_file = preparation_file;
         self.secrets = Arc::new(secrets);
         self.task_id = task_id;
+        self.execution_id = execution_id;
         self.use_factory_repositories = use_factory_repositories;
         self.factory_repository_contract = use_factory_repositories;
         self.experimental = experimental;
@@ -2496,8 +2564,8 @@ impl AgentDriver {
         Self::report_failure_before_lingering(foreground, stage, error, window).await;
 
         let (tx, rx) = oneshot::channel::<()>();
-        let controller = DebugWindowController::new(IdleTimeoutSender::new(tx));
         let armed = foreground.spawn(move |me, ctx| {
+            let controller = DebugWindowController::new(me.idle_timeout_sender(tx, ctx));
             me.arm_setup_failure_debug_window(controller, window, ctx);
         });
         if let Err(error) = armed.await {
@@ -2833,7 +2901,9 @@ impl AgentDriver {
         events: &SetupClientEventReporter,
     ) -> Result<oneshot::Receiver<()>, AgentDriverError> {
         let (exit_tx, exit_rx) = oneshot::channel();
-        let harness_exit = IdleTimeoutSender::new(exit_tx);
+        let harness_exit = foreground
+            .spawn(move |me, ctx| me.idle_timeout_sender(exit_tx, ctx))
+            .await?;
 
         // Harnesses that report progress through the native conversation instead of a CLI agent
         // session have no hook plugin to install; the conversation's own status drives their
@@ -3635,7 +3705,7 @@ impl AgentDriver {
         #[cfg(test)]
         let post_commit_gate = tests::test_post_commit_gate();
         #[cfg_attr(not(test), allow(unused_mut))]
-        let mut run_exit = IdleTimeoutSender::new(internal_tx).with_on_commit({
+        let mut run_exit = self.idle_timeout_sender(internal_tx, ctx).with_on_commit({
             let committed_conversation_id = Arc::clone(&committed_conversation_id);
             move || {
                 if let Ok(guard) = committed_conversation_id.lock()

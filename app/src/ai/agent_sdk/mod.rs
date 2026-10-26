@@ -725,6 +725,7 @@ fn build_execution_task_and_options(
     let options = AgentDriverOptions {
         working_dir: working_dir.clone(),
         task_id: Some(task_id),
+        execution_id: Some(execution_id.to_owned()),
         use_factory_repositories,
         experimental: None,
         parent_run_id: config.parent_run_id.map(|id| id.into_inner()),
@@ -1533,6 +1534,7 @@ impl AgentDriverRunner {
                 let driver_options = driver::AgentDriverOptions {
                     working_dir: working_dir.clone(),
                     task_id,
+                    execution_id: args.execution_id.clone(),
                     use_factory_repositories,
                     experimental: None,
                     parent_run_id: None,

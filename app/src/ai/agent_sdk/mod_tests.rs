@@ -650,6 +650,7 @@ pub(crate) fn agent_driver_options() -> AgentDriverOptions {
     AgentDriverOptions {
         working_dir: std::env::current_dir().unwrap(),
         task_id: None,
+        execution_id: None,
         use_factory_repositories: false,
         experimental: None,
         parent_run_id: None,
