@@ -350,7 +350,10 @@ impl<T: Send + 'static> IdleTimeoutSender<T> {
         // unless a follow-up query resets the timer (by bumping the generation counter).
         thread::spawn(move || {
             wait.wait(timeout);
-            if retain_previews && let Some(retention) = sender.preview_retention.clone() {
+            if retain_previews
+                && !timeout.is_zero()
+                && let Some(retention) = sender.preview_retention.clone()
+            {
                 let background = retention.background.clone();
                 background
                     .spawn(async move {
@@ -424,10 +427,6 @@ impl<T: Clone + Send + 'static> IdleTimeoutSender<T> {
     /// Re-arming replaces the recorded outcome, so a run that fails, resumes, and fails again
     /// exits reporting its most recent failure.
     fn arm_refreshable(&self, window: Duration, value: T) {
-        if window.is_zero() {
-            self.complete_with_optional_idle(Some(window), value);
-            return;
-        }
         if let Ok(mut pending) = self.pending.lock() {
             *pending = Some((value.clone(), window));
         }

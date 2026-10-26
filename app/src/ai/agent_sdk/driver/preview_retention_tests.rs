@@ -207,6 +207,40 @@ impl super::super::IdleWait for SynchronizedIdleWait {
 }
 
 #[test]
+fn preview_retention_zero_failure_window_bypasses_check() {
+    let (tx, rx) = oneshot::channel();
+    let mut sender = IdleTimeoutSender::new(tx);
+    sender.wait = Arc::new(NoIdleWait);
+    sender.preview_retention = Some(retention(
+        || panic!("zero window must bypass check"),
+        |_| unreachable!(),
+    ));
+
+    sender.arm_refreshable(Duration::ZERO, 7);
+
+    assert_eq!(block_on(rx).unwrap(), 7);
+}
+
+#[test]
+fn preview_retention_zero_failure_window_remains_refreshable_without_check() {
+    let (tx, mut rx) = oneshot::channel();
+    let mut sender = IdleTimeoutSender::new(tx);
+    let wait = Arc::new(SynchronizedIdleWait(std::sync::Barrier::new(3)));
+    sender.wait = wait.clone();
+    sender.preview_retention = Some(retention(
+        || panic!("refreshed zero window must bypass check"),
+        |_| unreachable!(),
+    ));
+
+    sender.arm_refreshable(Duration::ZERO, 7);
+
+    assert_eq!(rx.try_recv().unwrap(), None);
+    assert_eq!(sender.refresh(), Some(Duration::ZERO));
+    wait.0.wait();
+    assert_eq!(block_on(rx).unwrap(), 7);
+}
+
+#[test]
 fn preview_retention_refreshed_failure_window_checks_before_commit() {
     let (tx, rx) = oneshot::channel();
     let checks = Arc::new(AtomicUsize::new(0));
