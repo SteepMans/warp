@@ -113,6 +113,11 @@ struct ErrorRow {
     error: LocalAutomationError,
     edit_mouse_state: MouseStateHandle,
 }
+fn sort_automations_enabled_first(automations: &mut [LocalAutomation]) {
+    // `sort_by_key` is stable, retaining the configuration order within each
+    // enabled state.
+    automations.sort_by_key(|automation| !automation.enabled);
+}
 
 /// Local Automations list body used by the Settings page.
 pub struct LocalAutomationsView {
@@ -239,13 +244,14 @@ impl LocalAutomationsView {
     }
 
     fn refresh(&mut self, ctx: &mut ViewContext<Self>) {
-        let (automations, errors) = {
+        let (mut automations, errors) = {
             let config = WarpConfig::as_ref(ctx);
             (
                 config.local_automations().clone(),
                 config.local_automation_errors().clone(),
             )
         };
+        sort_automations_enabled_first(&mut automations);
 
         self.rows = automations
             .into_iter()
@@ -549,8 +555,7 @@ impl LocalAutomationsView {
             .finish();
 
         Container::new(Self::render_card_chrome(
-            content,
-            true,  /* filled_background */
+            content, true,  /* filled_background */
             false, /* hover_fill */
             false, /* is_hovered */
             appearance,
@@ -776,6 +781,52 @@ impl LocalAutomationsView {
         {
             let _ = path;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn automation(name: &str, enabled: bool) -> LocalAutomation {
+        LocalAutomation::parse(&format!(
+            r#"
+name = "{name}"
+enabled = {enabled}
+schedule = "@daily"
+cwd = "/tmp"
+
+[runner]
+type = "shell"
+command = "true"
+"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn sort_automations_enabled_first_is_stable_within_each_state() {
+        let mut automations = vec![
+            automation("disabled first", false),
+            automation("enabled first", true),
+            automation("disabled second", false),
+            automation("enabled second", true),
+        ];
+
+        sort_automations_enabled_first(&mut automations);
+
+        assert_eq!(
+            automations
+                .iter()
+                .map(|automation| automation.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "enabled first",
+                "enabled second",
+                "disabled first",
+                "disabled second",
+            ],
+        );
     }
 }
 
