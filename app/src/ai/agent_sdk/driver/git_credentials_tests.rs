@@ -661,7 +661,19 @@ fn managed_auth_is_private_with_a_shared_home() -> Result<()> {
         assert!(!Path::new(&scoped_root).exists());
         return Ok(());
     };
-    isolate_managed_auth("isolation-test")?;
+    #[cfg(unix)]
+    if std::env::var_os("WARP_GIT_AUTH_BINDING").is_none() {
+        std::fs::write(
+            PathBuf::from(&shared_home).join("agent-pid"),
+            std::process::id().to_string(),
+        )?;
+    }
+    let _managed_auth_scope = isolate_managed_auth("isolation-test")?;
+    #[cfg(unix)]
+    assert_eq!(
+        std::fs::read_to_string(PathBuf::from(&shared_home).join("agent-pid"))?,
+        std::process::id().to_string(),
+    );
     assert_eq!(std::env::var_os("HOME"), Some(shared_home.clone()));
     std::fs::write(
         PathBuf::from(&shared_home).join("scoped-root"),

@@ -131,9 +131,21 @@ fn home_dir() -> Result<PathBuf> {
 }
 
 #[cfg(not(target_family = "wasm"))]
-pub(crate) fn isolate_managed_auth(binding: &str) -> Result<()> {
+pub(crate) struct ManagedAuthScope(PathBuf);
+
+#[cfg(not(target_family = "wasm"))]
+impl Drop for ManagedAuthScope {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn isolate_managed_auth(binding: &str) -> Result<ManagedAuthScope> {
     if std::env::var("WARP_GIT_AUTH_BINDING").as_deref() == Ok(binding) {
-        return Ok(());
+        let root = std::env::var_os("WARP_GIT_AUTH_DIR")
+            .context("Missing managed Git authentication directory")?;
+        return Ok(ManagedAuthScope(root.into()));
     }
     let directory = tempfile::Builder::new().prefix("oz-git-auth-").tempdir()?;
     #[cfg(unix)]
@@ -167,13 +179,21 @@ pub(crate) fn isolate_managed_auth(binding: &str) -> Result<()> {
     ] {
         command.env_remove(name);
     }
-    // A supervisor owns the temporary credentials until the child exits; changing HOME would
-    // isolate unrelated runner state, while mutating this process's environment is not thread-safe.
-    let status = command
-        .status()
-        .context("Failed to enter managed Git authentication scope")?;
-    drop(directory);
-    std::process::exit(status.code().unwrap_or(1));
+    // Direct runner cancellation targets this PID. Re-exec also avoids changing a multithreaded
+    // process's environment while retaining the runner's shared HOME.
+    #[cfg(unix)]
+    {
+        use command::unix::CommandExt as _;
+        Err(command.exec()).context("Failed to enter managed Git authentication scope")
+    }
+    #[cfg(windows)]
+    {
+        let status = command
+            .status()
+            .context("Failed to enter managed Git authentication scope")?;
+        drop(directory);
+        std::process::exit(status.code().unwrap_or(1));
+    }
 }
 
 /// Resolves `~` the way git does on Windows: from the environment, not from the profile of the
