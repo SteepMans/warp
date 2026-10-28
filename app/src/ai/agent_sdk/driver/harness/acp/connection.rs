@@ -440,6 +440,9 @@ async fn read_loop<R: AsyncRead + Unpin>(
             (None, None) => log::warn!("Ignoring ACP message with neither id nor method"),
         }
     }
+    // Closed before pending requests fail, so a caller that sees a request fail on EOF also
+    // sees the notification stream closed.
+    notifications.close();
     for (_, tx) in pending.lock().await.drain() {
         let _ = tx.send(Err(anyhow!("ACP agent closed its stdout")));
     }

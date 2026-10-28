@@ -286,6 +286,8 @@ enum HostEvent {
         settling: bool,
     },
     InterruptedTerminal,
+    /// The host could not open a request stream.
+    BeginFailed,
     ShowQueued(String),
     HideQueued(QueuedQueryId),
     Stopped,
@@ -303,6 +305,8 @@ struct RecordingHost {
     apply_gate: Mutex<Option<oneshot::Receiver<()>>>,
     snapshot_gate: Mutex<Option<oneshot::Receiver<()>>>,
     actions: Mutex<Vec<(ResponseStreamId, Vec<ClientAction>)>>,
+    /// How many of the next `begin_turn` calls fail.
+    begin_failures: Mutex<usize>,
 }
 
 impl RecordingHost {
@@ -317,6 +321,7 @@ impl RecordingHost {
             apply_gate: Mutex::default(),
             snapshot_gate: Mutex::default(),
             actions: Mutex::default(),
+            begin_failures: Mutex::new(0),
         }
     }
 
@@ -424,6 +429,16 @@ fn message_texts(actions: &[ClientAction]) -> Vec<String> {
 #[async_trait]
 impl TurnHost for RecordingHost {
     async fn begin_turn(&self, initiator: Option<ParticipantId>) -> Result<ExternalHarnessTurn> {
+        let failed = {
+            let mut failures = self.begin_failures.lock();
+            let failed = *failures > 0;
+            *failures = failures.saturating_sub(1);
+            failed
+        };
+        if failed {
+            self.record(HostEvent::BeginFailed);
+            return Err(anyhow!("the conversation is gone"));
+        }
         let n = {
             let mut opened = self.streams_opened.lock();
             *opened += 1;
@@ -2003,4 +2018,104 @@ fn a_ready_final_beats_retry_and_grace_and_drains_ready_input_into_the_held_batc
         event,
         HostEvent::InterruptedTerminal | HostEvent::Cancelled { .. }
     )));
+}
+
+#[test]
+fn follow_ups_held_through_a_failed_turn_go_out_as_the_next_turn() {
+    let (driver, mut mapper, mut fixture) = start_steering();
+    let script = async {
+        let first = fixture.agent.next_prompt().await;
+        fixture.send_follow_up("kept").await;
+        let steer = fixture.agent.next_steer().await;
+        fixture
+            .agent
+            .send(json!({
+                "jsonrpc": "2.0",
+                "id": first["id"],
+                "error": { "code": -32603, "message": "model overloaded" },
+            }))
+            .await;
+        fixture.agent.answer_steer(&steer, "promptRequired").await;
+
+        let second = fixture.agent.next_prompt().await;
+        assert_eq!(prompt_text(&second), "kept");
+        fixture.agent.respond(&second, "end_turn").await;
+        fixture.host.wait_for_finished(2).await;
+        fixture.unbind()
+    };
+    let ((host, state), ()) = block_on(join(script, driver.run(&mut mapper)));
+
+    let streams = host.streams();
+    assert_eq!(streams.len(), 2, "{:?}", host.events());
+    let events = host.events();
+    assert!(
+        events.contains(&HostEvent::Finished {
+            stream: streams[0].clone(),
+            reason: "internal_error",
+            settling: true,
+        }),
+        "the failed turn ends with the follow-up still to send: {events:?}"
+    );
+    assert_eq!(host.texts_on(&streams[1]), vec!["kept"]);
+    assert!(host.queued_rows.lock().is_empty());
+    assert!(!state.is_settling());
+}
+
+#[test]
+fn a_follow_up_turn_that_fails_to_open_is_retried_once() {
+    let (driver, mut mapper, mut fixture) = start_default();
+    let script = async {
+        let first = fixture.agent.next_prompt().await;
+        fixture.agent.respond(&first, "end_turn").await;
+        fixture.host.wait_for_finished(1).await;
+
+        *fixture.host.begin_failures.lock() = 1;
+        fixture.send_follow_up("next").await;
+        let second = fixture.agent.next_prompt().await;
+        assert_eq!(prompt_text(&second), "next");
+        fixture.agent.respond(&second, "end_turn").await;
+        fixture.host.wait_for_finished(2).await;
+        fixture.unbind()
+    };
+    let ((host, _), ()) = block_on(join(script, driver.run(&mut mapper)));
+
+    let streams = host.streams();
+    assert_eq!(streams.len(), 2, "{:?}", host.events());
+    assert_eq!(host.texts_on(&streams[1]), vec!["next"]);
+    assert!(host.events().contains(&HostEvent::BeginFailed));
+}
+
+#[test]
+fn a_follow_up_turn_that_cannot_be_opened_is_dropped_and_later_follow_ups_still_run() {
+    let (driver, mut mapper, mut fixture) = start_default();
+    let script = async {
+        let first = fixture.agent.next_prompt().await;
+        fixture.agent.respond(&first, "end_turn").await;
+        fixture.host.wait_for_finished(1).await;
+
+        *fixture.host.begin_failures.lock() = 2;
+        fixture.send_follow_up("lost").await;
+        fixture
+            .host
+            .wait_for(|events| {
+                events
+                    .iter()
+                    .filter(|event| **event == HostEvent::BeginFailed)
+                    .count()
+                    == 2
+            })
+            .await;
+        fixture.send_follow_up("later").await;
+        let second = fixture.agent.next_prompt().await;
+        assert_eq!(prompt_text(&second), "later");
+        fixture.agent.respond(&second, "end_turn").await;
+        fixture.host.wait_for_finished(2).await;
+        fixture.unbind()
+    };
+    let ((host, state), ()) = block_on(join(script, driver.run(&mut mapper)));
+
+    let streams = host.streams();
+    assert_eq!(streams.len(), 2, "{:?}", host.events());
+    assert_eq!(host.texts_on(&streams[1]), vec!["later"]);
+    assert!(!state.is_settling());
 }

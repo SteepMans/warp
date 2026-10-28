@@ -24,6 +24,7 @@ use futures::stream::FuturesOrdered;
 use futures::{FutureExt, StreamExt, future, pin_mut, select, select_biased};
 use parking_lot::Mutex;
 use session_sharing_protocol::common::ParticipantId;
+use warp_errors::report_error;
 use warp_multi_agent_api::ClientAction;
 use warp_multi_agent_api::response_event::{StreamFinished, stream_finished};
 use warpui::r#async::Timer;
@@ -316,6 +317,8 @@ impl TurnDriver {
                 }
             }
         }
+        // Count what was still waiting in the channel too, not only what was already held.
+        self.pending_follow_ups();
         self.fail_queued("the harness exited before the follow-up could be sent")
             .await;
         self.host.turn_driver_stopped().await;
@@ -340,12 +343,18 @@ impl TurnDriver {
             .pending_follow_ups()
             .front()
             .map(|follow_up| follow_up.prompt.participant_id.clone());
-        let next = match self.host.begin_turn(initiator).await {
+        let next = match self.host.begin_turn(initiator.clone()).await {
             Ok(next) => next,
             Err(error) => {
-                self.fail_queued("the follow-up turn could not be opened")
-                    .await;
-                return Err(error);
+                log::warn!("Could not open an ACP follow-up turn; retrying once: {error:#}");
+                match self.host.begin_turn(initiator).await {
+                    Ok(next) => next,
+                    Err(error) => {
+                        self.fail_queued("the follow-up turn could not be opened")
+                            .await;
+                        return Err(error);
+                    }
+                }
             }
         };
         mapper.start_segment(next.request_id.clone());
@@ -447,6 +456,8 @@ impl TurnDriver {
             Ok(None) => Ok(TurnOutcome::Cancelled),
             Err(error) => Err(error),
         };
+        // A turn that failed mid-prompt can leave steers unanswered; they are held like the rest.
+        self.hold_steers();
         let finish_events = mapper.finish_events();
         if let Err(error) = self.apply_events(mapper, finish_events).await {
             log::warn!("Failed to settle ACP tool calls: {error}");
@@ -484,8 +495,10 @@ impl TurnDriver {
         }
         self.request_save().await;
         self.state.set_in_turn(false);
-        if turn_result.is_err() {
-            self.fail_queued("the harness turn failed before the follow-up could be sent")
+        // Follow-ups held through a failed turn go out as the next turn while the agent is still
+        // connected; once it has gone they cannot be delivered.
+        if turn_result.is_err() && self.notifications.is_closed() {
+            self.fail_queued("the agent disconnected before the follow-up could be sent")
                 .await;
         }
         turn_result
@@ -891,9 +904,15 @@ impl TurnDriver {
         self.state.set_settling(false);
         self.hold_steers();
         if !self.queued.is_empty() {
+            // The server counts a follow-up as delivered once the session took it, so nothing
+            // retries these.
             log::warn!(
                 "Dropping {} held ACP follow-up(s): {reason}",
                 self.queued.len()
+            );
+            report_error!(
+                anyhow!("Dropped held ACP follow-ups"),
+                extra: { "count" => %self.queued.len(), "reason" => %reason }
             );
         }
         while let Some(QueuedFollowUp { row, .. }) = self.queued.pop_front() {
