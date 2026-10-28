@@ -15,8 +15,9 @@ use warp_core::send_telemetry_from_ctx;
 use warp_errors::report_error;
 use warp_graphql::queries::get_runners::RunnerSortBy;
 use warpui::elements::{
-    Border, ChildAnchor, ChildView, Container, CornerRadius, CrossAxisAlignment, Empty, Flex,
-    OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds, Radius, Stack, Text, Wrap,
+    Border, ChildAnchor, ChildView, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
+    Empty, Expanded, Flex, OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds,
+    Radius, Stack, Text, Wrap,
 };
 use warpui::keymap::FixedBinding;
 use warpui::{
@@ -1603,7 +1604,7 @@ fn populate_run_agents_model_picker(
     model_state.model_id = model_id.to_string();
     let snapshot = model_snapshot(&model_state, ctx);
     let inherited_label = match child_index {
-        Some(_) if !state.model_id.is_empty() => format!("Use batch default ({})", state.model_id),
+        Some(_) if !state.model_id.is_empty() => "Use batch default".to_string(),
         Some(_) => "Use agent default".to_string(),
         None => "Use agent defaults".to_string(),
     };
@@ -1703,6 +1704,7 @@ fn render_confirmation_card(
 
     content.add_child(render_editor(
         orchestration_config_state,
+        card,
         handles,
         disabled_reason,
         scope,
@@ -1754,7 +1756,9 @@ fn render_body(
     let mut column = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
 
     column.add_child(render_summary(card, appearance));
-    column.add_child(render_agents_section(card, handles, app));
+    if !FeatureFlag::ChildModelRouting.is_enabled() {
+        column.add_child(render_agents_section(card, handles, app));
+    }
 
     Container::new(column.finish())
         .with_horizontal_padding(16.)
@@ -1807,7 +1811,11 @@ fn render_summary(card: &RunAgentsCardFields, appearance: &Appearance) -> Box<dy
     }
 
     Container::new(column.finish())
-        .with_margin_bottom(12.)
+        .with_margin_bottom(if FeatureFlag::ChildModelRouting.is_enabled() {
+            0.
+        } else {
+            12.
+        })
         .finish()
 }
 
@@ -1828,19 +1836,25 @@ fn render_agents_section(
 
     let agents = if FeatureFlag::ChildModelRouting.is_enabled() {
         Flex::column()
-            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_spacing(8.)
+            .with_cross_axis_alignment(CrossAxisAlignment::Start)
+            .with_spacing(6.)
             .with_children(
                 card.agent_run_configs
                     .iter()
                     .zip(&handles.child_model_pickers)
                     .map(|(cfg, picker)| {
-                        Flex::column()
-                            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-                            .with_spacing(4.)
-                            .with_child(render_static_agent_pill(&cfg.name, app))
-                            .with_child(ChildView::new(picker).finish())
-                            .finish()
+                        ConstrainedBox::new(
+                            Flex::row()
+                                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                                .with_spacing(8.)
+                                .with_child(render_static_agent_pill(&cfg.name, app))
+                                .with_child(
+                                    Expanded::new(1., ChildView::new(picker).finish()).finish(),
+                                )
+                                .finish(),
+                        )
+                        .with_max_width(360.)
+                        .finish()
                     }),
             )
             .finish()
@@ -2069,12 +2083,12 @@ fn render_status_only_card(
 
 fn render_editor(
     orchestration_config_state: &OrchestrationConfigState,
+    card: &RunAgentsCardFields,
     handles: &RunAgentsCardHandles,
     disabled_reason: Option<String>,
     scope: &(impl TeamScope + ?Sized),
     app: &AppContext,
 ) -> Box<dyn Element> {
-    use warpui::elements::ConstrainedBox;
     let appearance = Appearance::as_ref(app);
     let theme = appearance.theme();
     let mut column = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Stretch);
@@ -2105,6 +2119,13 @@ fn render_editor(
         appearance,
         oc::runner_controls_enabled(app),
     ));
+    if FeatureFlag::ChildModelRouting.is_enabled() {
+        column.add_child(
+            Container::new(render_agents_section(card, handles, app))
+                .with_margin_top(12.)
+                .finish(),
+        );
+    }
 
     if let Some(reason) = disabled_reason {
         column.add_child(oc::render_validation_error(
