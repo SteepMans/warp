@@ -50,6 +50,23 @@ struct RunAgentsTestState {
     start_agent_executor: ModelHandle<StartAgentExecutor>,
 }
 
+#[test]
+fn child_model_overrides_require_a_batch_fallback_only_when_routing_is_enabled() {
+    for enabled in [false, true] {
+        let _child_models = FeatureFlag::ChildModelRouting.override_enabled(enabled);
+        let AIAgentActionType::RunAgents(mut request) = remote_run_agents_action("oz").action
+        else {
+            panic!("expected run_agents action");
+        };
+        assert!(validate_request(&request).is_ok());
+        request.model_id = " \t".to_string();
+        request.agent_run_configs[0].model_id = "child-model".to_string();
+        assert_eq!(validate_request(&request).is_err(), enabled);
+        request.model_id = "batch-model".to_string();
+        assert!(validate_request(&request).is_ok());
+    }
+}
+
 #[derive(Default)]
 struct CapturedStartAgentRequests(Vec<StartAgentRequest>);
 
@@ -101,7 +118,7 @@ fn persist_plan_config_with_harness(
 }
 
 #[test]
-fn disabled_child_model_routing_denies_instead_of_launching_or_waiting_for_approval() {
+fn disabled_child_model_routing_preserves_batch_confirmation_policy() {
     let _child_models = FeatureFlag::ChildModelRouting.override_enabled(false);
     for mode in [ExecutionMode::App, ExecutionMode::Sdk] {
         App::test((), |mut app| async move {
@@ -112,31 +129,15 @@ fn disabled_child_model_routing_denies_instead_of_launching_or_waiting_for_appro
             };
             request.agent_run_configs[0].model_id = "child-model".to_string();
             state.executor.update(&mut app, |executor, ctx| {
-                assert!(executor.should_autoexecute(
-                    ExecuteActionInput {
-                        action: &action,
-                        conversation_id: state.conversation_id
-                    },
-                    ctx,
-                ));
-                let execution = executor
-                    .execute(
+                assert_eq!(
+                    executor.should_autoexecute(
                         ExecuteActionInput {
                             action: &action,
-                            conversation_id: state.conversation_id,
+                            conversation_id: state.conversation_id
                         },
                         ctx,
-                    )
-                    .into();
-                let AnyActionExecution::Sync(AIAgentActionResultType::RunAgents(
-                    RunAgentsResult::Denied { reason },
-                )) = execution
-                else {
-                    panic!("expected synchronous denial");
-                };
-                assert_eq!(
-                    reason,
-                    "Per-child model overrides are not enabled on this client."
+                    ),
+                    mode == ExecutionMode::Sdk
                 );
             });
         });
@@ -482,53 +483,60 @@ fn local_codex_run_agents_maps_to_local_harness_mode_when_flag_enabled() {
 
 #[test]
 fn child_models_survive_approved_batch_defaults_and_local_remote_translation() {
-    let AIAgentActionType::RunAgents(mut request) = remote_run_agents_action("oz").action else {
-        panic!("expected run_agents action");
-    };
-    request.model_id = "original-batch".to_string();
-    request.agent_run_configs[0].model_id = " child-model ".to_string();
-    let mut fallback = request.agent_run_configs[0].clone();
-    fallback.name = "fallback".to_string();
-    fallback.model_id.clear();
-    request.agent_run_configs.push(fallback);
-    resolve_request_from_config(
-        &mut request,
-        &OrchestrationConfig {
-            model_id: "approved-batch".to_string(),
-            harness_type: "oz".to_string(),
-            execution_mode: OrchestrationExecutionMode::Local,
-        },
-    );
-    assert_eq!(request.agent_run_configs[0].model_id, " child-model ");
-    for execution_mode in [
-        RunAgentsExecutionMode::Local,
-        RunAgentsExecutionMode::Remote {
-            environment_id: "env-1".to_string(),
-            worker_host: "warp".to_string(),
-            computer_use_enabled: false,
-            runner_id: String::new(),
-        },
-    ] {
-        for (cfg, expected_model) in request
-            .agent_run_configs
-            .iter()
-            .zip(["child-model", "approved-batch"])
-        {
-            let mode = run_agents_to_start_agent_mode(
-                &execution_mode,
-                &request.harness_type,
-                &request.model_id,
-                &[],
-                None,
-                cfg,
-            )
-            .unwrap();
-            match mode {
-                StartAgentExecutionMode::Local { model_id, .. } => {
-                    assert_eq!(model_id.as_deref(), Some(expected_model));
-                }
-                StartAgentExecutionMode::Remote { model_id, .. } => {
-                    assert_eq!(model_id, expected_model);
+    for enabled in [false, true] {
+        let _child_models = FeatureFlag::ChildModelRouting.override_enabled(enabled);
+        let AIAgentActionType::RunAgents(mut request) = remote_run_agents_action("oz").action
+        else {
+            panic!("expected run_agents action");
+        };
+        request.model_id = "original-batch".to_string();
+        request.agent_run_configs[0].model_id = " child-model ".to_string();
+        let mut fallback = request.agent_run_configs[0].clone();
+        fallback.name = "fallback".to_string();
+        fallback.model_id.clear();
+        request.agent_run_configs.push(fallback);
+        resolve_request_from_config(
+            &mut request,
+            &OrchestrationConfig {
+                model_id: "approved-batch".to_string(),
+                harness_type: "oz".to_string(),
+                execution_mode: OrchestrationExecutionMode::Local,
+            },
+        );
+        assert_eq!(request.agent_run_configs[0].model_id, " child-model ");
+        for execution_mode in [
+            RunAgentsExecutionMode::Local,
+            RunAgentsExecutionMode::Remote {
+                environment_id: "env-1".to_string(),
+                worker_host: "warp".to_string(),
+                computer_use_enabled: false,
+                runner_id: String::new(),
+            },
+        ] {
+            for (cfg, expected_model) in request.agent_run_configs.iter().zip([
+                if enabled {
+                    "child-model"
+                } else {
+                    "approved-batch"
+                },
+                "approved-batch",
+            ]) {
+                let mode = run_agents_to_start_agent_mode(
+                    &execution_mode,
+                    &request.harness_type,
+                    &request.model_id,
+                    &[],
+                    None,
+                    cfg,
+                )
+                .unwrap();
+                match mode {
+                    StartAgentExecutionMode::Local { model_id, .. } => {
+                        assert_eq!(model_id.as_deref(), Some(expected_model));
+                    }
+                    StartAgentExecutionMode::Remote { model_id, .. } => {
+                        assert_eq!(model_id, expected_model);
+                    }
                 }
             }
         }
@@ -537,6 +545,7 @@ fn child_models_survive_approved_batch_defaults_and_local_remote_translation() {
 
 #[test]
 fn dispatch_reports_child_models_and_rejects_incompatible_harness_overrides() {
+    let _child_models = FeatureFlag::ChildModelRouting.override_enabled(true);
     let _local_codex = FeatureFlag::LocalClaudeCodexChildHarnesses.override_enabled(true);
     App::test((), |mut app| async move {
         let state = initialize_run_agents_test(&mut app, ExecutionMode::Sdk);
@@ -597,6 +606,7 @@ fn dispatch_reports_child_models_and_rejects_incompatible_harness_overrides() {
 }
 #[test]
 fn dispatch_preserves_models_in_successful_launches_and_partial_failures() {
+    let _child_models = FeatureFlag::ChildModelRouting.override_enabled(true);
     App::test((), |mut app| async move {
         let state = initialize_run_agents_test(&mut app, ExecutionMode::Sdk);
         let base_model = LLMPreferences::handle(&app).read(&app, |preferences, ctx| {
@@ -750,33 +760,39 @@ fn persist_default_auth_secret(app: &mut App, harness_config_name: &str, secret_
 
 #[test]
 fn should_autoexecute_when_plan_has_approved_orchestration_config() {
-    let _child_models = FeatureFlag::ChildModelRouting.override_enabled(true);
-    App::test((), |mut app| async move {
-        let state = initialize_run_agents_test(&mut app, ExecutionMode::App);
-        persist_plan_config(
-            &mut app,
-            state.conversation_id,
-            "plan-1",
-            OrchestrationConfigStatus::Approved,
-        );
-        for (model_id, expected) in [("", true), ("auto", true), ("different-model", false)] {
-            let mut action = with_plan_id(remote_run_agents_action("oz"), "plan-1");
-            let AIAgentActionType::RunAgents(request) = &mut action.action else {
-                panic!("expected run_agents action");
-            };
-            request.agent_run_configs[0].model_id = model_id.to_string();
-            let should_autoexecute = state.executor.update(&mut app, |executor, ctx| {
-                executor.should_autoexecute(
-                    ExecuteActionInput {
-                        action: &action,
-                        conversation_id: state.conversation_id,
-                    },
-                    ctx,
-                )
-            });
-            assert_eq!(should_autoexecute, expected, "child model: {model_id}");
-        }
-    });
+    for enabled in [false, true] {
+        let _child_models = FeatureFlag::ChildModelRouting.override_enabled(enabled);
+        App::test((), |mut app| async move {
+            let state = initialize_run_agents_test(&mut app, ExecutionMode::App);
+            persist_plan_config(
+                &mut app,
+                state.conversation_id,
+                "plan-1",
+                OrchestrationConfigStatus::Approved,
+            );
+            for (model_id, expected) in [("", true), ("auto", true), ("different-model", false)] {
+                let mut action = with_plan_id(remote_run_agents_action("oz"), "plan-1");
+                let AIAgentActionType::RunAgents(request) = &mut action.action else {
+                    panic!("expected run_agents action");
+                };
+                request.agent_run_configs[0].model_id = model_id.to_string();
+                let should_autoexecute = state.executor.update(&mut app, |executor, ctx| {
+                    executor.should_autoexecute(
+                        ExecuteActionInput {
+                            action: &action,
+                            conversation_id: state.conversation_id,
+                        },
+                        ctx,
+                    )
+                });
+                assert_eq!(
+                    should_autoexecute,
+                    !enabled || expected,
+                    "child model: {model_id}"
+                );
+            }
+        });
+    }
 }
 
 #[test]

@@ -1653,11 +1653,15 @@ fn child_model_validation_error(
     ctx: &AppContext,
 ) -> Option<String> {
     if !FeatureFlag::ChildModelRouting.is_enabled() {
-        return card
+        return None;
+    }
+    if state.model_id.trim().is_empty()
+        && card
             .agent_run_configs
             .iter()
-            .any(|cfg| !cfg.model_id.is_empty())
-            .then(|| "Per-child model overrides are not enabled on this client.".to_string());
+            .any(|cfg| !cfg.model_id.trim().is_empty())
+    {
+        return Some("Choose a batch model before using child model overrides.".to_string());
     }
     let snapshot = model_snapshot(state, ctx);
     card.agent_run_configs.iter().find_map(|cfg| {
