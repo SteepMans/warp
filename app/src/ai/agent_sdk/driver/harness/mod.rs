@@ -661,6 +661,10 @@ pub(crate) trait HarnessRunner: Send + Sync + 'static {
         None
     }
 
+    /// Records which of the task's files belong to this run's prompt, as resolved by the server,
+    /// for a harness that resumes a session already holding the files of earlier turns.
+    fn set_prompt_attachment_file_ids(&mut self, _file_ids: Vec<String>) {}
+
     /// Create the external conversation on the server and start the harness
     /// command in the terminal.
     ///

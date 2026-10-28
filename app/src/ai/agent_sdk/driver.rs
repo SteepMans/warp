@@ -3059,40 +3059,47 @@ impl AgentDriver {
             .map_err(|_| AgentDriverError::InvalidRuntimeState)
             .flatten()?;
 
-        let (prompt_text, system_prompt, resumption_prompt, server_context, usage_context) =
-            match prompt {
-                AgentRunPrompt::Local(text) => {
-                    (Cow::Borrowed(text.as_str()), None, None, None, None)
-                }
-                AgentRunPrompt::ServerSide {
+        let (
+            prompt_text,
+            system_prompt,
+            resumption_prompt,
+            server_context,
+            attachment_file_ids,
+            usage_context,
+        ) = match prompt {
+            AgentRunPrompt::Local(text) => {
+                (Cow::Borrowed(text.as_str()), None, None, None, None, None)
+            }
+            AgentRunPrompt::ServerSide {
+                skill,
+                attachments_dir,
+            } => {
+                let skill = skill
+                    .as_ref()
+                    .map(|parsed_skill| ResolvePromptAttachedSkill {
+                        name: parsed_skill.name.clone(),
+                        content: parsed_skill.content.clone(),
+                        path: Some(parsed_skill.path.display_path()),
+                    });
+                let request = ResolvePromptRequest {
                     skill,
-                    attachments_dir,
-                } => {
-                    let skill = skill
-                        .as_ref()
-                        .map(|parsed_skill| ResolvePromptAttachedSkill {
-                            name: parsed_skill.name.clone(),
-                            content: parsed_skill.content.clone(),
-                            path: Some(parsed_skill.path.display_path()),
-                        });
-                    let request = ResolvePromptRequest {
-                        skill,
-                        attachments_dir: attachments_dir.clone(),
-                    };
-                    let resolved = match task_id.as_ref() {
-                        Some(task_id) => server_api.resolve_prompt_for_task(task_id, request).await,
-                        None => server_api.resolve_prompt(request).await,
-                    }
-                    .map_err(AgentDriverError::PromptResolutionFailed)?;
-                    (
-                        Cow::Owned(resolved.prompt),
-                        resolved.system_prompt,
-                        resolved.resumption_prompt,
-                        resolved.context,
-                        resolved.harness_usage,
-                    )
+                    attachments_dir: attachments_dir.clone(),
+                };
+                let resolved = match task_id.as_ref() {
+                    Some(task_id) => server_api.resolve_prompt_for_task(task_id, request).await,
+                    None => server_api.resolve_prompt(request).await,
                 }
-            };
+                .map_err(AgentDriverError::PromptResolutionFailed)?;
+                (
+                    Cow::Owned(resolved.prompt),
+                    resolved.system_prompt,
+                    resolved.resumption_prompt,
+                    resolved.context,
+                    resolved.attachment_file_ids,
+                    resolved.harness_usage,
+                )
+            }
+        };
 
         let (secrets, third_party_harness_model_config) = foreground
             .spawn(|me, _| {
@@ -3129,26 +3136,28 @@ impl AgentDriver {
             .await
             .map_err(|_| AgentDriverError::InvalidRuntimeState)?;
 
-        let runner: Arc<dyn HarnessRunner> = harness
-            .build_runner(
-                prompt_text.as_ref(),
-                system_prompt.as_deref(),
-                resumption_prompt.as_deref(),
-                server_context.as_deref(),
-                &workspace_root,
-                &harness_working_dir,
-                task_id,
-                server_api.clone(),
-                terminal_driver,
-                resume,
-                &resolved_env_vars,
-                &skill_dirs,
-                factory_repository_contract,
-                &secrets_for_harness,
-                &resolved_mcp_servers,
-                third_party_harness_model_config.as_ref(),
-            )?
-            .into();
+        let mut runner = harness.build_runner(
+            prompt_text.as_ref(),
+            system_prompt.as_deref(),
+            resumption_prompt.as_deref(),
+            server_context.as_deref(),
+            &workspace_root,
+            &harness_working_dir,
+            task_id,
+            server_api.clone(),
+            terminal_driver,
+            resume,
+            &resolved_env_vars,
+            &skill_dirs,
+            factory_repository_contract,
+            &secrets_for_harness,
+            &resolved_mcp_servers,
+            third_party_harness_model_config.as_ref(),
+        )?;
+        if let Some(file_ids) = attachment_file_ids {
+            runner.set_prompt_attachment_file_ids(file_ids);
+        }
+        let runner: Arc<dyn HarnessRunner> = runner.into();
         runner
             .persistence()
             .initialize(server_api, task_id, usage_context);

@@ -154,6 +154,43 @@ fn test_convert_conversation_data_to_ai_conversation_sets_restored_run_id() {
     assert!(conversation.usage_totals().has_usage);
 }
 
+/// A harness-driven conversation stored before its run uploaded any history has no tasks: the
+/// strict conversion rejects it, and the lenient one continues it as an empty conversation that
+/// keeps its server identity.
+#[test]
+#[allow(deprecated)]
+fn possibly_empty_conversion_restores_a_conversation_stored_without_history() {
+    let conversation_data = api::ConversationData {
+        tasks: vec![],
+        ordered_message_ids: vec![],
+    };
+
+    assert!(
+        convert_conversation_data_to_ai_conversation(
+            AIConversationId::new(),
+            &conversation_data,
+            test_server_metadata("server-token", None),
+            RestorationMode::Continue,
+        )
+        .is_none()
+    );
+    let conversation = convert_possibly_empty_conversation_data_to_ai_conversation(
+        AIConversationId::new(),
+        &conversation_data,
+        test_server_metadata("server-token", None),
+        RestorationMode::Continue,
+    )
+    .expect("an empty conversation should restore");
+
+    assert!(conversation.is_empty());
+    assert_eq!(
+        conversation
+            .server_conversation_token()
+            .map(|token| token.as_str()),
+        Some("server-token")
+    );
+}
+
 /// Asynchronous GraphQL metadata snapshots can be stale relative to live stream accounting: a
 /// snapshot may seed or advance the billed total, an absent field keeps the known baseline, and
 /// a stale snapshot never regresses it.

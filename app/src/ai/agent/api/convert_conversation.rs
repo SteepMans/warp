@@ -25,7 +25,8 @@ use crate::ai::agent::api::convert_from::{
     convert_user_query_mode,
 };
 use crate::ai::agent::conversation::{
-    AIConversation, AIConversationId, ServerAIConversationMetadata, update_todo_list_from_todo_op,
+    AIConversation, AIConversationId, RestoreConversationError, ServerAIConversationMetadata,
+    update_todo_list_from_todo_op,
 };
 use crate::ai::agent::task::TaskId;
 use crate::ai::agent::todos::AIAgentTodoList;
@@ -67,6 +68,44 @@ pub fn convert_conversation_data_to_ai_conversation(
     conversation_data: &api::ConversationData,
     metadata: ServerAIConversationMetadata,
     restoration_mode: RestorationMode,
+) -> Option<AIConversation> {
+    convert_with(
+        conversation_id,
+        conversation_data,
+        metadata,
+        restoration_mode,
+        AIConversation::new_restored,
+    )
+}
+
+/// Like [`convert_conversation_data_to_ai_conversation`], but a conversation stored with no tasks
+/// restores as an empty one (see [`AIConversation::new_restored_synthesizing_on_empty`]) instead of
+/// failing. For a harness-driven conversation whose run ended before it uploaded any history.
+pub fn convert_possibly_empty_conversation_data_to_ai_conversation(
+    conversation_id: AIConversationId,
+    conversation_data: &api::ConversationData,
+    metadata: ServerAIConversationMetadata,
+    restoration_mode: RestorationMode,
+) -> Option<AIConversation> {
+    convert_with(
+        conversation_id,
+        conversation_data,
+        metadata,
+        restoration_mode,
+        AIConversation::new_restored_synthesizing_on_empty,
+    )
+}
+
+fn convert_with(
+    conversation_id: AIConversationId,
+    conversation_data: &api::ConversationData,
+    metadata: ServerAIConversationMetadata,
+    restoration_mode: RestorationMode,
+    restore: fn(
+        AIConversationId,
+        Vec<api::Task>,
+        Option<AgentConversationData>,
+    ) -> Result<AIConversation, RestoreConversationError>,
 ) -> Option<AIConversation> {
     let usage_metadata = Some(metadata.usage.clone());
 
@@ -116,7 +155,7 @@ pub fn convert_conversation_data_to_ai_conversation(
         },
     };
 
-    match AIConversation::new_restored(
+    match restore(
         conversation_id,
         conversation_data.tasks.clone(),
         Some(agent_conversation_data),

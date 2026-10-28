@@ -269,6 +269,10 @@ pub struct ResolvedHarnessPrompt {
     /// after any resumption preamble.
     #[serde(default)]
     pub context: Option<String>,
+    /// The file ids of the attachments this prompt's inputs carry, as opposed to every file on
+    /// the run. `None` from a server that predates the field.
+    #[serde(default)]
+    pub attachment_file_ids: Option<Vec<String>>,
     #[serde(
         default,
         deserialize_with = "publication::deserialize_harness_usage_capability"

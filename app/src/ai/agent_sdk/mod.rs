@@ -54,6 +54,7 @@ use warpui::{AppContext, Entity, ModelSpawner, SingletonEntity};
 use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::agent::api::convert_conversation::{
     RestorationMode, convert_conversation_data_to_ai_conversation,
+    convert_possibly_empty_conversation_data_to_ai_conversation,
 };
 use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::agent_sdk::driver::harness::{HarnessKind, harness_kind};
@@ -2029,7 +2030,18 @@ impl AgentDriverRunner {
             .get_ai_conversation(token)
             .await
             .map_err(|err| AgentDriverError::ConversationLoadFailed(format!("{err}")))?;
-        let conversation = convert_conversation_data_to_ai_conversation(
+        // An ACP run stores its conversation before it uploads any history, so a run that ended
+        // first leaves one with no tasks. It continues as an empty conversation rather than
+        // failing to load; a Warp agent conversation always has its root task once stored.
+        let convert = match harness {
+            HarnessKind::ThirdParty(_) => {
+                convert_possibly_empty_conversation_data_to_ai_conversation
+            }
+            HarnessKind::Oz | HarnessKind::Unsupported(_) => {
+                convert_conversation_data_to_ai_conversation
+            }
+        };
+        let conversation = convert(
             AIConversationId::default(),
             &conversation_data,
             metadata,
