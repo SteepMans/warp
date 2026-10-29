@@ -153,7 +153,10 @@ pub(super) fn check_and_report_update_errors(ctx: &mut AppContext) {
     // Inno Setup logs use the system's active codepage (often Windows-1252), not UTF-8.
     // We read as raw bytes to avoid silently skipping non-UTF-8 log files.
     let contents = match fs::read(&log_path) {
-        Ok(contents) => contents,
+        Ok(contents) => {
+            crate::ward::metrics::note_update_log_found();
+            contents
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             log::info!("No autoupdate logs found");
             return;
