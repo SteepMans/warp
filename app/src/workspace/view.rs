@@ -21378,10 +21378,14 @@ impl Workspace {
                 .finish()
             };
 
-            let tab_bar = Flex::row()
+            let mut tab_bar = Flex::row()
                 .with_main_axis_size(MainAxisSize::Max)
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                .with_child(tab_bar.finish())
+                .with_child(tab_bar.finish());
+            if let Some(attention_strip) = self.ward_render_attention_strip(appearance, ctx) {
+                tab_bar.add_child(attention_strip);
+            }
+            let tab_bar = tab_bar
                 .with_child(search_bar_slot)
                 .with_child(right_controls.finish())
                 .finish();

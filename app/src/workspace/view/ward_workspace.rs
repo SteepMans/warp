@@ -3,9 +3,21 @@
 
 use std::collections::HashSet;
 
+use warp_core::ui::color::coloru_with_opacity;
+use warpui::color::ColorU;
+use warpui::elements::{
+    Container, CornerRadius, CrossAxisAlignment, DispatchEventResult, Element, EventHandler, Flex,
+    MainAxisSize, ParentElement, Radius, Text,
+};
+use warpui::fonts::{Properties, Weight};
 use warpui::{AppContext, EntityId, SingletonEntity, ViewContext};
 
 use super::Workspace;
+use crate::appearance::Appearance;
+use crate::util::bindings::keybinding_name_to_display_string;
+use crate::ward::agent_state::AgentState;
+use crate::ward::attention::AttentionCounts;
+use crate::workspace::action::WorkspaceAction;
 use crate::features::FeatureFlag;
 use crate::tab::{SelectedTabColor, TabData};
 use crate::terminal::cli_agent_sessions::{CLIAgentSessionsModel, CLIAgentSessionsModelEvent};
@@ -33,6 +45,70 @@ pub(crate) fn ward_sync_project_groups_in_all_windows(ctx: &mut AppContext) {
 }
 
 impl Workspace {
+    /// Header pills with agent counts across all windows: "2 waiting · 1 error · 3 running ·
+    /// 1 done". Only waiting and error are colored; clicking them jumps to the waiting agent.
+    pub(super) fn ward_render_attention_strip(
+        &self,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Option<Box<dyn Element>> {
+        if !crate::features::is_fork_oss() {
+            return None;
+        }
+        let counts = AttentionCounts::from_states(
+            attention::all_agents(app)
+                .into_iter()
+                .map(|agent| agent.state),
+        );
+        if counts.is_empty() {
+            return None;
+        }
+        let theme = appearance.theme();
+        let quiet = theme.sub_text_color(theme.background()).into_solid();
+        let jump_shortcut =
+            keybinding_name_to_display_string("workspace:ward_jump_to_waiting_agent", app);
+        let error_label = if counts.errors == 1 { "error" } else { "errors" };
+        let pills = [
+            (
+                counts.waiting,
+                "waiting",
+                Some(AgentState::WaitingAnswer.color(theme)),
+                jump_shortcut,
+            ),
+            (
+                counts.errors,
+                error_label,
+                Some(AgentState::Error.color(theme)),
+                None,
+            ),
+            (counts.running, "running", None, None),
+            (counts.done, "done", None, None),
+        ];
+
+        let mut strip = Flex::row()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(6.);
+        for (count, label, accent, shortcut) in pills {
+            if count == 0 {
+                continue;
+            }
+            strip.add_child(render_attention_pill(
+                &format!("{count} {label}"),
+                accent,
+                quiet,
+                shortcut.as_deref(),
+                appearance,
+            ));
+        }
+        Some(
+            Container::new(strip.finish())
+                .with_margin_left(8.)
+                .with_margin_right(8.)
+                .finish(),
+        )
+    }
+
     /// Focuses the agent that has waited longest for the user, or the next one when already on
     /// a waiting agent.
     pub(super) fn ward_jump_to_waiting_agent(&mut self, ctx: &mut ViewContext<Self>) {
@@ -97,6 +173,15 @@ impl Workspace {
     ) {
         if !crate::features::is_fork_oss() {
             return;
+        }
+        // The attention strip and group counters cover agents in every window.
+        if matches!(
+            event,
+            CLIAgentSessionsModelEvent::Started { .. }
+                | CLIAgentSessionsModelEvent::StatusChanged { .. }
+                | CLIAgentSessionsModelEvent::Ended { .. }
+        ) {
+            ctx.notify();
         }
         if let CLIAgentSessionsModelEvent::StatusChanged {
             terminal_view_id, ..
@@ -238,4 +323,50 @@ impl Workspace {
         ctx.dispatch_global_action("workspace:save_app", ());
         ctx.notify();
     }
+}
+
+/// One attention pill. Accented pills (waiting, error) get a tinted background and jump to the
+/// most urgent agent on click; the rest stay grey so they do not pull the eye.
+fn render_attention_pill(
+    text: &str,
+    accent: Option<ColorU>,
+    quiet: ColorU,
+    shortcut: Option<&str>,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    let font_family = appearance.ui_font_family();
+    let text_color = accent.unwrap_or(quiet);
+    let mut content = Flex::row()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_spacing(6.)
+        .with_child(
+            Text::new_inline(text.to_owned(), font_family, 12.)
+                .with_color(text_color)
+                .with_style(Properties::default().weight(Weight::Semibold))
+                .finish(),
+        );
+    if let Some(shortcut) = shortcut {
+        content.add_child(
+            Text::new_inline(shortcut.to_owned(), font_family, 10.)
+                .with_color(quiet)
+                .finish(),
+        );
+    }
+    let background = coloru_with_opacity(accent.unwrap_or(quiet), if accent.is_some() { 13 } else { 10 });
+    let pill = Container::new(content.finish())
+        .with_horizontal_padding(8.)
+        .with_vertical_padding(3.)
+        .with_background(background)
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
+        .finish();
+    if accent.is_none() {
+        return pill;
+    }
+    EventHandler::new(pill)
+        .on_left_mouse_down(|ctx, _, _| {
+            ctx.dispatch_typed_action(WorkspaceAction::WardJumpToWaitingAgent);
+            DispatchEventResult::StopPropagation
+        })
+        .finish()
 }
