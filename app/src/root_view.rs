@@ -116,8 +116,6 @@ use crate::{
     send_telemetry_from_app_ctx, send_telemetry_from_ctx,
 };
 
-const WINDOW_TITLE: &str = "Warp";
-
 lazy_static! {
     static ref FALLBACK_WINDOW_SIZE: Vector2F = vec2f(800.0, 600.0);
     static ref QUAKE_STATE: Arc<Mutex<Option<QuakeModeState>>> = Arc::new(Mutex::new(None));
@@ -700,7 +698,7 @@ pub fn create_transferred_window(
         AddWindowOptions {
             window_style,
             window_bounds,
-            title: Some(WINDOW_TITLE.to_owned()),
+            title: Some(crate::features::product_name().to_owned()),
             background_blur_radius_pixels: Some(*window_settings.background_blur_radius),
             background_backdrop: *window_settings.background_backdrop,
             on_gpu_driver_selected: on_gpu_driver_selected_callback(),
@@ -798,7 +796,7 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
                         AddWindowOptions {
                             window_style: WindowStyle::Pin,
                             window_bounds: WindowBounds::ExactPosition(frame_args.window_bounds),
-                            title: Some("Warp".to_owned()),
+                            title: Some(crate::features::product_name().to_owned()),
                             fullscreen_state: window.fullscreen_state,
                             background_blur_radius_pixels,
                             background_backdrop,
@@ -841,7 +839,7 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
                         ctx.add_window(
                             AddWindowOptions {
                                 window_bounds: WindowBounds::new(window.bounds),
-                                title: Some("Warp".to_owned()),
+                                title: Some(crate::features::product_name().to_owned()),
                                 fullscreen_state: window.fullscreen_state,
                                 background_blur_radius_pixels,
                                 background_backdrop,
@@ -893,7 +891,7 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
                 ctx.add_window(
                     AddWindowOptions {
                         window_bounds: WindowBounds::new(window.bounds),
-                        title: Some("Warp".to_owned()),
+                        title: Some(crate::features::product_name().to_owned()),
                         fullscreen_state: window.fullscreen_state,
                         background_blur_radius_pixels,
                         background_backdrop,
@@ -1296,7 +1294,7 @@ fn default_window_options(window_settings: &WindowSettings, ctx: &AppContext) ->
     AddWindowOptions {
         window_style,
         window_bounds: next_bounds,
-        title: Some("Warp".to_owned()),
+        title: Some(crate::features::product_name().to_owned()),
         background_blur_radius_pixels: Some(*window_settings.background_blur_radius),
         background_backdrop: *window_settings.background_backdrop,
         on_gpu_driver_selected: on_gpu_driver_selected_callback(),
@@ -1481,7 +1479,7 @@ fn toggle_quake_mode_window(global_resource_handles: &GlobalResourceHandles, ctx
                 AddWindowOptions {
                     window_style: WindowStyle::Pin,
                     window_bounds: WindowBounds::ExactPosition(config.window_bounds),
-                    title: Some("Warp".to_owned()),
+                    title: Some(crate::features::product_name().to_owned()),
                     background_blur_radius_pixels: Some(*window_settings.background_blur_radius),
                     background_backdrop: *window_settings.background_backdrop,
                     // Ignore the quake window for positioning the next window
