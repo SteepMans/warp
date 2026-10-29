@@ -6,6 +6,7 @@ pub mod action;
 pub mod agent_state;
 pub mod attention;
 pub mod changelog;
+pub mod chimney;
 pub mod labels;
 pub mod metrics;
 pub mod overview;
