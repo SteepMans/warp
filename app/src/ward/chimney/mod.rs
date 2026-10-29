@@ -6,6 +6,7 @@
 //! never logged.
 
 pub mod api;
+pub mod bindings;
 
 use warp_core::user_preferences::GetUserPreferences as _;
 use warpui::AppContext;
