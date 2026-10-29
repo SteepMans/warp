@@ -46,10 +46,6 @@ impl Default for Backoff {
 }
 
 impl Backoff {
-    pub fn interval(&self) -> Duration {
-        self.interval
-    }
-
     /// Updates the interval after a push and returns the delay until the next one, or `None`
     /// when pushing should stop until the app restarts.
     pub fn next_delay(&mut self, outcome: PushOutcome) -> Option<Duration> {
