@@ -70,8 +70,12 @@ jobs:
           "version=$v" >> $env:GITHUB_OUTPUT
           Write-Output "Version $v"
 
+      # WARD_METRICS_TOKEN is baked into the binary (option_env!); without it the build sends
+      # no metrics.
       - name: Build installer
         shell: pwsh
+        env:
+          WARD_METRICS_TOKEN: ${{ secrets.WARD_METRICS_TOKEN }}
         run: .\script\windows\publish_s3.ps1 -Bucket warp-fork -Prefix windows -Version ${{ steps.version.outputs.version }} -DryRun
 
       - uses: actions/upload-artifact@v4
