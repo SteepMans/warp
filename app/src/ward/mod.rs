@@ -9,4 +9,5 @@ pub mod changelog;
 pub mod labels;
 pub mod metrics;
 pub mod overview;
+pub mod palette;
 pub mod project_groups;
