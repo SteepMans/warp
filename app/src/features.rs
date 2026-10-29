@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use warp_core::channel::ChannelState;
+use warp_core::channel::{Channel, ChannelState};
 pub use warp_core::features::*;
 
 /// Mark all features which should be enabled on the current channel as enabled.
@@ -543,5 +543,53 @@ fn enabled_features() -> HashSet<FeatureFlag> {
         FeatureFlag::AcpHarness,
     ]);
 
+    // The fork's OSS build ships without Warp's own AI agents and cloud features; CLI agents
+    // such as Claude Code and Codex running in the terminal are unaffected.
+    if ChannelState::channel() == Channel::Oss {
+        for flag in OSS_DISABLED_FLAGS {
+            flags.remove(flag);
+        }
+    }
+
     flags
 }
+
+/// Warp agent, cloud and onboarding features removed from the OSS channel.
+const OSS_DISABLED_FLAGS: &[FeatureFlag] = &[
+    FeatureFlag::AgentOnboarding,
+    FeatureFlag::AccountFirstOnboarding,
+    FeatureFlag::HOAOnboardingFlow,
+    FeatureFlag::GetStartedTab,
+    FeatureFlag::AgentTips,
+    FeatureFlag::CloudConversations,
+    FeatureFlag::CloudEnvironments,
+    FeatureFlag::CloudRunners,
+    FeatureFlag::CloudAgentRunners,
+    FeatureFlag::CloudAgentExecutionConfig,
+    FeatureFlag::CloudAgentShellRespawn,
+    FeatureFlag::CloudMode,
+    FeatureFlag::CloudModeFromLocalSession,
+    FeatureFlag::CloudModeImageContext,
+    FeatureFlag::CloudModeSetupV2,
+    FeatureFlag::CloudModeInputV2,
+    FeatureFlag::AmbientAgentsCommandLine,
+    FeatureFlag::AmbientAgentsImageUpload,
+    FeatureFlag::AmbientAgentsRTC,
+    FeatureFlag::ScheduledAmbientAgents,
+    FeatureFlag::OzPlatformSkills,
+    FeatureFlag::OzIdentityFederation,
+    FeatureFlag::OzChangelogUpdates,
+    FeatureFlag::OzLaunchModal,
+    FeatureFlag::OzHandoff,
+    FeatureFlag::OpenWarpLaunchModal,
+    FeatureFlag::OrchestrationLaunchModal,
+    FeatureFlag::AgentCliLaunchModal,
+    FeatureFlag::CodeLaunchModal,
+    FeatureFlag::HandoffLocalCloud,
+    FeatureFlag::HandoffCloudCloud,
+    FeatureFlag::UsageBasedPricing,
+    FeatureFlag::BillingAndUsagePageV2,
+    FeatureFlag::GlobalAIAnalyticsBanner,
+    FeatureFlag::GlobalAIAnalyticsCollection,
+    FeatureFlag::DriveObjectsAsContext,
+];
