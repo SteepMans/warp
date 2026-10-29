@@ -17,6 +17,12 @@ pub fn is_fork_oss() -> bool {
     ChannelState::channel() == Channel::Oss
 }
 
+/// User-visible product name. The fork's OSS build is branded "Ward"; internal identifiers
+/// (app id, data dirs, URI scheme, binary name) keep the upstream `WarpOss` naming.
+pub fn product_name() -> &'static str {
+    if is_fork_oss() { "Ward" } else { "Warp" }
+}
+
 /// Returns all feature flags which should be enabled in the current channel.
 fn enabled_features() -> HashSet<FeatureFlag> {
     // Enable features overridden for the given channel.
