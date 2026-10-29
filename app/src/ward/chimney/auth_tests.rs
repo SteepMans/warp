@@ -370,11 +370,16 @@ fn auth_failure_is_returned_and_shown() {
     let now = clock.now_fn();
     let creds = account();
 
+    let attempts = Mutex::new(0);
+
     let result: Result<(), TestError> =
-        block_on(auth.send_authorized(BASE, &creds, &transport, &now, |_| async {
-            panic!("no request without a token")
+        block_on(auth.send_authorized(BASE, &creds, &transport, &now, |_| {
+            *attempts.lock() += 1;
+            async { Ok(()) }
         }));
     assert_eq!(result, Err(TestError::Auth(AuthError::LoginRejected(401))));
+    // No request goes out without a token.
+    assert_eq!(*attempts.lock(), 0);
     assert_eq!(auth.status(), AuthStatus::Failed(AuthError::LoginRejected(401)));
 }
 
