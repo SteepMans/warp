@@ -51,7 +51,10 @@ impl SyncDataSource for DataSource {
         let Some(board) = model.board(board_id) else {
             let text = match model.error(board_id) {
                 Some(err) => format!("Chimney board {board_id}: {}", err.message()),
-                None => format!("Loading Chimney board {board_id}…"),
+                None if model.is_loading(board_id) => {
+                    format!("Loading Chimney board {board_id}…")
+                }
+                None => format!("Chimney board {board_id} is not loaded yet"),
             };
             return Ok(vec![message(text)]);
         };
