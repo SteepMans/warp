@@ -2955,15 +2955,21 @@ fn test_offscreen_view_notifications_do_not_rebuild_the_scene() {
             frames_before,
             "offscreen notifications rebuilt the scene"
         );
-        assert_eq!(*background_renders.borrow(), renders_before + 10);
+        // Rendering is deferred until the view is laid out again.
+        assert_eq!(*background_renders.borrow(), renders_before);
+        assert!(presenter.borrow().is_stale(background.id()));
 
         visible.update(app, |_, ctx| ctx.notify());
         assert_eq!(frames(), frames_before + 1);
+        assert_eq!(*background_renders.borrow(), renders_before);
 
         root.update(app, |root, ctx| {
             root.show_background = true;
             ctx.notify();
         });
+        // Shown again: rendered once for all the updates it missed.
+        assert_eq!(*background_renders.borrow(), renders_before + 1);
+        assert!(!presenter.borrow().is_stale(background.id()));
         let frames_shown = frames();
         background.update(app, |_, ctx| ctx.notify());
         assert_eq!(
@@ -3144,5 +3150,197 @@ fn test_offscreen_view_shows_latest_content_once_visible() {
             ctx.notify();
         });
         assert_eq!(frames(), frames_hidden);
+    })
+}
+
+#[test]
+fn test_stale_views_are_rendered_outside_of_layout() {
+    use crate::event::DispatchedEvent;
+    use pathfinder_geometry::vector::Vector2F;
+
+    /// Holds `lock` while it lays out its child, like the terminal's block list holds the
+    /// terminal model while it lays out embedded views.
+    struct LockingElement {
+        lock: Arc<Mutex<()>>,
+        child: Box<dyn Element>,
+    }
+
+    impl Element for LockingElement {
+        fn layout(
+            &mut self,
+            constraint: SizeConstraint,
+            ctx: &mut LayoutContext,
+            app: &AppContext,
+        ) -> Vector2F {
+            let _guard = self.lock.lock();
+            self.child.layout(constraint, ctx, app)
+        }
+
+        fn after_layout(&mut self, ctx: &mut AfterLayoutContext, app: &AppContext) {
+            self.child.after_layout(ctx, app);
+        }
+
+        fn paint(&mut self, origin: Vector2F, ctx: &mut PaintContext, app: &AppContext) {
+            self.child.paint(origin, ctx, app);
+        }
+
+        fn size(&self) -> Option<Vector2F> {
+            self.child.size()
+        }
+
+        fn origin(&self) -> Option<Point> {
+            self.child.origin()
+        }
+
+        fn dispatch_event(
+            &mut self,
+            event: &DispatchedEvent,
+            ctx: &mut EventContext,
+            app: &AppContext,
+        ) -> bool {
+            self.child.dispatch_event(event, ctx, app)
+        }
+    }
+
+    /// Renders under `lock`, like the terminal's footer reads the terminal model.
+    struct Leaf {
+        lock: Arc<Mutex<()>>,
+        value: usize,
+        rendered: Rc<RefCell<Vec<usize>>>,
+    }
+
+    impl Entity for Leaf {
+        type Event = ();
+    }
+
+    impl super::View for Leaf {
+        fn render(&self, _: &AppContext) -> Box<dyn Element> {
+            let _guard = self
+                .lock
+                .try_lock()
+                .expect("rendered while a parent element holds the lock in layout");
+            self.rendered.borrow_mut().push(self.value);
+            Empty::new().finish()
+        }
+
+        fn ui_name() -> &'static str {
+            "Leaf"
+        }
+    }
+
+    impl TypedActionView for Leaf {
+        type Action = ();
+    }
+
+    /// A terminal-like view: embeds the leaf under the lock.
+    struct Middle {
+        lock: Arc<Mutex<()>>,
+        leaf: Option<ViewHandle<Leaf>>,
+    }
+
+    impl Entity for Middle {
+        type Event = ();
+    }
+
+    impl super::View for Middle {
+        fn render(&self, _: &AppContext) -> Box<dyn Element> {
+            let child = match &self.leaf {
+                Some(leaf) => ChildView::new(leaf).finish(),
+                None => Empty::new().finish(),
+            };
+            Box::new(LockingElement {
+                lock: self.lock.clone(),
+                child,
+            })
+        }
+
+        fn ui_name() -> &'static str {
+            "Middle"
+        }
+    }
+
+    impl TypedActionView for Middle {
+        type Action = ();
+    }
+
+    struct Root {
+        tab: Option<ViewHandle<Middle>>,
+        show_tab: bool,
+    }
+
+    impl Entity for Root {
+        type Event = ();
+    }
+
+    impl super::View for Root {
+        fn render(&self, _: &AppContext) -> Box<dyn Element> {
+            match (&self.tab, self.show_tab) {
+                (Some(tab), true) => ChildView::new(tab).finish(),
+                _ => Empty::new().finish(),
+            }
+        }
+
+        fn ui_name() -> &'static str {
+            "Root"
+        }
+    }
+
+    impl TypedActionView for Root {
+        type Action = ();
+    }
+
+    App::test((), |mut app| async move {
+        let app: &mut App = &mut app;
+        let lock = Arc::new(Mutex::new(()));
+        let rendered = Rc::new(RefCell::new(Vec::new()));
+        let (window_id, root) = app.add_window(WindowStyle::NotStealFocus, |_| Root {
+            tab: None,
+            show_tab: true,
+        });
+        let leaf = app.add_typed_action_view(window_id, {
+            let (lock, rendered) = (lock.clone(), rendered.clone());
+            |_| Leaf {
+                lock,
+                value: 0,
+                rendered,
+            }
+        });
+        let middle = app.add_typed_action_view(window_id, {
+            let lock = lock.clone();
+            |_| Middle { lock, leaf: None }
+        });
+        middle.update(app, |middle, ctx| {
+            middle.leaf = Some(leaf.clone());
+            ctx.notify();
+        });
+        root.update(app, |root, ctx| {
+            root.tab = Some(middle.clone());
+            ctx.notify();
+        });
+
+        // The tab goes to the background; both of its views update there.
+        root.update(app, |root, ctx| {
+            root.show_tab = false;
+            ctx.notify();
+        });
+        rendered.borrow_mut().clear();
+        for value in 1..=3 {
+            leaf.update(app, |leaf, ctx| {
+                leaf.value = value;
+                ctx.notify();
+            });
+            middle.update(app, |_, ctx| ctx.notify());
+        }
+        assert!(rendered.borrow().is_empty());
+
+        // Showing it renders the nested leaf once, with its latest value, outside of layout.
+        root.update(app, |root, ctx| {
+            root.show_tab = true;
+            ctx.notify();
+        });
+        assert_eq!(*rendered.borrow(), vec![3]);
+        let presenter = app.presenter(window_id).expect("window has a presenter");
+        assert!(!presenter.borrow().is_stale(leaf.id()));
+        assert!(!presenter.borrow().is_stale(middle.id()));
     })
 }

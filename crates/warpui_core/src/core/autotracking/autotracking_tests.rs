@@ -2,9 +2,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
-use crate::elements::Empty;
+use crate::elements::{ChildView, Empty, Flex, ParentElement};
 use crate::platform::WindowStyle;
-use crate::{App, AppContext, Element, Entity, ModelHandle, TypedActionView, View};
+use crate::{App, AppContext, Element, Entity, ModelHandle, TypedActionView, View, ViewHandle};
 
 #[derive(Default)]
 struct Model {
@@ -247,21 +247,62 @@ fn test_model_updates_multiple_views() {
         }
     }
 
+    /// Lays out both views: views that are not part of the frame are only rendered once they
+    /// are laid out again.
+    struct Pair {
+        first: Option<ViewHandle<TestView>>,
+        second: Option<ViewHandle<OtherView>>,
+    }
+
+    impl Entity for Pair {
+        type Event = ();
+    }
+
+    impl View for Pair {
+        fn ui_name() -> &'static str {
+            "Pair"
+        }
+
+        fn render(&self, _: &AppContext) -> Box<dyn Element> {
+            let mut column = Flex::column();
+            if let Some(first) = &self.first {
+                column.add_child(ChildView::new(first).finish());
+            }
+            if let Some(second) = &self.second {
+                column.add_child(ChildView::new(second).finish());
+            }
+            column.finish()
+        }
+    }
+
+    impl TypedActionView for Pair {
+        type Action = ();
+    }
+
     App::test((), |mut app| async move {
         let model_handle = app.add_model(|_| Model::default());
 
+        let (window_id, pair) = app.add_window(WindowStyle::NotStealFocus, |_| Pair {
+            first: None,
+            second: None,
+        });
+
         let first_render_counter = Arc::new(AtomicUsize::new(0));
-        let (window_id, first_view) = app.add_window(WindowStyle::NotStealFocus, |_| {
+        let first_view = app.add_view(window_id, |_| {
             TestView::new(model_handle.clone(), first_render_counter.clone())
         });
 
         let second_render_counter = Arc::new(AtomicUsize::new(0));
-        let _second_view = app.add_view(window_id, |_| {
+        let second_view = app.add_view(window_id, |_| {
             OtherView::new(model_handle.clone(), second_render_counter.clone())
         });
 
         // Force the window to be rendered the first time
-        first_view.update(&mut app, |_, _| {});
+        pair.update(&mut app, |pair, ctx| {
+            pair.first = Some(first_view.clone());
+            pair.second = Some(second_view.clone());
+            ctx.notify();
+        });
         assert_eq!(first_render_counter.load(Ordering::Relaxed), 1);
         assert_eq!(second_render_counter.load(Ordering::Relaxed), 1);
 
