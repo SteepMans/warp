@@ -1,3 +1,4 @@
+pub mod claude_resume;
 pub mod event;
 pub mod listener;
 #[cfg(not(target_family = "wasm"))]

@@ -400,6 +400,7 @@ use crate::terminal::block_list_viewport::{
     ScrollState, ViewportState,
 };
 use crate::terminal::bootstrap::init_subshell_command;
+use crate::terminal::cli_agent_sessions::claude_resume::{self, ClaudeResumeInfo};
 use crate::terminal::cli_agent_sessions::event::{
     CLI_AGENT_NOTIFICATION_SENTINEL, CLIAgentEvent, CLIAgentEventPayload, CLIAgentEventSource,
     CLIAgentEventType, parse_event,
@@ -759,6 +760,10 @@ fn ctrl_t_apply_mode(shell_type: ShellType) -> ShellWidgetApplyMode {
 pub const LONG_RUNNING_AGENT_REQUESTED_COMMAND_CONTEXT_KEY: &str = "LongRunningRequestedCommand";
 pub const LONG_RUNNING_AGENT_REQUESTED_COMMAND_USER_TOOK_OVER_CONTEXT_KEY: &str =
     "LongRunningRequestedUserTookOverCommand";
+
+/// How often to check whether a resumable Claude Code session is running in the pane. The check
+/// runs off the main thread and only inspects processes registered by Claude Code.
+const CLAUDE_RESUME_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// We only auto open the code review pane if the pane it's getting opened from has a certain width
 const MINIMUM_WIDTH_TO_AUTO_OPEN_PANE: f32 = 600.0;
@@ -2633,6 +2638,10 @@ pub struct TerminalView {
     /// Commands that should run as separate blocks after the active pending
     /// command finishes successfully.
     pending_command_queue: VecDeque<String>,
+    /// The Claude Code session running in this pane, if any, as observed by the last
+    /// [`Self::poll_claude_resume`]. It is persisted with the pane snapshot so that the session
+    /// is resumed when the pane is restored.
+    claude_resume: Option<ClaudeResumeInfo>,
     /// When true, enter agent view after pending setup commands complete
     /// (i.e. after `PendingCommandCompleted` is emitted). Set by
     /// `pane_tree_from_template_recursive` when a tab config has both
@@ -4417,6 +4426,7 @@ impl TerminalView {
             is_login_shell_bootstrapped: false,
             awaiting_pending_command_completion: false,
             pending_command_queue: Default::default(),
+            claude_resume: None,
             enter_agent_view_after_pending_commands: false,
             slow_bootstrap_banner,
             is_slow_bootstrap_banner_open: false,
@@ -4554,6 +4564,10 @@ impl TerminalView {
             terminal_view.wire_ambient_agent_view_model(ambient_agent_view_model, ctx);
         }
         terminal_view.register_subscriptions_for_use_agent_footer(ctx);
+        // Unit tests drive the app until it is idle, which a perpetual poll would prevent.
+        if !cfg!(test) {
+            terminal_view.schedule_claude_resume_poll(CLAUDE_RESUME_POLL_INTERVAL, ctx);
+        }
 
         // Forward RemoteServerManager setup events into the terminal event stream
         // so the ModelEventDispatcher can gate session initialization on them.
@@ -10078,6 +10092,49 @@ impl TerminalView {
         self.input.update(ctx, |input, ctx| {
             input.set_pending_command(exec, ctx);
         })
+    }
+
+    /// Returns the Claude Code session that should be resumed if this pane is restored.
+    pub fn claude_resume_info(&self) -> Option<&ClaudeResumeInfo> {
+        self.claude_resume.as_ref()
+    }
+
+    fn schedule_claude_resume_poll(&mut self, delay: Duration, ctx: &mut ViewContext<Self>) {
+        ctx.spawn(Timer::after(delay), |me, _, ctx| me.poll_claude_resume(ctx));
+    }
+
+    /// Checks whether Claude Code is running in this pane's shell, and saves the app state whenever the resumable session changes so that a restart or crash
+    /// restores what was open at that moment.
+    fn poll_claude_resume(&mut self, ctx: &mut ViewContext<Self>) {
+        // Not gated on a long-running block: Claude Code may also be started from a shell
+        // profile while the session is still bootstrapping.
+        let shell_pid = self.model.lock().shell_process_info().map(|info| info.pid);
+        let Some(shell_pid) = shell_pid else {
+            self.set_claude_resume(None, ctx);
+            self.schedule_claude_resume_poll(CLAUDE_RESUME_POLL_INTERVAL, ctx);
+            return;
+        };
+
+        let shell_type = self.active_session_shell_type(ctx);
+        ctx.spawn(
+            async move { claude_resume::detect(shell_pid, shell_type) },
+            |me, info, ctx| {
+                me.set_claude_resume(info, ctx);
+                me.schedule_claude_resume_poll(CLAUDE_RESUME_POLL_INTERVAL, ctx);
+            },
+        );
+    }
+
+    fn set_claude_resume(&mut self, info: Option<ClaudeResumeInfo>, ctx: &mut ViewContext<Self>) {
+        if self.claude_resume == info {
+            return;
+        }
+        match &info {
+            Some(info) => log::info!("Detected Claude Code session {}", info.session_id),
+            None => log::info!("Claude Code session ended"),
+        }
+        self.claude_resume = info;
+        ctx.dispatch_global_action("workspace:save_app", ());
     }
 
     pub fn set_pending_command_queue(

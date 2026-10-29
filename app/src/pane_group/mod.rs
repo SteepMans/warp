@@ -1707,6 +1707,15 @@ impl PaneGroup {
 
                 let terminal_view_id = terminal_view.id();
 
+                // Resume the CLI agent session that was running in this pane. The command is
+                // executed once the shell has bootstrapped, like a launch config command.
+                if let Some(resume_command) = terminal_snapshot.cli_agent_resume_command {
+                    log::info!("Resuming CLI agent session in restored pane");
+                    terminal_view.update(ctx, |terminal_view, ctx| {
+                        terminal_view.set_pending_command_queue(vec![resume_command], ctx);
+                    });
+                }
+
                 let pane_data = TerminalPane::new(
                     uuid.0,
                     terminal_manager,
@@ -2182,6 +2191,7 @@ impl PaneGroup {
                             active_profile_id: None,
                             conversation_ids_to_restore: Vec::new(),
                             active_conversation_id: None,
+                            cli_agent_resume_command: None,
                         })
                     }
                 };
