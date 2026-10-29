@@ -13,6 +13,7 @@ mod selected_items;
 pub mod separator_search_item;
 pub mod tabs;
 pub mod view;
+pub mod ward_agents;
 pub mod warp_drive;
 mod zero_state;
 

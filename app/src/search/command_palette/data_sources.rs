@@ -14,7 +14,9 @@ use crate::search::binding_source::BindingSource;
 use crate::search::command_palette::mixer::{CommandPaletteItemAction, ItemSummary};
 use crate::search::command_palette::new_session::NewSessionDataSource;
 use crate::search::command_palette::repos::RepoDataSource;
-use crate::search::command_palette::{CommandPaletteMixer, files, launch_config, navigation, tabs};
+use crate::search::command_palette::{
+    CommandPaletteMixer, files, launch_config, navigation, tabs, ward_agents,
+};
 use crate::search::data_source::QueryResult;
 use crate::search::files::model::FileSearchModel;
 use crate::search::mixer::AddAsyncSourceOptions;
@@ -31,6 +33,7 @@ pub struct DataSourceStore {
     all_conversation_data_source: ModelHandle<conversations::DataSource>,
     repo_data_source: ModelHandle<RepoDataSource>,
     tabs_data_source: Option<ModelHandle<tabs::DataSource>>,
+    ward_agents_data_source: Option<ModelHandle<ward_agents::DataSource>>,
 }
 
 impl DataSourceStore {
@@ -69,6 +72,8 @@ impl DataSourceStore {
             all_conversation_data_source,
             repo_data_source,
             tabs_data_source: None,
+            ward_agents_data_source: crate::features::is_fork_oss()
+                .then(|| ctx.add_model(|_| ward_agents::DataSource)),
         }
     }
 
@@ -155,6 +160,13 @@ impl DataSourceStore {
                 self.repo_data_source.clone(),
                 HashSet::from([QueryFilter::Repos]),
             );
+
+            if let Some(ward_agents_data_source) = &self.ward_agents_data_source {
+                mixer.add_sync_source(
+                    ward_agents_data_source.clone(),
+                    HashSet::from([QueryFilter::WardAgents]),
+                );
+            }
 
             ctx.notify();
         });

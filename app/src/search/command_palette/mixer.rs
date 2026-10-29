@@ -81,6 +81,10 @@ pub enum CommandPaletteItemAction {
     },
     /// Start a new AI conversation
     NewConversation,
+    /// Ward: focus the CLI agent running in this terminal (any window).
+    WardFocusAgent {
+        terminal_view_id: EntityId,
+    },
     /// No-op action (used for non-interactable separator items that don't do anything on click).
     NoOp,
 }
@@ -146,6 +150,8 @@ impl CommandPaletteItemAction {
                 ItemSummary::Project { path: path.clone() }
             }
             CommandPaletteItemAction::NewConversation => ItemSummary::NewConversation,
+            // Agents come and go; they are not kept in the recent items.
+            CommandPaletteItemAction::WardFocusAgent { .. } => ItemSummary::NoOp,
             CommandPaletteItemAction::NoOp => ItemSummary::NoOp,
         }
     }
