@@ -116,7 +116,8 @@ impl FilterChipRenderer for QueryFilter {
             | QueryFilter::BaseModels
             | QueryFilter::FullTerminalUseModels
             | QueryFilter::CurrentDirectoryConversations
-            | QueryFilter::WardAgents => appearance
+            | QueryFilter::WardAgents
+            | QueryFilter::WardChimneyCards => appearance
                 .theme()
                 .main_text_color(appearance.theme().surface_2())
                 .into_solid(),

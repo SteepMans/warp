@@ -85,6 +85,11 @@ pub enum CommandPaletteItemAction {
     WardFocusAgent {
         terminal_view_id: EntityId,
     },
+    /// Ward: a Chimney card was picked (to bind a tab or start an agent).
+    WardPickChimneyCard {
+        board_id: u64,
+        task_id: u64,
+    },
     /// No-op action (used for non-interactable separator items that don't do anything on click).
     NoOp,
 }
@@ -151,7 +156,8 @@ impl CommandPaletteItemAction {
             }
             CommandPaletteItemAction::NewConversation => ItemSummary::NewConversation,
             // Agents come and go; they are not kept in the recent items.
-            CommandPaletteItemAction::WardFocusAgent { .. } => ItemSummary::NoOp,
+            CommandPaletteItemAction::WardFocusAgent { .. }
+            | CommandPaletteItemAction::WardPickChimneyCard { .. } => ItemSummary::NoOp,
             CommandPaletteItemAction::NoOp => ItemSummary::NoOp,
         }
     }

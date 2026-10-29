@@ -1012,6 +1012,11 @@ impl View {
                     crate::ward::action::WardAction::OpenAgent(terminal_view_id),
                 ));
             }
+            CommandPaletteItemAction::WardPickChimneyCard { board_id, task_id } => {
+                ctx.dispatch_typed_action(&WorkspaceAction::Ward(
+                    crate::ward::action::WardAction::ChimneyCardPicked { board_id, task_id },
+                ));
+            }
             CommandPaletteItemAction::NoOp => {
                 // No-op action (used for non-interactable separator items that don't do anything on click).
             }

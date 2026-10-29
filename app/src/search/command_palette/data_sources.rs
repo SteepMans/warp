@@ -15,7 +15,7 @@ use crate::search::command_palette::mixer::{CommandPaletteItemAction, ItemSummar
 use crate::search::command_palette::new_session::NewSessionDataSource;
 use crate::search::command_palette::repos::RepoDataSource;
 use crate::search::command_palette::{
-    CommandPaletteMixer, files, launch_config, navigation, tabs, ward_agents,
+    CommandPaletteMixer, files, launch_config, navigation, tabs, ward_agents, ward_chimney_cards,
 };
 use crate::search::data_source::QueryResult;
 use crate::search::files::model::FileSearchModel;
@@ -34,6 +34,7 @@ pub struct DataSourceStore {
     repo_data_source: ModelHandle<RepoDataSource>,
     tabs_data_source: Option<ModelHandle<tabs::DataSource>>,
     ward_agents_data_source: Option<ModelHandle<ward_agents::DataSource>>,
+    ward_chimney_cards_data_source: Option<ModelHandle<ward_chimney_cards::DataSource>>,
 }
 
 impl DataSourceStore {
@@ -74,6 +75,8 @@ impl DataSourceStore {
             tabs_data_source: None,
             ward_agents_data_source: crate::features::is_fork_oss()
                 .then(|| ctx.add_model(|_| ward_agents::DataSource)),
+            ward_chimney_cards_data_source: crate::features::is_fork_oss()
+                .then(|| ctx.add_model(|_| ward_chimney_cards::DataSource)),
         }
     }
 
@@ -165,6 +168,12 @@ impl DataSourceStore {
                 mixer.add_sync_source(
                     ward_agents_data_source.clone(),
                     HashSet::from([QueryFilter::WardAgents]),
+                );
+            }
+            if let Some(ward_chimney_cards_data_source) = &self.ward_chimney_cards_data_source {
+                mixer.add_sync_source(
+                    ward_chimney_cards_data_source.clone(),
+                    HashSet::from([QueryFilter::WardChimneyCards]),
                 );
             }
 

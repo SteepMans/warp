@@ -14,6 +14,7 @@ pub mod separator_search_item;
 pub mod tabs;
 pub mod view;
 pub mod ward_agents;
+pub mod ward_chimney_cards;
 pub mod warp_drive;
 mod zero_state;
 
