@@ -41,6 +41,12 @@ jobs:
           shared-key: fork-windows-rlto
           cache-on-failure: true
 
+      # Third-party license attribution for the bundle; version pinned as in
+      # script/install_cargo_release_deps.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.8.4
+
       # Inno Setup and the AWS CLI come preinstalled on windows-latest.
       - name: Install protoc
         shell: pwsh
