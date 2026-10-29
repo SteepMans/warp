@@ -10,6 +10,7 @@ use warpui::{AppContext, Element, Entity, SingletonEntity};
 use crate::appearance::Appearance;
 use crate::search::command_palette::mixer::CommandPaletteItemAction;
 use crate::search::command_palette::render_util::render_search_item_icon;
+use crate::search::QueryFilter;
 use crate::search::data_source::{Query, QueryResult};
 use crate::search::item::{IconLocation, SearchItem as SearchItemTrait};
 use crate::search::mixer::{DataSourceRunErrorWrapper, SyncDataSource};
@@ -32,6 +33,10 @@ impl SyncDataSource for DataSource {
         query: &Query,
         app: &AppContext,
     ) -> Result<Vec<QueryResult<Self::Action>>, DataSourceRunErrorWrapper> {
+        // Sync sources also run for unfiltered queries; agents only show in the `@` mode.
+        if !query.filters.contains(&QueryFilter::WardAgents) {
+            return Ok(Vec::new());
+        }
         let agents = filter_and_sort(palette_agents(app), &query.text);
         let mut previous_section = None;
         Ok(agents
