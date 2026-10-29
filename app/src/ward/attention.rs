@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use instant::Instant;
-use warpui::{AppContext, EntityId, SingletonEntity, ViewHandle, WindowId};
+use warpui::{AppContext, EntityId, SingletonEntity, ViewHandle};
 
 use super::agent_state::{AgentSnapshot, AgentState, agent_snapshot};
 use super::labels::{AgentLabels, agent_labels};
@@ -41,7 +41,6 @@ pub fn all_agents(app: &AppContext) -> Vec<AgentSnapshot> {
 pub struct AgentEntry {
     pub snapshot: AgentSnapshot,
     pub labels: AgentLabels,
-    pub window_id: WindowId,
     pub terminal_view: ViewHandle<TerminalView>,
 }
 
@@ -54,7 +53,7 @@ pub fn all_agent_entries(app: &AppContext) -> Vec<AgentEntry> {
     }
     let sessions = CLIAgentSessionsModel::as_ref(app);
     let mut entries = Vec::new();
-    for (window_id, workspace) in WorkspaceRegistry::as_ref(app).all_workspaces(app) {
+    for (_, workspace) in WorkspaceRegistry::as_ref(app).all_workspaces(app) {
         for pane_group in workspace.as_ref(app).tab_views() {
             for terminal_view in pane_group.as_ref(app).terminal_views(app) {
                 let Some(snapshot) = agent_snapshot(terminal_view.id(), app) else {
@@ -78,7 +77,6 @@ pub fn all_agent_entries(app: &AppContext) -> Vec<AgentEntry> {
                 entries.push(AgentEntry {
                     snapshot,
                     labels,
-                    window_id,
                     terminal_view: terminal_view.clone(),
                 });
             }
@@ -112,6 +110,7 @@ impl AttentionCounts {
         counts
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
     }
