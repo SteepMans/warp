@@ -170,6 +170,89 @@ pub fn detect(_shell_pid: u32, _shell_type: Option<ShellType>) -> Option<ClaudeR
     None
 }
 
+/// Stops Claude Code processes that still run the session about to be resumed but are not part
+/// of this Warp instance, together with their child processes.
+///
+/// When Warp crashes, the shells and agents of its panes keep running without a window. The
+/// restored pane then starts a second process on the same session, and both write to its
+/// transcript. A process that descends from the current Warp process belongs to a live pane and
+/// is left alone.
+#[cfg(not(target_family = "wasm"))]
+pub fn terminate_orphaned_sessions(resume_command: &str) {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
+    let Some(session_id) = session_id_from_resume_command(resume_command) else {
+        return;
+    };
+    let Some(registry_dir) = sessions_registry_dir() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(registry_dir) else {
+        return;
+    };
+    let candidates: Vec<Pid> = entries
+        .flatten()
+        .filter_map(|entry| entry.path().file_stem()?.to_str()?.parse::<u32>().ok())
+        .filter(|pid| read_registry_entry(*pid).is_some_and(|entry| entry.session_id == session_id))
+        .map(Pid::from_u32)
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true, /* remove_dead_processes */
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+    );
+    let warp_pid = Pid::from_u32(std::process::id());
+    let descends_from = |pid: Pid, ancestor: Pid| {
+        let mut current = pid;
+        // Bounded in case the table has a parent cycle from pid reuse.
+        for _ in 0..64 {
+            match system.process(current).and_then(|process| process.parent()) {
+                Some(parent) if parent == ancestor => return true,
+                Some(parent) => current = parent,
+                None => return false,
+            }
+        }
+        false
+    };
+
+    for pid in candidates {
+        let Some(process) = system.process(pid) else {
+            continue;
+        };
+        let argv: Vec<String> = process
+            .cmd()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        // A stale registry file whose pid now belongs to another program.
+        if claude_args_from_argv(&argv).is_none() || descends_from(pid, warp_pid) {
+            continue;
+        }
+        log::info!("Stopping orphaned Claude Code process {pid} before resuming its session");
+        // Children first so that MCP servers and tools do not outlive the agent.
+        for (child_pid, child) in system.processes() {
+            if descends_from(*child_pid, pid) {
+                child.kill();
+            }
+        }
+        process.kill();
+    }
+}
+
+#[cfg(target_family = "wasm")]
+pub fn terminate_orphaned_sessions(_resume_command: &str) {}
+
+/// The session id is the last argument of a command built by [`build_resume_command`].
+fn session_id_from_resume_command(command: &str) -> Option<&str> {
+    let id = command.rsplit(' ').next()?.trim_matches('\'');
+    (!id.is_empty() && command.contains("--resume ")).then_some(id)
+}
+
 /// Returns the arguments passed to Claude Code itself, skipping the executable and, for
 /// script-based installs, the interpreter (`node cli.js ...`).
 fn claude_args_from_argv(argv: &[String]) -> Option<&[String]> {

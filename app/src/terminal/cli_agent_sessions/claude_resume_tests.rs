@@ -89,3 +89,17 @@ fn skips_node_interpreter() {
         "claude --model sonnet --resume 5da63d55-1deb-4bf3-ae66-a25a95d2a1b6"
     );
 }
+
+#[test]
+fn reads_session_id_from_resume_command() {
+    assert_eq!(
+        session_id_from_resume_command(
+            "claude --model sonnet --resume 5da63d55-1deb-4bf3-ae66-a25a95d2a1b6"
+        ),
+        Some("5da63d55-1deb-4bf3-ae66-a25a95d2a1b6")
+    );
+    assert_eq!(
+        session_id_from_resume_command("codex resume 5da63d55-1deb-4bf3-ae66-a25a95d2a1b6"),
+        None
+    );
+}

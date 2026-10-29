@@ -1711,6 +1711,9 @@ impl PaneGroup {
                 // executed once the shell has bootstrapped, like a launch config command.
                 if let Some(resume_command) = terminal_snapshot.cli_agent_resume_command {
                     log::info!("Resuming CLI agent session in restored pane");
+                    crate::terminal::cli_agent_sessions::claude_resume::terminate_orphaned_sessions(
+                        &resume_command,
+                    );
                     terminal_view.update(ctx, |terminal_view, ctx| {
                         terminal_view.set_pending_command_queue(vec![resume_command], ctx);
                     });
