@@ -2,6 +2,7 @@ pub(super) mod chips;
 pub mod editor;
 mod environment_selector;
 pub mod toolbar_item;
+mod ward;
 
 #[cfg(not(target_family = "wasm"))]
 use std::env;
@@ -586,6 +587,17 @@ impl AgentInputFooter {
             &CLIAgentSessionsModel::handle(ctx),
             move |me, _, event, ctx| {
                 if event.terminal_view_id() != terminal_view_id {
+                    // Ward: the "Next" chip follows the states of the other agents.
+                    if crate::features::is_fork_oss()
+                        && matches!(
+                            event,
+                            CLIAgentSessionsModelEvent::Started { .. }
+                                | CLIAgentSessionsModelEvent::StatusChanged { .. }
+                                | CLIAgentSessionsModelEvent::Ended { .. }
+                        )
+                    {
+                        ctx.notify();
+                    }
                     return;
                 }
 
@@ -1776,6 +1788,10 @@ impl AgentInputFooter {
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_main_axis_size(MainAxisSize::Min)
             .with_spacing(4.);
+
+        if let Some(chip) = ward::render_next_waiting_chip(self.terminal_view_id, appearance, app) {
+            right_buttons.add_child(chip);
+        }
 
         for item in &right_items {
             if let Some(element) = self.render_cli_toolbar_item(
