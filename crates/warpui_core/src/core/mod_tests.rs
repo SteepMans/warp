@@ -2973,3 +2973,176 @@ fn test_offscreen_view_notifications_do_not_rebuild_the_scene() {
         );
     })
 }
+
+#[test]
+fn test_offscreen_view_shows_latest_content_once_visible() {
+    use crate::event::DispatchedEvent;
+    use pathfinder_geometry::vector::Vector2F;
+
+    /// Records the value it was rendered with every time it is painted.
+    struct ValueElement {
+        value: usize,
+        painted: Rc<RefCell<Vec<usize>>>,
+    }
+
+    impl Element for ValueElement {
+        fn layout(
+            &mut self,
+            constraint: SizeConstraint,
+            _: &mut LayoutContext,
+            _: &AppContext,
+        ) -> Vector2F {
+            constraint.min
+        }
+
+        fn after_layout(&mut self, _: &mut AfterLayoutContext, _: &AppContext) {}
+
+        fn paint(&mut self, _: Vector2F, _: &mut PaintContext, _: &AppContext) {
+            self.painted.borrow_mut().push(self.value);
+        }
+
+        fn size(&self) -> Option<Vector2F> {
+            None
+        }
+
+        fn origin(&self) -> Option<Point> {
+            None
+        }
+
+        fn dispatch_event(
+            &mut self,
+            _: &DispatchedEvent,
+            _: &mut EventContext,
+            _: &AppContext,
+        ) -> bool {
+            false
+        }
+    }
+
+    struct Leaf {
+        value: usize,
+        painted: Rc<RefCell<Vec<usize>>>,
+    }
+
+    impl Entity for Leaf {
+        type Event = ();
+    }
+
+    impl super::View for Leaf {
+        fn render(&self, _: &AppContext) -> Box<dyn Element> {
+            Box::new(ValueElement {
+                value: self.value,
+                painted: self.painted.clone(),
+            })
+        }
+
+        fn ui_name() -> &'static str {
+            "Leaf"
+        }
+    }
+
+    impl TypedActionView for Leaf {
+        type Action = ();
+    }
+
+    /// Shows either the first or the second tab, like a workspace with two tabs.
+    struct Root {
+        tabs: Vec<ViewHandle<Leaf>>,
+        active: usize,
+    }
+
+    impl Entity for Root {
+        type Event = ();
+    }
+
+    impl super::View for Root {
+        fn render(&self, _: &AppContext) -> Box<dyn Element> {
+            match self.tabs.get(self.active) {
+                Some(tab) => ChildView::new(tab).finish(),
+                None => Empty::new().finish(),
+            }
+        }
+
+        fn ui_name() -> &'static str {
+            "Root"
+        }
+    }
+
+    impl TypedActionView for Root {
+        type Action = ();
+    }
+
+    App::test((), |mut app| async move {
+        let app: &mut App = &mut app;
+        let (window_id, root) = app.add_window(WindowStyle::NotStealFocus, |_| Root {
+            tabs: Vec::new(),
+            active: 0,
+        });
+        let first_painted = Rc::new(RefCell::new(Vec::new()));
+        let second_painted = Rc::new(RefCell::new(Vec::new()));
+        let first = app.add_typed_action_view(window_id, {
+            let painted = first_painted.clone();
+            |_| Leaf { value: 0, painted }
+        });
+        let second = app.add_typed_action_view(window_id, {
+            let painted = second_painted.clone();
+            |_| Leaf { value: 0, painted }
+        });
+        root.update(app, |root, ctx| {
+            root.tabs = vec![first.clone(), second.clone()];
+            ctx.notify();
+        });
+        // Let the second tab be on screen once so it has a rendered element.
+        root.update(app, |root, ctx| {
+            root.active = 1;
+            ctx.notify();
+        });
+        root.update(app, |root, ctx| {
+            root.active = 0;
+            ctx.notify();
+        });
+
+        let presenter = app.presenter(window_id).expect("window has a presenter");
+        let frames = || presenter.borrow().frame_count();
+        second_painted.borrow_mut().clear();
+
+        // The background tab streams output while the first tab is shown.
+        let frames_before = frames();
+        for value in 1..=5 {
+            second.update(app, |leaf, ctx| {
+                leaf.value = value;
+                ctx.notify();
+            });
+        }
+        assert_eq!(
+            frames(),
+            frames_before,
+            "offscreen updates rebuilt the scene"
+        );
+        assert!(second_painted.borrow().is_empty());
+
+        // Switching to it must draw its latest content in the very next frame.
+        root.update(app, |root, ctx| {
+            root.active = 1;
+            ctx.notify();
+        });
+        assert_eq!(frames(), frames_before + 1);
+        assert_eq!(*second_painted.borrow(), vec![5]);
+
+        // Once visible its updates redraw the window again.
+        second.update(app, |leaf, ctx| {
+            leaf.value = 6;
+            ctx.notify();
+        });
+        assert_eq!(frames(), frames_before + 2);
+        assert_eq!(second_painted.borrow().last(), Some(&6));
+
+        // The tab that went to the background no longer redraws the window.
+        let frames_hidden = frames();
+        first.update(app, |leaf, ctx| {
+            leaf.value = 1;
+            ctx.notify();
+        });
+        assert_eq!(frames(), frames_hidden);
+    })
+}

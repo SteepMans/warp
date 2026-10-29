@@ -34,7 +34,8 @@ pub struct Presenter {
     text_layout_cache: LayoutCache,
     position_cache: PositionCache,
     highlighted_view: Option<EntityId>,
-    /// Views laid out in the last frame: the root and every view embedded below it.
+    /// Views that were part of the last frame: the root and every view embedded below it that
+    /// was laid out or painted.
     laid_out_views: EntityIdSet,
 }
 
@@ -467,6 +468,10 @@ impl Presenter {
 
             repaint_at = paint_ctx.repaint_at;
             pending_assets.extend(paint_ctx.pending_assets);
+            // An element may paint a child view without laying it out again (for example when it
+            // reuses an earlier layout); such a view is on screen all the same.
+            self.laid_out_views
+                .extend(paint_ctx.views_painted.iter().copied());
 
             // If the cursor shape had been changed by a view and that view is no longer being
             // rendered, reset the cursor.
