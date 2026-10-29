@@ -66,6 +66,9 @@ pub struct CLIAgentsPageView {
     chimney_board_editor: ViewHandle<SubmittableTextInput>,
     chimney_token_editor: ViewHandle<SubmittableTextInput>,
     chimney_remove_token_mouse_state: MouseStateHandle,
+    chimney_email_editor: ViewHandle<SubmittableTextInput>,
+    chimney_password_editor: ViewHandle<SubmittableTextInput>,
+    chimney_remove_account_mouse_state: MouseStateHandle,
 }
 
 impl CLIAgentsPageView {
@@ -122,6 +125,15 @@ impl CLIAgentsPageView {
 
         let (chimney_base_url_editor, chimney_board_editor, chimney_token_editor) =
             Self::create_chimney_editors(ctx);
+        let (chimney_email_editor, chimney_password_editor) =
+            Self::create_chimney_account_editors(ctx);
+        if ctx.has_singleton_model::<ward_chimney::model::ChimneyModel>() {
+            // Sign-in status and the board title come from fetches.
+            ctx.subscribe_to_model(
+                &ward_chimney::model::ChimneyModel::handle(ctx),
+                |_, _, _, ctx| ctx.notify(),
+            );
+        }
 
         Self {
             page: Self::build_page(),
@@ -134,6 +146,9 @@ impl CLIAgentsPageView {
             chimney_board_editor,
             chimney_token_editor,
             chimney_remove_token_mouse_state: Default::default(),
+            chimney_email_editor,
+            chimney_password_editor,
+            chimney_remove_account_mouse_state: Default::default(),
         }
     }
 
@@ -184,12 +199,53 @@ impl CLIAgentsPageView {
         ctx.subscribe_to_view(&token_editor, |_, _, event, ctx| match event {
             SubmittableTextInputEvent::Submit(token) => {
                 ward_chimney::set_access_token(token, ctx);
-                crate::ward::chimney::model::ensure_polling(ctx);
-                ctx.notify();
+                Self::chimney_credentials_changed(ctx);
             }
             SubmittableTextInputEvent::Escape => ctx.emit(CLIAgentsPageEvent::FocusModal),
         });
         (base_url_editor, board_editor, token_editor)
+    }
+
+    /// Email and password inputs of the Chimney service account. Each saves on Enter into the
+    /// secure storage; the password input is masked.
+    fn create_chimney_account_editors(
+        ctx: &mut ViewContext<Self>,
+    ) -> (ViewHandle<SubmittableTextInput>, ViewHandle<SubmittableTextInput>) {
+        let email_editor = ctx.add_typed_action_view(|ctx| {
+            let mut input = SubmittableTextInput::new(ctx);
+            input.set_placeholder_text("service account email", ctx);
+            input
+        });
+        let password_editor = ctx.add_typed_action_view(|ctx| {
+            let mut input = SubmittableTextInput::new_with_password(true, ctx);
+            input.set_placeholder_text("service account password", ctx);
+            input
+        });
+        for editor in [&email_editor, &password_editor] {
+            update_editor_interaction_state(editor.as_ref(ctx).editor().clone(), true, ctx);
+        }
+        ctx.subscribe_to_view(&email_editor, |_, _, event, ctx| match event {
+            SubmittableTextInputEvent::Submit(email) => {
+                ward_chimney::set_email(email, ctx);
+                Self::chimney_credentials_changed(ctx);
+            }
+            SubmittableTextInputEvent::Escape => ctx.emit(CLIAgentsPageEvent::FocusModal),
+        });
+        ctx.subscribe_to_view(&password_editor, |_, _, event, ctx| match event {
+            SubmittableTextInputEvent::Submit(password) => {
+                ward_chimney::set_password(password, ctx);
+                Self::chimney_credentials_changed(ctx);
+            }
+            SubmittableTextInputEvent::Escape => ctx.emit(CLIAgentsPageEvent::FocusModal),
+        });
+        (email_editor, password_editor)
+    }
+
+    /// Fetches the configured board with the new credentials, so the status updates now.
+    fn chimney_credentials_changed(ctx: &mut ViewContext<Self>) {
+        ward_chimney::model::refresh_board(ward_chimney::board_id(ctx), ctx);
+        ward_chimney::model::ensure_polling(ctx);
+        ctx.notify();
     }
 
     fn build_page() -> PageType<Self> {
@@ -314,6 +370,8 @@ pub enum CLIAgentsPageAction {
     },
     /// Ward: removes the Chimney access token from the secure storage.
     RemoveChimneyToken,
+    /// Ward: removes the Chimney service account email and password from the secure storage.
+    RemoveChimneyAccount,
 }
 
 impl TypedActionView for CLIAgentsPageView {
@@ -385,7 +443,12 @@ impl TypedActionView for CLIAgentsPageView {
             }
             CLIAgentsPageAction::RemoveChimneyToken => {
                 ward_chimney::set_access_token("", ctx);
-                ctx.notify();
+                Self::chimney_credentials_changed(ctx);
+            }
+            CLIAgentsPageAction::RemoveChimneyAccount => {
+                ward_chimney::set_email("", ctx);
+                ward_chimney::set_password("", ctx);
+                Self::chimney_credentials_changed(ctx);
             }
         }
     }
@@ -899,7 +962,7 @@ impl SettingsWidget for ChimneyWidget {
     type View = CLIAgentsPageView;
 
     fn search_terms(&self) -> &str {
-        "chimney kanban card board token ward"
+        "chimney kanban card board token email password login account ward"
     }
 
     fn should_render(&self, _app: &AppContext) -> bool {
@@ -942,25 +1005,79 @@ impl SettingsWidget for ChimneyWidget {
 
         let board_id = ward_chimney::board_id(app);
         let token_source = ward_chimney::token_source(app);
+        let email_source = ward_chimney::email_source(app);
+        let password_source = ward_chimney::password_source(app);
+        let account_status = match (email_source, password_source) {
+            (ward_chimney::TokenSource::Missing, _) | (_, ward_chimney::TokenSource::Missing) => {
+                "Ward signs in with these, like chimney-mcp, and renews the session itself. \
+                 CHIMNEY_EMAIL and CHIMNEY_PASSWORD work as fallbacks."
+            }
+            (ward_chimney::TokenSource::SecureStorage, ward_chimney::TokenSource::SecureStorage) => {
+                "The email and password are saved in the secure storage."
+            }
+            _ => "Using CHIMNEY_EMAIL / CHIMNEY_PASSWORD from the environment where not saved here.",
+        };
         let token_status = match token_source {
-            ward_chimney::TokenSource::SecureStorage => "A token is saved in the secure storage.",
+            ward_chimney::TokenSource::SecureStorage => {
+                "A token is saved in the secure storage; it overrides the service account."
+            }
             ward_chimney::TokenSource::Environment => {
-                "Using the CHIMNEY_ACCESS_TOKEN environment variable."
+                "Using the CHIMNEY_ACCESS_TOKEN environment variable; it overrides the service \
+                 account."
             }
             ward_chimney::TokenSource::Missing => {
-                "No token: enter one here or set the CHIMNEY_ACCESS_TOKEN environment variable."
+                "Optional: a ready token (or CHIMNEY_ACCESS_TOKEN) overrides the service account. \
+                 It expires and is not renewed."
             }
         };
-        let fetch_status = ward_chimney::model::model(app).and_then(|model| {
+        let model = ward_chimney::model::model(app);
+        let auth_status = model.and_then(|model| match model.auth_status() {
+            ward_chimney::auth::AuthStatus::SignedIn { email } => {
+                Some(format!("Signed in as {email}."))
+            }
+            ward_chimney::auth::AuthStatus::Token => {
+                Some("Signed in with the access token.".to_owned())
+            }
+            ward_chimney::auth::AuthStatus::Failed(err) => {
+                Some(format!("Last error: {}.", err.message()))
+            }
+            ward_chimney::auth::AuthStatus::Unknown => None,
+        });
+        let fetch_status = model.and_then(|model| {
             model
                 .error(board_id)
+                .filter(|err| {
+                    // Sign-in failures are already in the status line.
+                    auth_status.is_none()
+                        || !matches!(
+                            err,
+                            ward_chimney::model::FetchError::Auth(_)
+                                | ward_chimney::model::FetchError::NotConfigured
+                        )
+                })
                 .map(|err| format!("Last request: {}.", err.message()))
                 .or_else(|| {
-                    model
-                        .board(board_id)
-                        .map(|board| format!("Connected to board \u{201c}{}\u{201d}.", board.title))
+                    model.board(board_id).map(|board| {
+                        format!("Connected to board \u{201c}{}\u{201d}.", board.title)
+                    })
                 })
         });
+        let remove_row = |text: &str, mouse_state: MouseStateHandle, action: CLIAgentsPageAction| {
+            let button = appearance
+                .ui_builder()
+                .close_button(16., mouse_state)
+                .build()
+                .on_click(move |ctx, _, _| {
+                    ctx.dispatch_typed_action(action.clone());
+                })
+                .finish();
+            Flex::row()
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_spacing(6.)
+                .with_child(label(text.to_owned()))
+                .with_child(button)
+                .finish()
+        };
 
         let mut column = Flex::column()
             .with_child(label("Chimney".to_owned()))
@@ -973,26 +1090,34 @@ impl SettingsWidget for ChimneyWidget {
             .with_child(ChildView::new(&view.chimney_base_url_editor).finish())
             .with_child(label(format!("Board: {board_id}")))
             .with_child(ChildView::new(&view.chimney_board_editor).finish())
-            .with_child(label("Access token".to_owned()))
-            .with_child(description(token_status.to_owned()))
-            .with_child(ChildView::new(&view.chimney_token_editor).finish());
+            .with_child(label("Service account".to_owned()))
+            .with_child(description(account_status.to_owned()));
+        if let Some(email) = ward_chimney::email(app) {
+            column.add_child(description(format!("Email: {email}")));
+        }
+        column.add_child(ChildView::new(&view.chimney_email_editor).finish());
+        column.add_child(ChildView::new(&view.chimney_password_editor).finish());
+        if email_source == ward_chimney::TokenSource::SecureStorage
+            || password_source == ward_chimney::TokenSource::SecureStorage
+        {
+            column.add_child(remove_row(
+                "Remove saved email and password",
+                view.chimney_remove_account_mouse_state.clone(),
+                CLIAgentsPageAction::RemoveChimneyAccount,
+            ));
+        }
+        column.add_child(label("Access token".to_owned()));
+        column.add_child(description(token_status.to_owned()));
+        column.add_child(ChildView::new(&view.chimney_token_editor).finish());
         if token_source == ward_chimney::TokenSource::SecureStorage {
-            let remove_button = appearance
-                .ui_builder()
-                .close_button(16., view.chimney_remove_token_mouse_state.clone())
-                .build()
-                .on_click(|ctx, _, _| {
-                    ctx.dispatch_typed_action(CLIAgentsPageAction::RemoveChimneyToken);
-                })
-                .finish();
-            column.add_child(
-                Flex::row()
-                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                    .with_spacing(6.)
-                    .with_child(label("Remove saved token".to_owned()))
-                    .with_child(remove_button)
-                    .finish(),
-            );
+            column.add_child(remove_row(
+                "Remove saved token",
+                view.chimney_remove_token_mouse_state.clone(),
+                CLIAgentsPageAction::RemoveChimneyToken,
+            ));
+        }
+        if let Some(auth_status) = auth_status {
+            column.add_child(description(auth_status));
         }
         if let Some(fetch_status) = fetch_status {
             column.add_child(description(fetch_status));
