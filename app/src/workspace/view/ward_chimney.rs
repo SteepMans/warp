@@ -1,5 +1,5 @@
 //! Ward (OSS build) Chimney flows of the workspace: binding a tab to a card from the tab menu
-//! and starting a CLI agent from a card (Ctrl+Shift+N). Both pick the card in the command
+//! and starting a CLI agent from a card (Ctrl+Alt+N). Both pick the card in the command
 //! palette's Chimney card mode.
 
 use std::collections::HashMap;

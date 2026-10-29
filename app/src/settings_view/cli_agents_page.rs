@@ -1081,11 +1081,15 @@ impl SettingsWidget for ChimneyWidget {
 
         let mut column = Flex::column()
             .with_child(label("Chimney".to_owned()))
-            .with_child(description(
+            .with_child(description(format!(
                 "Bind tabs to Chimney cards from the tab menu and start agents from cards with \
-                 Ctrl+Shift+N. Ward only reads cards and never moves or edits them."
-                    .to_owned(),
-            ))
+                 {}. Ward only reads cards and never moves or edits them.",
+                crate::util::bindings::keybinding_name_to_display_string(
+                    "workspace:ward_start_agent_from_card",
+                    app,
+                )
+                .unwrap_or_else(|| "the command palette".to_owned())
+            )))
             .with_child(label(format!("Base URL: {}", ward_chimney::base_url(app))))
             .with_child(ChildView::new(&view.chimney_base_url_editor).finish())
             .with_child(label(format!("Board: {board_id}")))

@@ -1562,8 +1562,9 @@ pub fn init(app: &mut AppContext) {
     register_ward_bindings(app);
 }
 
-/// Ward (OSS build) bindings. Registered last so they take precedence over upstream bindings
-/// on the same keys (Ctrl+Shift+O opens the files palette upstream).
+/// Ward (OSS build) bindings. Ctrl+Alt+W and Ctrl+Alt+N are free in the upstream keymaps on
+/// Windows and Linux (Ctrl+Alt+O is the /open-repo slash command), so Warp's own Ctrl+Shift+O
+/// and Ctrl+Shift+N keep working.
 fn register_ward_bindings(app: &mut AppContext) {
     use crate::ward::action::WardAction;
     use warpui::keymap::macros::*;
@@ -1573,7 +1574,7 @@ fn register_ward_bindings(app: &mut AppContext) {
             "Toggle agent overview",
             WorkspaceAction::Ward(WardAction::ToggleOverview),
         )
-        .with_key_binding("ctrl-shift-O")
+        .with_key_binding("ctrl-alt-w")
         .with_enabled(crate::features::is_fork_oss)
         .with_group(bindings::BindingGroup::Navigation.as_str())
         .with_context_predicate(id!("Workspace")),
@@ -1582,7 +1583,7 @@ fn register_ward_bindings(app: &mut AppContext) {
             "Start agent from Chimney card",
             WorkspaceAction::Ward(WardAction::StartAgentFromCard),
         )
-        .with_key_binding("ctrl-shift-N")
+        .with_key_binding("ctrl-alt-n")
         .with_enabled(crate::features::is_fork_oss)
         .with_group(bindings::BindingGroup::Navigation.as_str())
         .with_context_predicate(id!("Workspace")),
