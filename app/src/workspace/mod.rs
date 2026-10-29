@@ -1566,6 +1566,7 @@ pub fn init(app: &mut AppContext) {
 /// on the same keys (Ctrl+Shift+O opens the files palette upstream).
 fn register_ward_bindings(app: &mut AppContext) {
     use crate::ward::action::WardAction;
+    use warpui::keymap::macros::*;
     app.register_editable_bindings([
         EditableBinding::new(
             "workspace:ward_toggle_agent_overview",
