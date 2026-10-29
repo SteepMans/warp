@@ -158,6 +158,8 @@ if ("$CHANNEL" -eq 'local') {
     $WARP_BIN = 'warp-oss'
     $BINARY_NAME = 'warp-oss.exe'
     $APP_NAME = 'WarpOss'
+    # User-visible name of the fork; $APP_NAME stays the internal id (registry, data dirs, AUMID).
+    $APP_DISPLAY_NAME = 'Ward'
     # The OSS channel does not ship Sentry, so drop the crash_reporting feature
     # (which would otherwise pull in the Sentry SDK as a dependency).
     $FEATURES = 'release_bundle,gui'
@@ -215,6 +217,10 @@ if ($IS_TUI) {
     $FEATURES = "$FEATURES,nld_classifier_v3,nld_heuristic_v2"
 }
 
+if (-not $APP_DISPLAY_NAME -or $IS_TUI) {
+    $APP_DISPLAY_NAME = $APP_NAME
+}
+
 $BINARY_PATH = "$CARGO_TARGET_OUTPUT_DIR\$BINARY_NAME"
 $BUNDLE_ID = "dev.warp.$APP_NAME"
 $INSTALLER_OUTPUT_DIR = "$WINDOWS_INSTALLER_DIR\Output"
@@ -260,6 +266,7 @@ if (-Not $SKIP_BUILD_BINARY) {
     Write-Output "Building Warp for channel $CHANNEL and bundle id $BUNDLE_ID"
     $env:CARGO_BIN_NAME = $CHANNEL
     $env:WARP_APP_NAME = $APP_NAME
+    $env:WARP_APP_DISPLAY_NAME = $APP_DISPLAY_NAME
     cargo build -p $CARGO_PACKAGE --profile "$CARGO_PROFILE" --bin "$WARP_BIN" --features "$FEATURES" --target $PLATFORM_TARGET
     if (-Not $?) {
         Write-Error "Failed to build Warp $WARP_BIN binary with profile $CARGO_PROFILE"
@@ -355,6 +362,7 @@ $ISCC_ARGS = @(
     "/DMyAppExeName=$BINARY_NAME",
     "/DTargetProfileDir=$CARGO_TARGET_OUTPUT_DIR",
     "/DMyAppName=$APP_NAME",
+    "/DMyAppDisplayName=$APP_DISPLAY_NAME",
     "/DMyAppVersion=$env:GIT_RELEASE_TAG",
     "/DArch=$ARCH",
     "/DOutputName=$INSTALLER_NAME"
