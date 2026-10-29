@@ -581,6 +581,8 @@ impl AgentInputFooter {
                 })
         });
 
+        ward::subscribe_to_chimney(ctx);
+
         // Toggle rich input button label when CLI input session opens/closes.
         // Also reset CLI voice state if the session ends while voice is active.
         ctx.subscribe_to_model(
@@ -1789,6 +1791,11 @@ impl AgentInputFooter {
             .with_main_axis_size(MainAxisSize::Min)
             .with_spacing(4.);
 
+        if let Some(chip) =
+            crate::ward::chimney::chip::render_card_chip(self.terminal_view_id, appearance, app)
+        {
+            right_buttons.add_child(chip);
+        }
         if let Some(chip) = ward::render_next_waiting_chip(self.terminal_view_id, appearance, app) {
             right_buttons.add_child(chip);
         }
