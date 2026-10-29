@@ -59,7 +59,7 @@ use crate::ai::harness_availability::{
     AuthSecretFetchState, HarnessAvailabilityEvent, HarnessAvailabilityModel,
 };
 use crate::ai::llms::{LLMPreferences, LLMPreferencesEvent};
-use crate::ai::orchestration::model_snapshot;
+use crate::ai::orchestration::{OptionSnapshot, model_snapshot};
 use crate::appearance::Appearance;
 use crate::features::FeatureFlag;
 use crate::menu::{Event as MenuEvent, Menu, MenuItem, MenuItemFields, MenuVariant};
@@ -118,6 +118,22 @@ pub struct RunAgentsCardFields {
     pub skills: Vec<SkillReference>,
     /// The plan that this RunAgents call is executing for.
     pub plan_id: String,
+}
+
+impl RunAgentsCardFields {
+    fn clear_unavailable_child_models(&mut self, models: &OptionSnapshot) {
+        for child in &mut self.agent_run_configs {
+            let model_id = child.model_id.trim();
+            if !model_id.is_empty()
+                && !models
+                    .rows
+                    .iter()
+                    .any(|row| row.id == model_id && row.disabled_reason.is_none())
+            {
+                child.model_id.clear();
+            }
+        }
+    }
 }
 
 /// Per-action edit state for the orchestrate confirmation card: the
@@ -1521,6 +1537,12 @@ impl TypedActionView for RunAgentsCardView {
                     fallback,
                     ctx,
                 );
+                if FeatureFlag::ChildModelRouting.is_enabled() {
+                    self.card.clear_unavailable_child_models(&model_snapshot(
+                        &self.orchestration_edit_state.orchestration_config_state,
+                        ctx,
+                    ));
+                }
                 // Harness change resets per-harness selection state, so
                 // give the new harness a fresh auto-open prompt.
                 self.has_auto_opened_create_modal = false;

@@ -10,6 +10,53 @@ use warp_util::local_or_remote_path::LocalOrRemotePath;
 
 use super::{RunAgentsCardFields, RunAgentsEditState, format_launch_details};
 use crate::ai::blocklist::inline_action::orchestration_controls::OrchestrationConfigState;
+use crate::ai::orchestration::{OptionRow, OptionSnapshot, OptionSourceStatus};
+
+#[test]
+fn harness_change_clears_only_unavailable_child_models_from_launch_request() {
+    let mut request = make_request("oz", RunAgentsExecutionMode::Local);
+    request.agent_run_configs = ["old-harness-model", " compatible ", "", "disabled"]
+        .into_iter()
+        .map(|model_id| RunAgentsAgentRunConfig {
+            model_id: model_id.to_string(),
+            ..request.agent_run_configs[0].clone()
+        })
+        .collect();
+    let mut state = RunAgentsEditState::from_request(&request);
+    state.orchestration_config_state.harness_type = "claude".to_string();
+    state.orchestration_config_state.model_id = "new-batch-model".to_string();
+    let models = OptionSnapshot {
+        rows: [
+            ("compatible", None),
+            ("disabled", Some("Unavailable".to_string())),
+        ]
+        .into_iter()
+        .map(|(id, disabled_reason)| OptionRow {
+            id: id.to_string(),
+            label: id.to_string(),
+            harness: None,
+            badge: None,
+            disabled_reason,
+        })
+        .collect(),
+        selected_id: None,
+        status: OptionSourceStatus::Ready,
+        footer: None,
+    };
+
+    state.card.clear_unavailable_child_models(&models);
+
+    let confirmed = state.to_request();
+    assert_eq!(confirmed.model_id, "new-batch-model");
+    assert_eq!(
+        confirmed
+            .agent_run_configs
+            .iter()
+            .map(|child| child.model_id.as_str())
+            .collect::<Vec<_>>(),
+        ["", " compatible ", "", ""]
+    );
+}
 
 fn make_request(harness: &str, mode: RunAgentsExecutionMode) -> RunAgentsRequest {
     make_request_with_skills(harness, mode, Vec::new())
