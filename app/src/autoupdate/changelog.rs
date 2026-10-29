@@ -24,6 +24,14 @@ pub async fn get_current_changelog(server_api: Arc<ServerApi>) -> Result<Option<
 
     let channel = ChannelState::channel();
 
+    // Self-published OSS releases carry their own changelog.json; there is no
+    // channel_versions.json to fall back to.
+    if channel == Channel::Oss {
+        return crate::ward::changelog::fetch_current(server_api.http_client())
+            .await
+            .map(Some);
+    }
+
     if should_fetch_changelog_json(channel) {
         log::info!("Attempting to fetch changelog.json");
         match fetch_current_changelog(server_api.http_client(), rand.as_str()).await {

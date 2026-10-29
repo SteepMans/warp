@@ -1994,7 +1994,9 @@ impl RootView {
         };
 
         match &root_view.auth_onboarding_state {
-            AuthOnboardingState::Terminal(workspace) if FeatureFlag::Changelog.is_enabled() => {
+            AuthOnboardingState::Terminal(workspace)
+                if FeatureFlag::Changelog.is_enabled() || crate::ward::changelog::is_enabled() =>
+            {
                 // Only show the changelog if we aren't about to launch the authentication flow
                 workspace.update(ctx, |workspace, ctx| {
                     workspace.check_for_changelog(ChangelogRequestType::WindowLaunch, ctx);
