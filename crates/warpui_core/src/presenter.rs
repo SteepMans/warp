@@ -34,6 +34,8 @@ pub struct Presenter {
     text_layout_cache: LayoutCache,
     position_cache: PositionCache,
     highlighted_view: Option<EntityId>,
+    /// Views laid out in the last frame: the root and every view embedded below it.
+    laid_out_views: EntityIdSet,
 }
 
 pub struct LayoutContext<'a> {
@@ -312,6 +314,7 @@ impl Presenter {
             text_layout_cache: LayoutCache::new(),
             position_cache: PositionCache::default(),
             highlighted_view: None,
+            laid_out_views: EntityIdSet::default(),
         }
     }
 
@@ -328,6 +331,22 @@ impl Presenter {
         for view_id in invalidation.removed {
             self.rendered_views.remove(&view_id);
         }
+    }
+
+    /// Whether `invalidation` only touches views that were not part of the last frame, such as
+    /// the terminal of a background tab. Rebuilding the scene for it would draw the same frame
+    /// again; the views still need to be re-rendered (see [`Self::invalidate`]) so that they are
+    /// up to date once they are laid out.
+    pub fn is_offscreen_only(&self, invalidation: &WindowInvalidation) -> bool {
+        self.frame_count > 0
+            && !invalidation.redraw_requested
+            && invalidation.removed.is_empty()
+            && !invalidation.updated.is_empty()
+            && invalidation.updated.iter().all(|view_id| {
+                // A view that has never been rendered may be embedded already: layout skips
+                // views without a rendered element, so it would be missing from the last frame.
+                self.rendered_views.contains_key(view_id) && !self.laid_out_views.contains(view_id)
+            })
     }
 
     pub fn build_scene(
@@ -352,6 +371,11 @@ impl Presenter {
         // (Reported as a batch because the layout walk itself only has `&AppContext`.)
         let mut view_embeddings = EntityIdMap::default();
         self.layout(zoomed_window_size, &mut view_embeddings, ctx);
+        self.laid_out_views = view_embeddings
+            .keys()
+            .copied()
+            .chain(ctx.root_view_id(self.window_id))
+            .collect();
         ctx.report_view_embeddings(self.window_id, view_embeddings);
         // In theory, after_layout would be a good place for Elements to update app state with the
         // results of layout (for example, if a View stored the heights of its children to

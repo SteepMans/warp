@@ -1047,6 +1047,25 @@ impl AppContext {
         invalidations
     }
 
+    /// Re-renders the invalidated views of `window_id` without redrawing the window when none of
+    /// them was laid out in the last frame. Returns whether the invalidations were absorbed;
+    /// otherwise they stay pending for the next scene build.
+    ///
+    /// Views of background tabs (for example a terminal streaming agent output) notify many times
+    /// per second; without this every notification rebuilds the scene of the whole window.
+    fn absorb_offscreen_invalidations(&mut self, window_id: WindowId) -> bool {
+        let Some(presenter) = self.presenter(window_id) else {
+            return false;
+        };
+        let invalidation = self.take_all_invalidations_for_window(window_id);
+        if !presenter.borrow().is_offscreen_only(&invalidation) {
+            self.window_invalidations.insert(window_id, invalidation);
+            return false;
+        }
+        presenter.borrow_mut().invalidate(invalidation, self);
+        true
+    }
+
     fn invalidate_all_views_for_window(&mut self, window_id: WindowId) {
         let Some(window) = self.windows.get(&window_id) else {
             return;
@@ -2677,6 +2696,9 @@ impl AppContext {
             }
             Ok(_) => {
                 self.on_window_invalidated(window_id, move |window_id, ctx| {
+                    if ctx.absorb_offscreen_invalidations(window_id) {
+                        return;
+                    }
                     if let Some(window) = ctx.windows().platform_window(window_id) {
                         // All we need to do when a window is invalidated is
                         // request from the OS that it be redrawn.  We'll do all
