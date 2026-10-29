@@ -338,6 +338,21 @@ pub enum SettingsSection {
     WarpCloudAgentAPIKeys,
 }
 
+/// Pages for Warp's own AI, account and cloud features, hidden in the fork's OSS build.
+const OSS_HIDDEN_SECTIONS: &[SettingsSection] = &[
+    SettingsSection::WarpAgent,
+    SettingsSection::AgentProfiles,
+    SettingsSection::AgentMCPServers,
+    SettingsSection::Knowledge,
+    SettingsSection::BillingAndUsage,
+    SettingsSection::CodeIndexing,
+    SettingsSection::Teams,
+    SettingsSection::Referrals,
+    SettingsSection::WarpDrive,
+    SettingsSection::CloudEnvironments,
+    SettingsSection::WarpCloudAgentAPIKeys,
+];
+
 use std::fmt::{self, Display};
 
 use crate::util::bindings::custom_tag_to_keystroke;
@@ -1444,6 +1459,18 @@ impl SettingsView {
             SettingsNavItem::Page(SettingsSection::About),
         ];
 
+        if crate::features::is_fork_oss() {
+            // Warp's own agent pages are hidden in the OSS build, so the CLI agents page moves
+            // out of the Agents umbrella to the top level.
+            for item in &mut nav_items {
+                if let SettingsNavItem::Umbrella(umbrella) = item
+                    && umbrella.contains(SettingsSection::ThirdPartyCLIAgents)
+                {
+                    *item = SettingsNavItem::Page(SettingsSection::ThirdPartyCLIAgents);
+                }
+            }
+        }
+
         if FeatureFlag::WarpControlCli.is_enabled() {
             let shared_blocks_index = nav_items
                 .iter()
@@ -2112,6 +2139,9 @@ impl SettingsView {
     }
 
     fn should_render_page(&self, settings_page: &SettingsPage, app: &AppContext) -> bool {
+        if crate::features::is_fork_oss() && OSS_HIDDEN_SECTIONS.contains(&settings_page.section) {
+            return false;
+        }
         match &settings_page.view_handle {
             SettingsPageViewHandle::Main(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::Teams(v) => v.as_ref(app).should_render(app),
