@@ -40,11 +40,17 @@ pub struct SubmittableTextInput {
 
 impl SubmittableTextInput {
     pub fn new(ctx: &mut ViewContext<Self>) -> Self {
+        Self::new_with_password(false, ctx)
+    }
+
+    /// Like [`Self::new`]; a password input masks what is typed.
+    pub fn new_with_password(is_password: bool, ctx: &mut ViewContext<Self>) -> Self {
         let editor = ctx.add_typed_action_view(|ctx| {
             let appearance = Appearance::as_ref(ctx);
             let options = EditorOptions {
                 autogrow: true,
                 soft_wrap: true,
+                is_password,
                 text: TextOptions::ui_font_size(appearance),
                 ..Default::default()
             };
