@@ -33,3 +33,7 @@ pub use grid::GridStorage;
 pub use indexing::*;
 pub use mode::{KeyboardModes, KeyboardModesApplyBehavior, TermMode};
 pub use secrets::{ObfuscateSecrets, Secret, SecretHandle};
+
+#[cfg(test)]
+#[path = "long_session_perf_tests.rs"]
+mod long_session_perf_tests;
