@@ -1566,15 +1566,26 @@ pub fn init(app: &mut AppContext) {
 /// on the same keys (Ctrl+Shift+O opens the files palette upstream).
 fn register_ward_bindings(app: &mut AppContext) {
     use crate::ward::action::WardAction;
-    app.register_editable_bindings([EditableBinding::new(
-        "workspace:ward_toggle_agent_overview",
-        "Toggle agent overview",
-        WorkspaceAction::Ward(WardAction::ToggleOverview),
-    )
-    .with_key_binding("ctrl-shift-O")
-    .with_enabled(crate::features::is_fork_oss)
-    .with_group(bindings::BindingGroup::Navigation.as_str())
-    .with_context_predicate(id!("Workspace"))]);
+    app.register_editable_bindings([
+        EditableBinding::new(
+            "workspace:ward_toggle_agent_overview",
+            "Toggle agent overview",
+            WorkspaceAction::Ward(WardAction::ToggleOverview),
+        )
+        .with_key_binding("ctrl-shift-O")
+        .with_enabled(crate::features::is_fork_oss)
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_context_predicate(id!("Workspace")),
+        EditableBinding::new(
+            "workspace:ward_start_agent_from_card",
+            "Start agent from Chimney card",
+            WorkspaceAction::Ward(WardAction::StartAgentFromCard),
+        )
+        .with_key_binding("ctrl-shift-N")
+        .with_enabled(crate::features::is_fork_oss)
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_context_predicate(id!("Workspace")),
+    ]);
 }
 
 fn add_open_setting_pages_as_editable_binding(app: &mut AppContext) {
