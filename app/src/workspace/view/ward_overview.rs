@@ -138,6 +138,14 @@ impl Workspace {
                 }
                 ctx.notify();
             }
+            WardAction::BindChimneyCard(tab_index) => self.ward_bind_chimney_card(*tab_index, ctx),
+            WardAction::UnbindChimneyCard(tab_index) => {
+                self.ward_unbind_chimney_card(*tab_index, ctx)
+            }
+            WardAction::StartAgentFromCard => self.ward_start_agent_from_card(ctx),
+            WardAction::ChimneyCardPicked { board_id, task_id } => {
+                self.ward_chimney_card_picked(*board_id, *task_id, ctx)
+            }
         }
     }
 

@@ -13,6 +13,12 @@ pub enum WardAction {
     MarkAgentSeen(EntityId),
     /// Closes the tab that holds the agent's terminal.
     CloseAgentTab(EntityId),
+    /// Opens the Chimney card picker to bind the tab (by index) to a card.
+    BindChimneyCard(usize),
+    /// Removes the Chimney card binding of the tab (by index).
+    UnbindChimneyCard(usize),
+    /// Opens the Chimney card picker to start a CLI agent for a card in a new tab.
+    StartAgentFromCard,
     /// A card was picked in the Chimney card picker.
     ChimneyCardPicked { board_id: u64, task_id: u64 },
 }

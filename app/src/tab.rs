@@ -731,6 +731,48 @@ impl TabData {
                 .into_item(),
             );
         }
+        if crate::features::is_fork_oss() {
+            menu_items.extend(self.ward_chimney_menu_items(index, ctx));
+        }
+        menu_items
+    }
+
+    /// Ward (OSS build): binds the tab's active terminal pane to a Chimney card, or unbinds it.
+    fn ward_chimney_menu_items(
+        &self,
+        index: usize,
+        ctx: &AppContext,
+    ) -> Vec<MenuItem<WorkspaceAction>> {
+        use crate::ward::action::WardAction;
+        use crate::ward::chimney::bindings;
+
+        let pane_group = self.pane_group.as_ref(ctx);
+        let Some(terminal_view) = pane_group.active_session_view(ctx) else {
+            return vec![];
+        };
+        let bound = pane_group
+            .terminal_pane_session_uuid(terminal_view.id(), ctx)
+            .and_then(|uuid| bindings::card_of_pane(&bindings::uuid_hex(&uuid), ctx));
+        let bind_label = if bound.is_some() {
+            "Rebind to Chimney card\u{2026}"
+        } else {
+            "Bind to Chimney card\u{2026}"
+        };
+        let mut menu_items = vec![
+            MenuItemFields::new(bind_label)
+                .with_on_select_action(WorkspaceAction::Ward(WardAction::BindChimneyCard(index)))
+                .into_item(),
+        ];
+        if let Some(card) = bound {
+            menu_items.push(
+                MenuItemFields::new(format!(
+                    "Unbind Chimney card {}/{}",
+                    card.board_id, card.task_id
+                ))
+                .with_on_select_action(WorkspaceAction::Ward(WardAction::UnbindChimneyCard(index)))
+                .into_item(),
+            );
+        }
         menu_items
     }
 
