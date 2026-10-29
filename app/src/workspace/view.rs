@@ -3221,6 +3221,7 @@ impl Workspace {
         ctx.subscribe_to_model(&CLIAgentSessionsModel::handle(ctx), |me, _, event, ctx| {
             me.handle_cli_agent_sessions_event(event, ctx);
         });
+        Self::ward_subscribe_to_chimney(ctx);
 
         ctx.subscribe_to_model(
             &AgentNotificationsModel::handle(ctx),

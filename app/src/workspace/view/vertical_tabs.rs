@@ -4678,6 +4678,11 @@ fn render_terminal_row_content(
     if let Some(agent_line) = ward::render_agent_status_line(terminal_view.id(), appearance, app) {
         content.add_child(Container::new(agent_line).with_margin_top(2.).finish());
     }
+    if let Some(card_chip) =
+        crate::ward::chimney::chip::render_card_chip(terminal_view.id(), appearance, app)
+    {
+        content.add_child(Container::new(card_chip).with_margin_top(2.).finish());
+    }
     content.add_child(Container::new(second_line).with_margin_top(2.).finish());
     content.add_child(
         Container::new(render_terminal_metadata_line(

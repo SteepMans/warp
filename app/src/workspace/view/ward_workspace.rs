@@ -84,6 +84,25 @@ pub(crate) fn ward_sync_chimney_bindings_in_all_windows(ctx: &mut AppContext) {
 }
 
 impl Workspace {
+    /// Re-renders (tab row card chips) when a Chimney board was fetched.
+    pub(super) fn ward_subscribe_to_chimney(ctx: &mut ViewContext<Self>) {
+        if !ctx.has_singleton_model::<chimney::model::ChimneyModel>() {
+            return;
+        }
+        ctx.subscribe_to_model(
+            &chimney::model::ChimneyModel::handle(ctx),
+            |me, _, event, ctx| me.ward_handle_chimney_event(event, ctx),
+        );
+    }
+
+    fn ward_handle_chimney_event(
+        &mut self,
+        _event: &chimney::model::ChimneyEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        ctx.notify();
+    }
+
     /// Header pills with agent counts across all windows: "2 waiting · 1 error · 3 running ·
     /// 1 done", followed by the agent overview button. Only waiting and error are colored;
     /// clicking them jumps to the waiting agent.

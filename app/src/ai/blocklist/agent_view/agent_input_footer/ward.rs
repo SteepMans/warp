@@ -7,15 +7,24 @@ use warpui::elements::{
     MainAxisSize, ParentElement, Radius, Text,
 };
 use warpui::text_layout::ClipConfig;
-use warpui::{AppContext, EntityId};
+use warpui::{AppContext, EntityId, SingletonEntity, View, ViewContext};
 
 use crate::appearance::Appearance;
 use crate::util::bindings::keybinding_name_to_display_string;
 use crate::ward::attention::{self, jump_order, next_other_target};
+use crate::ward::chimney::model::ChimneyModel;
 use crate::ward::labels::clip_chars;
 use crate::workspace::action::WorkspaceAction;
 
 const MAX_NEXT_TASK_CHARS: usize = 32;
+
+/// Re-renders the footer when a Chimney board was fetched, for the card chip.
+pub(super) fn subscribe_to_chimney<V: View>(ctx: &mut ViewContext<V>) {
+    if !ctx.has_singleton_model::<ChimneyModel>() {
+        return;
+    }
+    ctx.subscribe_to_model(&ChimneyModel::handle(ctx), |_, _, _, ctx| ctx.notify());
+}
 
 /// "Next: <task> Ctrl+Shift+J": the most urgent other agent waiting for the user. Clicking it
 /// jumps there like the shortcut does.

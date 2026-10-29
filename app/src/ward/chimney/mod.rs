@@ -7,6 +7,7 @@
 
 pub mod api;
 pub mod bindings;
+pub mod chip;
 pub mod model;
 pub mod repos;
 pub mod slug;
