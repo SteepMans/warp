@@ -49,6 +49,7 @@ use crate::terminal::CLIAgent;
 use crate::util::bindings;
 use crate::view_components::dropdown::DropdownAction;
 use crate::view_components::{Dropdown, SubmittableTextInput, SubmittableTextInputEvent};
+use crate::ward::chimney as ward_chimney;
 use crate::{TelemetryEvent, send_telemetry_from_ctx};
 
 const PAGE_TITLE: &str = "Third party CLI agents";
@@ -60,6 +61,11 @@ pub struct CLIAgentsPageView {
     cli_agent_footer_command_mouse_state_handles: Vec<MouseStateHandle>,
     cli_agent_footer_command_agent_dropdowns: Vec<ViewHandle<Dropdown<CLIAgentsPageAction>>>,
     cli_agent_toolbar_inline_editor: ViewHandle<AgentToolbarInlineEditor>,
+    /// Ward (OSS build) Chimney settings inputs.
+    chimney_base_url_editor: ViewHandle<SubmittableTextInput>,
+    chimney_board_editor: ViewHandle<SubmittableTextInput>,
+    chimney_token_editor: ViewHandle<SubmittableTextInput>,
+    chimney_remove_token_mouse_state: MouseStateHandle,
 }
 
 impl CLIAgentsPageView {
@@ -114,6 +120,9 @@ impl CLIAgentsPageView {
             ctx.notify();
         });
 
+        let (chimney_base_url_editor, chimney_board_editor, chimney_token_editor) =
+            Self::create_chimney_editors(ctx);
+
         Self {
             page: Self::build_page(),
             local_only_icon_tooltip_states: Default::default(),
@@ -121,7 +130,66 @@ impl CLIAgentsPageView {
             cli_agent_footer_command_mouse_state_handles,
             cli_agent_footer_command_agent_dropdowns: Self::create_cli_agent_dropdowns(ctx),
             cli_agent_toolbar_inline_editor,
+            chimney_base_url_editor,
+            chimney_board_editor,
+            chimney_token_editor,
+            chimney_remove_token_mouse_state: Default::default(),
         }
+    }
+
+    /// Base URL, board id and access token inputs of the Chimney section. Each saves on Enter.
+    fn create_chimney_editors(
+        ctx: &mut ViewContext<Self>,
+    ) -> (
+        ViewHandle<SubmittableTextInput>,
+        ViewHandle<SubmittableTextInput>,
+        ViewHandle<SubmittableTextInput>,
+    ) {
+        let base_url_editor = ctx.add_typed_action_view(|ctx| {
+            let mut input = SubmittableTextInput::new(ctx)
+                .validate_on_edit(|url| ward_chimney::normalize_base_url(url).is_some());
+            input.set_placeholder_text(ward_chimney::DEFAULT_BASE_URL, ctx);
+            input
+        });
+        let board_editor = ctx.add_typed_action_view(|ctx| {
+            let mut input = SubmittableTextInput::new(ctx)
+                .validate_on_edit(|id| id.trim().parse::<u64>().is_ok_and(|id| id > 0));
+            input.set_placeholder_text("board id", ctx);
+            input
+        });
+        let token_editor = ctx.add_typed_action_view(|ctx| {
+            let mut input = SubmittableTextInput::new_with_password(true, ctx);
+            input.set_placeholder_text("access token", ctx);
+            input
+        });
+        for editor in [&base_url_editor, &board_editor, &token_editor] {
+            update_editor_interaction_state(editor.as_ref(ctx).editor().clone(), true, ctx);
+        }
+        ctx.subscribe_to_view(&base_url_editor, |_, _, event, ctx| match event {
+            SubmittableTextInputEvent::Submit(url) => {
+                ward_chimney::set_base_url(url, ctx);
+                ctx.notify();
+            }
+            SubmittableTextInputEvent::Escape => ctx.emit(CLIAgentsPageEvent::FocusModal),
+        });
+        ctx.subscribe_to_view(&board_editor, |_, _, event, ctx| match event {
+            SubmittableTextInputEvent::Submit(id) => {
+                if let Ok(id) = id.trim().parse::<u64>() {
+                    ward_chimney::set_board_id(id, ctx);
+                }
+                ctx.notify();
+            }
+            SubmittableTextInputEvent::Escape => ctx.emit(CLIAgentsPageEvent::FocusModal),
+        });
+        ctx.subscribe_to_view(&token_editor, |_, _, event, ctx| match event {
+            SubmittableTextInputEvent::Submit(token) => {
+                ward_chimney::set_access_token(token, ctx);
+                crate::ward::chimney::model::ensure_polling(ctx);
+                ctx.notify();
+            }
+            SubmittableTextInputEvent::Escape => ctx.emit(CLIAgentsPageEvent::FocusModal),
+        });
+        (base_url_editor, board_editor, token_editor)
     }
 
     fn build_page() -> PageType<Self> {
@@ -133,6 +201,7 @@ impl CLIAgentsPageView {
             Box::new(CLIAgentSubmitRichInputWidget::default()),
             Box::new(CLIAgentCommandsWidget),
             Box::new(CLIAgentToolbarLayoutWidget),
+            Box::new(ChimneyWidget::default()),
         ];
         PageType::new_uncategorized(widgets, Some(PageTitle::new(PAGE_TITLE)))
     }
@@ -243,6 +312,8 @@ pub enum CLIAgentsPageAction {
         pattern: String,
         agent: Option<CLIAgent>,
     },
+    /// Ward: removes the Chimney access token from the secure storage.
+    RemoveChimneyToken,
 }
 
 impl TypedActionView for CLIAgentsPageView {
@@ -311,6 +382,10 @@ impl TypedActionView for CLIAgentsPageView {
                 AISettings::handle(ctx).update(ctx, |settings, ctx| {
                     settings.set_cli_agent_for_command(pattern, *agent, ctx);
                 });
+            }
+            CLIAgentsPageAction::RemoveChimneyToken => {
+                ward_chimney::set_access_token("", ctx);
+                ctx.notify();
             }
         }
     }
@@ -813,5 +888,115 @@ impl SettingsWidget for CLIAgentToolbarLayoutWidget {
         }
 
         render_toolbar_layout_editor(&view.cli_agent_toolbar_inline_editor, appearance)
+    }
+}
+
+/// Ward (OSS build): Chimney kanban connection for card chips and starting agents from cards.
+#[derive(Default)]
+struct ChimneyWidget;
+
+impl SettingsWidget for ChimneyWidget {
+    type View = CLIAgentsPageView;
+
+    fn search_terms(&self) -> &str {
+        "chimney kanban card board token ward"
+    }
+
+    fn should_render(&self, _app: &AppContext) -> bool {
+        crate::features::is_fork_oss()
+    }
+
+    fn render(
+        &self,
+        view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        if !self.should_render(app) {
+            return Empty::new().finish();
+        }
+        let label = |text: String| {
+            appearance
+                .ui_builder()
+                .span(text)
+                .with_style(UiComponentStyles {
+                    font_size: Some(CONTENT_FONT_SIZE),
+                    ..Default::default()
+                })
+                .build()
+                .finish()
+        };
+        let description = |text: String| {
+            appearance
+                .ui_builder()
+                .paragraph(text)
+                .with_style(UiComponentStyles {
+                    font_size: Some(appearance.ui_font_size()),
+                    font_color: Some(styles::description_font_color(true, app).into()),
+                    margin: Some(Coords::default().top(2.).bottom(8.)),
+                    ..Default::default()
+                })
+                .build()
+                .finish()
+        };
+
+        let board_id = ward_chimney::board_id(app);
+        let token_source = ward_chimney::token_source(app);
+        let token_status = match token_source {
+            ward_chimney::TokenSource::SecureStorage => "A token is saved in the secure storage.",
+            ward_chimney::TokenSource::Environment => {
+                "Using the CHIMNEY_ACCESS_TOKEN environment variable."
+            }
+            ward_chimney::TokenSource::Missing => {
+                "No token: enter one here or set the CHIMNEY_ACCESS_TOKEN environment variable."
+            }
+        };
+        let fetch_status = ward_chimney::model::model(app).and_then(|model| {
+            model
+                .error(board_id)
+                .map(|err| format!("Last request: {}.", err.message()))
+                .or_else(|| {
+                    model
+                        .board(board_id)
+                        .map(|board| format!("Connected to board \u{201c}{}\u{201d}.", board.title))
+                })
+        });
+
+        let mut column = Flex::column()
+            .with_child(label("Chimney".to_owned()))
+            .with_child(description(
+                "Bind tabs to Chimney cards from the tab menu and start agents from cards with \
+                 Ctrl+Shift+N. Ward only reads cards and never moves or edits them."
+                    .to_owned(),
+            ))
+            .with_child(label(format!("Base URL: {}", ward_chimney::base_url(app))))
+            .with_child(ChildView::new(&view.chimney_base_url_editor).finish())
+            .with_child(label(format!("Board: {board_id}")))
+            .with_child(ChildView::new(&view.chimney_board_editor).finish())
+            .with_child(label("Access token".to_owned()))
+            .with_child(description(token_status.to_owned()))
+            .with_child(ChildView::new(&view.chimney_token_editor).finish());
+        if token_source == ward_chimney::TokenSource::SecureStorage {
+            let remove_button = appearance
+                .ui_builder()
+                .close_button(16., view.chimney_remove_token_mouse_state.clone())
+                .build()
+                .on_click(|ctx, _, _| {
+                    ctx.dispatch_typed_action(CLIAgentsPageAction::RemoveChimneyToken);
+                })
+                .finish();
+            column.add_child(
+                Flex::row()
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_spacing(6.)
+                    .with_child(label("Remove saved token".to_owned()))
+                    .with_child(remove_button)
+                    .finish(),
+            );
+        }
+        if let Some(fetch_status) = fetch_status {
+            column.add_child(description(fetch_status));
+        }
+        column.finish()
     }
 }
