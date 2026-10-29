@@ -15003,6 +15003,10 @@ impl Workspace {
     }
 
     fn open_require_login_modal(&mut self, variant: AuthViewVariant, ctx: &mut ViewContext<Self>) {
+        // The OSS build has no Warp account, so login-gated features never prompt to sign in.
+        if crate::features::is_fork_oss() {
+            return;
+        }
         self.require_login_modal.update(ctx, |modal, ctx| {
             modal.set_variant(ctx, variant);
         });
