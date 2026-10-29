@@ -5,5 +5,7 @@
 pub mod agent_state;
 pub mod attention;
 pub mod changelog;
+pub mod labels;
 pub mod metrics;
+pub mod overview;
 pub mod project_groups;
