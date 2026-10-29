@@ -66,6 +66,7 @@ use crate::terminal::view::TerminalViewState;
 use crate::terminal::{CLIAgent, TerminalView};
 use crate::themes::theme::Fill as ThemeFill;
 use crate::ui_components::agent_icon::terminal_view_agent_icon_variant;
+use crate::ward::attention::AttentionCounts;
 use crate::ui_components::buttons::combo_inner_button;
 use crate::ui_components::icon_with_status::{IconWithStatusVariant, render_icon_with_status};
 use crate::ui_components::icons::Icon as UiIcon;
@@ -2785,6 +2786,7 @@ fn render_grouped_tabs_header(
     is_being_renamed: bool,
     rename_editor: Option<&ViewHandle<EditorView>>,
     collapsed_member_kinds: Option<&[SummaryPaneKind]>,
+    agent_counts: AttentionCounts,
     ctx: &AppContext,
 ) -> Box<dyn Element> {
     let appearance = Appearance::as_ref(ctx);
@@ -2847,6 +2849,7 @@ fn render_grouped_tabs_header(
         .with_clip(ClipConfig::ellipsis())
         .with_color(sub_text_color.into())
         .finish();
+    let subtitle = ward::with_group_agent_counts(subtitle, agent_counts, appearance);
     let text_column: Box<dyn Element> = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Start)
@@ -3063,6 +3066,7 @@ fn render_grouped_tab_container(
             is_being_renamed,
             rename_editor.as_ref(),
             collapsed_member_kinds.as_deref(),
+            ward::group_agent_counts(workspace, members, app),
             app,
         );
         // While a pane is being dragged, the group header is a drop zone for the
