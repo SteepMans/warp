@@ -7063,7 +7063,11 @@ impl Workspace {
         if crate::features::is_fork_oss() {
             for (label, command, icon) in [
                 ("Claude Code", "claude", icons::Icon::ClaudeLogo),
-                ("Claude Code (continue)", "claude --continue", icons::Icon::ClaudeLogo),
+                (
+                    "Claude Code (continue)",
+                    "claude --continue",
+                    icons::Icon::ClaudeLogo,
+                ),
                 ("Codex", "codex", icons::Icon::OpenAILogo),
             ] {
                 menu_items.push(
