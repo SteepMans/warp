@@ -100,6 +100,10 @@ lazy_static! {
         primary_text: "repos:",
         aliases: vec![]
     };
+    static ref WARD_AGENTS_FILTER_ATOM: FilterAtom = FilterAtom {
+        primary_text: "@",
+        aliases: vec![]
+    };
     static ref DIFFSETS_FILTER_ATOM: FilterAtom = FilterAtom {
         primary_text: "diffsets:",
         aliases: vec!["diffs:"]
@@ -222,6 +226,9 @@ pub enum QueryFilter {
 
     /// Include only conversations whose most recent directory matches the session's current working directory.
     CurrentDirectoryConversations,
+
+    /// Ward (fork OSS build): CLI agents of all windows, most urgent first.
+    WardAgents,
 }
 
 impl QueryFilter {
@@ -262,6 +269,7 @@ impl QueryFilter {
             QueryFilter::CurrentDirectoryConversations => {
                 "Search conversations in current directory"
             }
+            QueryFilter::WardAgents => "Search agents by project, task or question",
         }
     }
 
@@ -294,6 +302,7 @@ impl QueryFilter {
             QueryFilter::BaseModels => &NO_FILTER_ATOM,
             QueryFilter::FullTerminalUseModels => &NO_FILTER_ATOM,
             QueryFilter::CurrentDirectoryConversations => &NO_FILTER_ATOM,
+            QueryFilter::WardAgents => &WARD_AGENTS_FILTER_ATOM,
         }
     }
 
@@ -326,6 +335,7 @@ impl QueryFilter {
             QueryFilter::BaseModels => "base models",
             QueryFilter::FullTerminalUseModels => "full terminal use models",
             QueryFilter::CurrentDirectoryConversations => "current directory conversations",
+            QueryFilter::WardAgents => "agents",
         }
     }
 
@@ -365,6 +375,7 @@ impl QueryFilter {
             QueryFilter::BaseModels => None,
             QueryFilter::FullTerminalUseModels => None,
             QueryFilter::CurrentDirectoryConversations => None,
+            QueryFilter::WardAgents => Some("bundled/svg/terminal-input.svg"),
         }
     }
 }
