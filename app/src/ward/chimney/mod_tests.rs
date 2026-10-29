@@ -16,12 +16,28 @@ fn base_url_is_normalized() {
 }
 
 #[test]
-fn request_config_debug_hides_the_token() {
-    let config = RequestConfig {
-        base_url: DEFAULT_BASE_URL.to_owned(),
-        token: "secret-token-value".to_owned(),
-    };
-    let printed = format!("{config:?}");
-    assert!(!printed.contains("secret-token-value"));
-    assert!(printed.contains("<redacted>"));
+fn request_config_debug_hides_secrets() {
+    for credentials in [
+        Credentials::Token("secret-token-value".to_owned()),
+        Credentials::Password {
+            email: "bot@example.com".to_owned(),
+            password: "secret-token-value".to_owned(),
+        },
+    ] {
+        let config = RequestConfig {
+            base_url: DEFAULT_BASE_URL.to_owned(),
+            credentials,
+        };
+        let printed = format!("{config:?}");
+        assert!(!printed.contains("secret-token-value"));
+        assert!(printed.contains("<redacted>"));
+    }
+}
+
+#[test]
+fn secrets_are_trimmed_but_passwords_keep_spaces() {
+    assert_eq!(trim_secret(EMAIL_ENV_VAR, " bot@example.com\r\n"), "bot@example.com");
+    assert_eq!(trim_secret(PASSWORD_ENV_VAR, " pass word \r\n"), " pass word ");
+    assert_eq!(trim_secret(PASSWORD_KEY, "pw\r"), "pw");
+    assert_eq!(trim_secret(TOKEN_ENV_VAR, " tok \n"), "tok");
 }
