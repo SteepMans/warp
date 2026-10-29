@@ -4,4 +4,5 @@
 
 pub mod agent_state;
 pub mod attention;
+pub mod changelog;
 pub mod project_groups;
