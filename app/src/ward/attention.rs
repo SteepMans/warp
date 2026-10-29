@@ -138,6 +138,11 @@ pub fn next_jump_target(order: &[EntityId], current: Option<EntityId>) -> Option
     }
 }
 
+/// The most urgent agent other than `current`: what the footer of `current` offers as "Next".
+pub fn next_other_target(order: &[EntityId], current: EntityId) -> Option<EntityId> {
+    order.iter().copied().find(|id| *id != current)
+}
+
 /// Status filter of the vertical tabs panel.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AgentStatusFilter {

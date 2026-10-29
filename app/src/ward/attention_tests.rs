@@ -105,3 +105,13 @@ fn claim_notification_throttles_per_agent() {
     assert!(claim_notification(b, AgentState::Error));
     assert!(!claim_notification(EntityId::new(), AgentState::DoneUnseen));
 }
+
+#[test]
+fn next_other_target_skips_the_current_agent() {
+    let a = EntityId::from_usize(1);
+    let b = EntityId::from_usize(2);
+    assert_eq!(next_other_target(&[a, b], a), Some(b));
+    assert_eq!(next_other_target(&[a, b], b), Some(a));
+    assert_eq!(next_other_target(&[a], a), None);
+    assert_eq!(next_other_target(&[], a), None);
+}
