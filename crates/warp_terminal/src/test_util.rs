@@ -1,3 +1,5 @@
+pub mod ink_session;
+
 use std::collections::HashMap;
 
 use itertools::Itertools;
