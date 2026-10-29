@@ -14482,8 +14482,15 @@ impl TerminalView {
             }
         }
 
-        // Desktop notifications — only when navigated away and not in-progress.
-        if !self.is_navigated_away_from_window(ctx)
+        // Desktop notifications — only when navigated away and not in-progress. Ward also
+        // notifies when only the tab is hidden, but only for waiting and errors, throttled, and
+        // flashes the taskbar.
+        if crate::features::is_fork_oss() {
+            if !crate::ward::attention::should_notify_agent(self.view_id, ctx) {
+                return;
+            }
+            ctx.request_user_attention();
+        } else if !self.is_navigated_away_from_window(ctx)
             || matches!(status, CLIAgentSessionStatus::InProgress)
         {
             return;
