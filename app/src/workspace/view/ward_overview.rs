@@ -146,6 +146,9 @@ impl Workspace {
             WardAction::ChimneyCardPicked { board_id, task_id } => {
                 self.ward_chimney_card_picked(*board_id, *task_id, ctx)
             }
+            WardAction::OpenChimneyCardInBrowser(card) => {
+                ctx.open_url(&crate::ward::chimney::links::browser_url(*card));
+            }
         }
     }
 
@@ -316,6 +319,14 @@ fn render_card(entry: &AgentEntry, appearance: &Appearance, app: &AppContext) ->
             appearance,
         )),
         _ => {}
+    }
+    if let Some(card_ref) = crate::ward::chimney::bindings::card_of_view(terminal_view_id, app) {
+        actions.add_child(render_card_button(
+            "Open card",
+            WardAction::OpenChimneyCardInBrowser(card_ref),
+            sub_text,
+            appearance,
+        ));
     }
     card.add_child(Container::new(actions.finish()).with_margin_top(3.).finish());
 
