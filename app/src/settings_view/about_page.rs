@@ -61,6 +61,7 @@ struct AboutPageWidget {
     copy_version_button_mouse_state: MouseStateHandle,
     repo_link_mouse_state: MouseStateHandle,
     check_for_update_mouse_state: MouseStateHandle,
+    whats_new_mouse_state: MouseStateHandle,
 }
 
 impl AboutPageWidget {
@@ -125,6 +126,21 @@ impl AboutPageWidget {
                             ctx.dispatch_typed_action(WorkspaceAction::CheckForUpdate);
                         })),
                         self.check_for_update_mouse_state.clone(),
+                    )
+                    .soft_wrap(false)
+                    .build()
+                    .with_margin_top(8.)
+                    .finish(),
+            );
+            children.push(
+                ui_builder
+                    .link(
+                        "What's new".to_string(),
+                        None,
+                        Some(Box::new(|ctx| {
+                            ctx.dispatch_typed_action(WorkspaceAction::ViewLatestChangelog);
+                        })),
+                        self.whats_new_mouse_state.clone(),
                     )
                     .soft_wrap(false)
                     .build()
