@@ -1693,7 +1693,7 @@ impl UserWorkspaces {
 
     /// Updates whether or not session sharing is enabled based on the current team's tier policy.
     fn update_session_sharing_enablement(&self, ctx: &AppContext) {
-        if cfg!(any(test, feature = "integration_tests")) {
+        if cfg!(any(test, feature = "integration_tests")) || crate::features::is_fork_oss() {
             return;
         }
 

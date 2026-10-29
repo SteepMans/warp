@@ -68,7 +68,7 @@ impl ServerExperiment {
     fn on_added_to(&self, _ctx: &mut AppContext) {
         match self {
             Self::SessionSharingExperiment => {
-                FeatureFlag::CreatingSharedSessions.set_enabled(true);
+                FeatureFlag::CreatingSharedSessions.set_enabled(!crate::features::is_fork_oss());
             }
             Self::SessionSharingControl => {
                 FeatureFlag::CreatingSharedSessions.set_enabled(false);
