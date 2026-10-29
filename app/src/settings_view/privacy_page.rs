@@ -1844,6 +1844,11 @@ impl SettingsWidget for DataManagementWidget {
         "data management delete account"
     }
 
+    // Deleting a Warp account does not apply to the OSS build, which has no account.
+    fn should_render(&self, _app: &AppContext) -> bool {
+        !crate::features::is_fork_oss()
+    }
+
     fn render(
         &self,
         _view: &Self::View,
