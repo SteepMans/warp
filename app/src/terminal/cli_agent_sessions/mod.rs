@@ -464,6 +464,7 @@ impl CLIAgentSessionsModel {
         {
             // Upgrade existing session with plugin context.
             session.status = CLIAgentSessionStatus::InProgress;
+            crate::ward::agent_state::observe_status(terminal_view_id, &session.status);
             session.listener = Some(listener);
             session.plugin_version = plugin_version;
             session.remote_host = remote_host;
@@ -502,6 +503,7 @@ impl CLIAgentSessionsModel {
     pub fn remove_session(&mut self, terminal_view_id: EntityId, ctx: &mut ModelContext<Self>) {
         self.abort_pending_cancel(terminal_view_id);
         self.ctrl_c_cancel_state.remove(&terminal_view_id);
+        crate::ward::agent_state::forget(terminal_view_id);
         if let Some(session) = self.sessions.remove(&terminal_view_id) {
             ctx.emit(CLIAgentSessionsModelEvent::Ended {
                 terminal_view_id,
@@ -563,6 +565,7 @@ impl CLIAgentSessionsModel {
         } else {
             session.apply_event(event)
         };
+        crate::ward::agent_state::observe_event(terminal_view_id, event, &session.status);
         if let Some(new_status) = new_status {
             let agent = session.agent;
             ctx.emit(CLIAgentSessionsModelEvent::StatusChanged {
@@ -707,6 +710,7 @@ impl CLIAgentSessionsModel {
         }
 
         session.status = CLIAgentSessionStatus::Cancelled;
+        crate::ward::agent_state::observe_status(terminal_view_id, &session.status);
         let agent = session.agent;
         let session_context = Box::new(session.session_context.clone());
         ctx.emit(CLIAgentSessionsModelEvent::StatusChanged {
@@ -801,6 +805,8 @@ impl CLIAgentSessionsModel {
         // arm, and any pending window belonged to the session being replaced.
         self.abort_pending_cancel(terminal_view_id);
         self.ctrl_c_cancel_state.remove(&terminal_view_id);
+        crate::ward::agent_state::forget(terminal_view_id);
+        crate::ward::agent_state::observe_status(terminal_view_id, &session.status);
         if let Some(old) = self.sessions.insert(terminal_view_id, session) {
             ctx.emit(CLIAgentSessionsModelEvent::Ended {
                 terminal_view_id,
