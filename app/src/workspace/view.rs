@@ -21634,7 +21634,8 @@ impl Workspace {
 
         let is_online = NetworkStatus::as_ref(ctx).is_online();
 
-        if !is_online {
+        // The offline indicator is about Warp's cloud features, which the OSS build lacks.
+        if !is_online && !crate::features::is_fork_oss() {
             target.add_child(
                 Container::new(self.render_offline_button(appearance))
                     .with_margin_right(4.)
@@ -22515,7 +22516,10 @@ impl Workspace {
     }
 
     fn render_reauth_banner_element(&self) -> Option<WorkspaceBannerFields> {
-        if self.reauth_banner_dismissed || !self.auth_state.needs_reauth() {
+        if self.reauth_banner_dismissed
+            || !self.auth_state.needs_reauth()
+            || crate::features::is_fork_oss()
+        {
             return None;
         }
 
