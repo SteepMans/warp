@@ -11,12 +11,12 @@ use warpui::elements::{
 use warpui::text_layout::ClipConfig;
 use warpui::{AppContext, EntityId, SingletonEntity};
 
-use crate::workspace::Workspace;
 use crate::appearance::Appearance;
 use crate::pane_group::PaneId;
 use crate::ward::agent_state::{AgentState, agent_snapshot, format_in_state};
 use crate::ward::attention::{self, AgentStatusFilter, AttentionCounts};
 use crate::ward::project_groups::remote_control_session_name;
+use crate::workspace::Workspace;
 use crate::workspace::action::WorkspaceAction;
 
 const STATE_GLYPH_SIZE: f32 = 12.;

@@ -232,7 +232,9 @@ pub fn observe_status(terminal_view_id: EntityId, status: &CLIAgentSessionStatus
         return;
     }
     let kind = StatusKind::of(status);
-    with_tracked(terminal_view_id, kind, |agent| agent.observe(kind, Instant::now()));
+    with_tracked(terminal_view_id, kind, |agent| {
+        agent.observe(kind, Instant::now())
+    });
 }
 
 /// Records a plugin event and the status the session ended up in after it.
@@ -288,7 +290,6 @@ pub fn mark_seen(terminal_view_id: EntityId) -> bool {
 #[derive(Clone, Debug)]
 pub struct AgentSnapshot {
     pub terminal_view_id: EntityId,
-    pub agent: CLIAgent,
     pub state: AgentState,
     pub in_state: Duration,
     /// Question text, tool and argument, error message or completion summary.
@@ -317,11 +318,13 @@ pub fn agent_snapshot(terminal_view_id: EntityId, app: &AppContext) -> Option<Ag
     let state = derive_state(kind, last_tool.is_some(), unseen, in_state);
     Some(AgentSnapshot {
         terminal_view_id,
-        agent: session.agent,
         state,
         in_state,
         detail: detail_text(state, session, last_tool.as_ref()),
-        task: session.session_context.latest_user_prompt().map(|t| clip(&t)),
+        task: session
+            .session_context
+            .latest_user_prompt()
+            .map(|t| clip(&t)),
     })
 }
 
@@ -340,9 +343,13 @@ fn detail_text(
             None => blocked_message(&session.status),
         },
         (AgentState::WaitingAnswer, _) => blocked_message(&session.status),
-        (AgentState::Error, CLIAgentSessionStatus::Failed { error_type, message }) => {
-            error_line(error_type.as_deref(), message.as_deref())
-        }
+        (
+            AgentState::Error,
+            CLIAgentSessionStatus::Failed {
+                error_type,
+                message,
+            },
+        ) => error_line(error_type.as_deref(), message.as_deref()),
         (AgentState::RunningTool, _) => {
             last_tool.map(|tool| tool_line(&tool.name, tool.input_preview.as_deref()))
         }
@@ -370,7 +377,10 @@ fn blocked_message(status: &CLIAgentSessionStatus) -> Option<String> {
 
 /// `"Bash dotnet test"`: the tool name followed by its argument preview.
 pub fn tool_line(tool: &str, input_preview: Option<&str>) -> String {
-    match input_preview.map(collapse_whitespace).filter(|p| !p.is_empty()) {
+    match input_preview
+        .map(collapse_whitespace)
+        .filter(|p| !p.is_empty())
+    {
         Some(preview) => format!("{tool} {preview}"),
         None => tool.to_owned(),
     }

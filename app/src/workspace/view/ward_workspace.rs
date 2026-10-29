@@ -14,16 +14,16 @@ use warpui::{AppContext, EntityId, SingletonEntity, ViewContext};
 
 use super::Workspace;
 use crate::appearance::Appearance;
-use crate::util::bindings::keybinding_name_to_display_string;
-use crate::ward::agent_state::AgentState;
-use crate::ward::attention::AttentionCounts;
-use crate::workspace::action::WorkspaceAction;
 use crate::features::FeatureFlag;
 use crate::tab::{SelectedTabColor, TabData};
 use crate::terminal::cli_agent_sessions::{CLIAgentSessionsModel, CLIAgentSessionsModelEvent};
-use crate::ward::{agent_state, attention};
+use crate::util::bindings::keybinding_name_to_display_string;
+use crate::ward::agent_state::AgentState;
+use crate::ward::attention::AttentionCounts;
 use crate::ward::project_groups::{self, TabObservation};
+use crate::ward::{agent_state, attention};
 use crate::workspace::WorkspaceRegistry;
+use crate::workspace::action::WorkspaceAction;
 use crate::workspace::tab_group::TabGroup;
 
 /// Learns project groups from, and auto-places tabs in, every window. Runs whenever the app
@@ -67,7 +67,11 @@ impl Workspace {
         let quiet = theme.sub_text_color(theme.background()).into_solid();
         let jump_shortcut =
             keybinding_name_to_display_string("workspace:ward_jump_to_waiting_agent", app);
-        let error_label = if counts.errors == 1 { "error" } else { "errors" };
+        let error_label = if counts.errors == 1 {
+            "error"
+        } else {
+            "errors"
+        };
         let pills = [
             (
                 counts.waiting,
@@ -131,7 +135,11 @@ impl Workspace {
         }
     }
 
-    fn ward_focus_terminal_view(&mut self, terminal_view_id: EntityId, ctx: &mut ViewContext<Self>) {
+    fn ward_focus_terminal_view(
+        &mut self,
+        terminal_view_id: EntityId,
+        ctx: &mut ViewContext<Self>,
+    ) {
         if !self.focus_terminal_view_locally(terminal_view_id, ctx) {
             self.focus_terminal_view_in_other_window(terminal_view_id, ctx);
         }
@@ -291,8 +299,7 @@ impl Workspace {
             None => {
                 let mut group = TabGroup::new();
                 group.name = Some(group_name.to_owned());
-                group.color =
-                    SelectedTabColor::Color(project_groups::auto_group_color(group_name));
+                group.color = SelectedTabColor::Color(project_groups::auto_group_color(group_name));
                 let group_id = group.id;
                 self.tab_groups.insert(group_id, group);
                 // A new single-member group stays where the tab is, past its old group so that
@@ -353,7 +360,10 @@ fn render_attention_pill(
                 .finish(),
         );
     }
-    let background = coloru_with_opacity(accent.unwrap_or(quiet), if accent.is_some() { 13 } else { 10 });
+    let background = coloru_with_opacity(
+        accent.unwrap_or(quiet),
+        if accent.is_some() { 13 } else { 10 },
+    );
     let pill = Container::new(content.finish())
         .with_horizontal_padding(8.)
         .with_vertical_padding(3.)

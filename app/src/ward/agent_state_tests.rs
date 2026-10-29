@@ -93,9 +93,7 @@ fn tracked_agent_restarts_clock_only_on_kind_change() {
 
 #[test]
 fn jump_ranks_order_permission_question_error() {
-    assert!(
-        AgentState::WaitingPermission.jump_rank() < AgentState::WaitingAnswer.jump_rank()
-    );
+    assert!(AgentState::WaitingPermission.jump_rank() < AgentState::WaitingAnswer.jump_rank());
     assert!(AgentState::WaitingAnswer.jump_rank() < AgentState::Error.jump_rank());
     assert_eq!(AgentState::RunningTool.jump_rank(), None);
     assert_eq!(AgentState::DoneUnseen.jump_rank(), None);
@@ -118,7 +116,10 @@ fn error_line_prefers_type_and_first_message_line() {
         Some("overloaded: API Error 529".to_owned())
     );
     assert_eq!(error_line(None, Some("boom")), Some("boom".to_owned()));
-    assert_eq!(error_line(Some("rate_limit"), None), Some("rate_limit".to_owned()));
+    assert_eq!(
+        error_line(Some("rate_limit"), None),
+        Some("rate_limit".to_owned())
+    );
 }
 
 #[test]

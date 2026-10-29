@@ -75,10 +75,19 @@ fn remote_control_session_name_is_unquoted() {
 
 #[test]
 fn remote_control_project_needs_a_project_prefix() {
-    assert_eq!(remote_control_project("claude --remote-control 'just a task'"), None);
-    assert_eq!(remote_control_project("claude --remote-control --resume abc"), None);
+    assert_eq!(
+        remote_control_project("claude --remote-control 'just a task'"),
+        None
+    );
+    assert_eq!(
+        remote_control_project("claude --remote-control --resume abc"),
+        None
+    );
     assert_eq!(remote_control_project("claude --resume abc"), None);
-    assert_eq!(remote_control_project("claude --remote-control 'two words. task'"), None);
+    assert_eq!(
+        remote_control_project("claude --remote-control 'two words. task'"),
+        None
+    );
 }
 
 #[test]
@@ -125,7 +134,10 @@ fn new_tab_with_mapped_project_moves_to_group() {
 fn tab_already_in_mapped_group_only_fills_in_keys() {
     let group = TabGroupId::new();
     let map = map_with(&[("c:/work/hassle", "Hassle")]);
-    let after = observation(&["rc:hassle", "c:/work/hassle"], Some((group, Some("hassle"))));
+    let after = observation(
+        &["rc:hassle", "c:/work/hassle"],
+        Some((group, Some("hassle"))),
+    );
     assert_eq!(
         decide(None, &after, &map),
         GroupDecision::Learn("hassle".to_owned())
@@ -188,9 +200,18 @@ fn leaving_a_group_or_no_change_does_nothing() {
     let map = map_with(&[("c:/work/hassle", "hassle")]);
     let grouped = observation(&["c:/work/hassle"], Some((group, Some("hassle"))));
     let ungrouped = observation(&["c:/work/hassle"], None);
-    assert_eq!(decide(Some(&grouped), &ungrouped, &map), GroupDecision::Nothing);
-    assert_eq!(decide(Some(&grouped), &grouped, &map), GroupDecision::Nothing);
-    assert_eq!(decide(None, &observation(&[], None), &map), GroupDecision::Nothing);
+    assert_eq!(
+        decide(Some(&grouped), &ungrouped, &map),
+        GroupDecision::Nothing
+    );
+    assert_eq!(
+        decide(Some(&grouped), &grouped, &map),
+        GroupDecision::Nothing
+    );
+    assert_eq!(
+        decide(None, &observation(&[], None), &map),
+        GroupDecision::Nothing
+    );
 }
 
 #[test]
