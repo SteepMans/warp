@@ -14,7 +14,7 @@ use crate::util::bindings::keybinding_name_to_display_string;
 use crate::ward::attention::{self, jump_order, next_other_target};
 use crate::ward::chimney::model::ChimneyModel;
 use crate::ward::labels::clip_chars;
-use crate::workspace::action::WorkspaceAction;
+use crate::workspace::WorkspaceAction;
 
 const MAX_NEXT_TASK_CHARS: usize = 32;
 
