@@ -37,10 +37,19 @@ pub struct Presenter {
     /// Views that were part of the last frame: the root and every view embedded below it that
     /// was laid out or painted.
     laid_out_views: EntityIdSet,
+    /// Views that were updated while they were not part of the frame. Their element in
+    /// `rendered_views` is outdated and is rendered again once a frame lays them out.
+    stale_views: EntityIdSet,
 }
 
 pub struct LayoutContext<'a> {
     rendered_views: &'a mut EntityIdMap<Box<dyn Element>>,
+    /// Views whose element in `rendered_views` is outdated. See [`Presenter::invalidate`].
+    stale_views: &'a EntityIdSet,
+    /// Stale views this layout pass reached. They are rendered after the pass and the pass is
+    /// repeated: rendering here could deadlock, since elements may hold locks (such as the
+    /// terminal model) while they lay out their children.
+    stale_views_reached: Vec<EntityId>,
     parents: &'a mut EntityIdMap<EntityId>,
     pub text_layout_cache: &'a LayoutCache,
     view_stack: Vec<EntityId>,
@@ -316,12 +325,23 @@ impl Presenter {
             position_cache: PositionCache::default(),
             highlighted_view: None,
             laid_out_views: EntityIdSet::default(),
+            stale_views: EntityIdSet::default(),
         }
     }
 
+    /// Renders the updated views again. Views that were not part of the last frame (such as the
+    /// terminal of a background tab, which updates on every chunk of output) are only marked
+    /// stale: they are rendered when a frame reaches them in layout (see
+    /// [`Self::layout_rendering_stale_views`]), so a view that stays off screen is not rendered
+    /// over and over for nothing.
     pub fn invalidate(&mut self, invalidation: WindowInvalidation, app: &AppContext) {
         // Don't try to update views that were also removed
         for &view_id in invalidation.updated.difference(&invalidation.removed) {
+            if self.is_offscreen(view_id) {
+                self.stale_views.insert(view_id);
+                continue;
+            }
+            self.stale_views.remove(&view_id);
             match app.render_view(self.window_id, view_id) {
                 Ok(element) => {
                     self.rendered_views.insert(view_id, element);
@@ -331,23 +351,37 @@ impl Presenter {
         }
         for view_id in invalidation.removed {
             self.rendered_views.remove(&view_id);
+            self.stale_views.remove(&view_id);
         }
+    }
+
+    /// Whether the view has a rendered element but was not part of the last frame.
+    fn is_offscreen(&self, view_id: EntityId) -> bool {
+        // A view that has never been rendered may be embedded already: layout skips views
+        // without a rendered element, so it would be missing from the last frame.
+        self.frame_count > 0
+            && self.rendered_views.contains_key(&view_id)
+            && !self.laid_out_views.contains(&view_id)
     }
 
     /// Whether `invalidation` only touches views that were not part of the last frame, such as
     /// the terminal of a background tab. Rebuilding the scene for it would draw the same frame
-    /// again; the views still need to be re-rendered (see [`Self::invalidate`]) so that they are
-    /// up to date once they are laid out.
+    /// again; [`Self::invalidate`] marks such views stale so that they are rendered once they
+    /// are laid out.
     pub fn is_offscreen_only(&self, invalidation: &WindowInvalidation) -> bool {
-        self.frame_count > 0
-            && !invalidation.redraw_requested
+        !invalidation.redraw_requested
             && invalidation.removed.is_empty()
             && !invalidation.updated.is_empty()
-            && invalidation.updated.iter().all(|view_id| {
-                // A view that has never been rendered may be embedded already: layout skips
-                // views without a rendered element, so it would be missing from the last frame.
-                self.rendered_views.contains_key(view_id) && !self.laid_out_views.contains(view_id)
-            })
+            && invalidation
+                .updated
+                .iter()
+                .all(|view_id| self.is_offscreen(*view_id))
+    }
+
+    /// Whether the view was updated while off screen and is waiting to be rendered.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn is_stale(&self, view_id: EntityId) -> bool {
+        self.stale_views.contains(&view_id)
     }
 
     pub fn build_scene(
@@ -370,8 +404,7 @@ impl Presenter {
         // them to the backend-neutral view hierarchy on the app context, which
         // the shared core walks for ancestors/responder-chain/focus propagation.
         // (Reported as a batch because the layout walk itself only has `&AppContext`.)
-        let mut view_embeddings = EntityIdMap::default();
-        self.layout(zoomed_window_size, &mut view_embeddings, ctx);
+        let view_embeddings = self.layout_rendering_stale_views(zoomed_window_size, ctx);
         self.laid_out_views = view_embeddings
             .keys()
             .copied()
@@ -405,27 +438,76 @@ impl Presenter {
         scene
     }
 
+    /// Lays out the window. When the layout reaches views that were updated while off screen
+    /// (a background tab that is shown now), renders them and lays out again, so the frame shows
+    /// their latest content. Returns the child-view embeddings of the final pass.
+    fn layout_rendering_stale_views(
+        &mut self,
+        window_size: Vector2F,
+        app: &AppContext,
+    ) -> EntityIdMap<EntityId> {
+        // Nested stale views are found through the view hierarchy below; views without a known
+        // parent are found one level per pass, so give up on precision after a few passes.
+        const MAX_PASSES: usize = 4;
+        let mut pass = 1;
+        loop {
+            let mut view_embeddings = EntityIdMap::default();
+            let reached = self.layout(window_size, &mut view_embeddings, app);
+            if reached.is_empty() {
+                return view_embeddings;
+            }
+            let to_render: Vec<EntityId> = if pass >= MAX_PASSES {
+                self.stale_views.iter().copied().collect()
+            } else {
+                let mut to_render: EntityIdSet = reached.iter().copied().collect();
+                for view_id in &reached {
+                    to_render.extend(
+                        app.view_descendants(self.window_id, *view_id)
+                            .into_iter()
+                            .filter(|descendant| self.stale_views.contains(descendant)),
+                    );
+                }
+                to_render.into_iter().collect()
+            };
+            for view_id in to_render {
+                self.stale_views.remove(&view_id);
+                match app.render_view(self.window_id, view_id) {
+                    Ok(element) => {
+                        self.rendered_views.insert(view_id, element);
+                    }
+                    Err(e) => log::warn!("Stale view was not rendered, error: {e:?}"),
+                }
+            }
+            pass += 1;
+        }
+    }
+
+    /// One layout pass. Returns the stale views it reached.
     fn layout(
         &mut self,
         window_size: Vector2F,
         parents: &mut EntityIdMap<EntityId>,
         app: &AppContext,
-    ) {
-        if let Some(root_view_id) = app.root_view_id(self.window_id) {
-            let mut layout_ctx = LayoutContext {
-                rendered_views: &mut self.rendered_views,
-                parents,
-                text_layout_cache: &self.text_layout_cache,
-                view_stack: Vec::new(),
-                window_size,
-                position_cache: &self.position_cache,
-            };
-            layout_ctx.layout(
-                root_view_id,
-                SizeConstraint::new(Vector2F::zero(), window_size),
-                app,
-            );
-        }
+    ) -> Vec<EntityId> {
+        let Some(root_view_id) = app.root_view_id(self.window_id) else {
+            return Vec::new();
+        };
+        let mut layout_ctx = LayoutContext {
+            rendered_views: &mut self.rendered_views,
+            stale_views: &self.stale_views,
+            stale_views_reached: Vec::new(),
+            parents,
+            text_layout_cache: &self.text_layout_cache,
+            view_stack: Vec::new(),
+            window_size,
+            position_cache: &self.position_cache,
+        };
+        layout_ctx.layout(
+            root_view_id,
+            SizeConstraint::new(Vector2F::zero(), window_size),
+            app,
+        );
+        layout_ctx.stale_views_reached
     }
 
     fn after_layout(&mut self, app: &AppContext) {
@@ -584,6 +666,9 @@ impl LayoutContext<'_> {
         constraint: SizeConstraint,
         app: &AppContext,
     ) -> Vector2F {
+        if self.stale_views.contains(&view_id) {
+            self.stale_views_reached.push(view_id);
+        }
         let Some(mut rendered_view) = self.rendered_views.remove(&view_id) else {
             return vec2f(0., 0.);
         };

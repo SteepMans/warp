@@ -1047,8 +1047,9 @@ impl AppContext {
         invalidations
     }
 
-    /// Re-renders the invalidated views of `window_id` without redrawing the window when none of
-    /// them was laid out in the last frame. Returns whether the invalidations were absorbed;
+    /// Takes the invalidated views of `window_id` without redrawing the window when none of them
+    /// was laid out in the last frame; they are marked stale and rendered once they are laid out
+    /// (see [`Presenter::invalidate`]). Returns whether the invalidations were absorbed;
     /// otherwise they stay pending for the next scene build.
     ///
     /// Views of background tabs (for example a terminal streaming agent output) notify many times
