@@ -1032,6 +1032,29 @@ pub fn init(app: &mut AppContext) {
         ),
     ]);
 
+    // Ward agent navigation (OSS build). Ctrl+Shift+K would be shadowed by the terminal's
+    // Clear Blocks binding, so jumping back defaults to Ctrl+Shift+H.
+    app.register_editable_bindings([
+        EditableBinding::new(
+            "workspace:ward_jump_to_waiting_agent",
+            "Jump to agent waiting for you",
+            WorkspaceAction::WardJumpToWaitingAgent,
+        )
+        .with_key_binding("ctrl-shift-J")
+        .with_enabled(crate::features::is_fork_oss)
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_context_predicate(id!("Workspace")),
+        EditableBinding::new(
+            "workspace:ward_jump_back",
+            "Jump back from waiting agent",
+            WorkspaceAction::WardJumpBack,
+        )
+        .with_key_binding("ctrl-shift-H")
+        .with_enabled(crate::features::is_fork_oss)
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_context_predicate(id!("Workspace")),
+    ]);
+
     // Tab/group pinning bindings (keyless by default; gated on `PinnedTabs`).
     // Pin/unpin are split into separate entries so the palette label tracks
     // the active tab/group's current state.

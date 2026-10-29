@@ -9,7 +9,7 @@ use super::Workspace;
 use crate::features::FeatureFlag;
 use crate::tab::{SelectedTabColor, TabData};
 use crate::terminal::cli_agent_sessions::{CLIAgentSessionsModel, CLIAgentSessionsModelEvent};
-use crate::ward::agent_state;
+use crate::ward::{agent_state, attention};
 use crate::ward::project_groups::{self, TabObservation};
 use crate::workspace::WorkspaceRegistry;
 use crate::workspace::tab_group::TabGroup;
@@ -33,6 +33,34 @@ pub(crate) fn ward_sync_project_groups_in_all_windows(ctx: &mut AppContext) {
 }
 
 impl Workspace {
+    /// Focuses the agent that has waited longest for the user, or the next one when already on
+    /// a waiting agent.
+    pub(super) fn ward_jump_to_waiting_agent(&mut self, ctx: &mut ViewContext<Self>) {
+        if !crate::features::is_fork_oss() {
+            return;
+        }
+        let current = self.active_terminal_id(ctx);
+        if let Some(target) = attention::begin_jump(current, ctx) {
+            self.ward_focus_terminal_view(target, ctx);
+        }
+    }
+
+    /// Returns to the terminal the last jump series started from.
+    pub(super) fn ward_jump_back(&mut self, ctx: &mut ViewContext<Self>) {
+        if !crate::features::is_fork_oss() {
+            return;
+        }
+        if let Some(target) = attention::take_jump_back_target() {
+            self.ward_focus_terminal_view(target, ctx);
+        }
+    }
+
+    fn ward_focus_terminal_view(&mut self, terminal_view_id: EntityId, ctx: &mut ViewContext<Self>) {
+        if !self.focus_terminal_view_locally(terminal_view_id, ctx) {
+            self.focus_terminal_view_in_other_window(terminal_view_id, ctx);
+        }
+    }
+
     /// Terminal views of the active tab, in layout order.
     fn ward_active_tab_terminal_ids(&self, app: &AppContext) -> Vec<EntityId> {
         self.tabs

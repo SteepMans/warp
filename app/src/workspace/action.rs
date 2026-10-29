@@ -199,6 +199,11 @@ pub enum WorkspaceAction {
     },
     /// Clears the tab multi-selection.
     ClearTabMultiSelection,
+    /// Ward: focuses the CLI agent that has waited longest for the user (permissions, then
+    /// questions, then errors). Repeated presses walk the list.
+    WardJumpToWaitingAgent,
+    /// Ward: returns to where the last series of `WardJumpToWaitingAgent` started.
+    WardJumpBack,
     /// Creates a new tab group from the current tab multi-selection.
     NewTabGroupFromSelectedTabs,
     /// Context-aware "create group" entry point for the keybinding: groups
@@ -1170,6 +1175,8 @@ impl WorkspaceAction {
             | ShiftSelectTabRange { .. }
             | ToggleTabMultiSelection { .. }
             | ClearTabMultiSelection
+            | WardJumpToWaitingAgent
+            | WardJumpBack
             | CancelActiveRename
             | StartNewConversation { .. }
             | UndoRevertInCodeReviewPane { .. }
