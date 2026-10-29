@@ -1,7 +1,7 @@
 //! Ward (OSS build) workspace hooks. `view.rs` only calls into these methods so the upstream file
 //! stays easy to merge.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use warp_core::ui::color::coloru_with_opacity;
 use warpui::color::ColorU;
@@ -21,7 +21,7 @@ use crate::util::bindings::keybinding_name_to_display_string;
 use crate::ward::agent_state::AgentState;
 use crate::ward::attention::AttentionCounts;
 use crate::ward::project_groups::{self, TabObservation};
-use crate::ward::{agent_state, attention};
+use crate::ward::{agent_state, attention, chimney};
 use crate::workspace::WorkspaceRegistry;
 use crate::workspace::action::WorkspaceAction;
 use crate::workspace::tab_group::TabGroup;
@@ -42,6 +42,45 @@ pub(crate) fn ward_sync_project_groups_in_all_windows(ctx: &mut AppContext) {
         });
     }
     project_groups::retain_tabs(|id| alive.contains(&id));
+}
+
+/// Refreshes which pane each terminal view shows (Chimney bindings are keyed by pane UUID),
+/// binds panes whose agent command carries a `kanban:<board>/<task>` marker and starts card
+/// polling when a live tab is bound. Runs whenever the app state is saved.
+pub(crate) fn ward_sync_chimney_bindings_in_all_windows(ctx: &mut AppContext) {
+    if !crate::features::is_fork_oss() {
+        return;
+    }
+    let mut views = HashMap::new();
+    let mut markers = Vec::new();
+    for (_, workspace) in WorkspaceRegistry::as_ref(ctx).all_workspaces(ctx) {
+        for pane_group in workspace.as_ref(ctx).tab_views() {
+            let pane_group = pane_group.as_ref(ctx);
+            for terminal_view in pane_group.terminal_views(ctx) {
+                let Some(uuid) = pane_group.terminal_pane_session_uuid(terminal_view.id(), ctx)
+                else {
+                    continue;
+                };
+                let uuid = chimney::bindings::uuid_hex(&uuid);
+                if let Some(card) = terminal_view
+                    .as_ref(ctx)
+                    .claude_resume_info()
+                    .and_then(|info| chimney::bindings::parse_marker(&info.command))
+                {
+                    markers.push((uuid.clone(), card));
+                }
+                views.insert(terminal_view.id(), uuid);
+            }
+        }
+    }
+    chimney::bindings::set_live_views(views);
+    // A marker binds a pane once; a binding the user changed by hand is kept.
+    for (uuid, card) in markers {
+        if chimney::bindings::card_of_pane(&uuid, ctx).is_none() {
+            chimney::bindings::bind(&uuid, card, ctx);
+        }
+    }
+    chimney::model::ensure_polling(ctx);
 }
 
 impl Workspace {
