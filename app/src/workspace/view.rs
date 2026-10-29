@@ -24075,6 +24075,7 @@ impl Workspace {
         }
         if FeatureFlag::AgentViewConversationListView.is_enabled()
             && *AISettings::as_ref(ctx).show_conversation_history
+            && !crate::features::is_fork_oss()
         {
             views.push(ToolPanelView::ConversationListView);
         }
@@ -24086,7 +24087,7 @@ impl Workspace {
                 entry_focus: GlobalSearchEntryFocus::Results,
             });
         }
-        if *WarpDriveSettings::as_ref(ctx).enable_warp_drive {
+        if *WarpDriveSettings::as_ref(ctx).enable_warp_drive && !crate::features::is_fork_oss() {
             views.push(ToolPanelView::WarpDrive);
         }
         views
