@@ -2858,3 +2858,118 @@ fn test_view_subscribe_then_unsubscribe_to_model_inside_callback_drops_new_subsc
         });
     });
 }
+
+#[test]
+fn test_offscreen_view_notifications_do_not_rebuild_the_scene() {
+    struct Leaf {
+        renders: Rc<RefCell<usize>>,
+    }
+
+    impl Entity for Leaf {
+        type Event = ();
+    }
+
+    impl super::View for Leaf {
+        fn render(&self, _: &AppContext) -> Box<dyn Element> {
+            *self.renders.borrow_mut() += 1;
+            Empty::new().finish()
+        }
+
+        fn ui_name() -> &'static str {
+            "Leaf"
+        }
+    }
+
+    impl TypedActionView for Leaf {
+        type Action = ();
+    }
+
+    /// Embeds `visible` always and `background` only when `show_background` is set, like a
+    /// workspace that renders the active tab only.
+    struct Root {
+        visible: Option<ViewHandle<Leaf>>,
+        background: Option<ViewHandle<Leaf>>,
+        show_background: bool,
+    }
+
+    impl Entity for Root {
+        type Event = ();
+    }
+
+    impl super::View for Root {
+        fn render(&self, _: &AppContext) -> Box<dyn Element> {
+            let mut column = Flex::column();
+            if let Some(visible) = &self.visible {
+                column.add_child(ChildView::new(visible).finish());
+            }
+            if self.show_background
+                && let Some(background) = &self.background
+            {
+                column.add_child(ChildView::new(background).finish());
+            }
+            column.finish()
+        }
+
+        fn ui_name() -> &'static str {
+            "Root"
+        }
+    }
+
+    impl TypedActionView for Root {
+        type Action = ();
+    }
+
+    App::test((), |mut app| async move {
+        let app: &mut App = &mut app;
+        let (window_id, root) = app.add_window(WindowStyle::NotStealFocus, |_| Root {
+            visible: None,
+            background: None,
+            show_background: false,
+        });
+        let visible_renders = Rc::new(RefCell::new(0));
+        let background_renders = Rc::new(RefCell::new(0));
+        let visible = app.add_typed_action_view(window_id, {
+            let renders = visible_renders.clone();
+            |_| Leaf { renders }
+        });
+        let background = app.add_typed_action_view(window_id, {
+            let renders = background_renders.clone();
+            |_| Leaf { renders }
+        });
+        root.update(app, |root, ctx| {
+            root.visible = Some(visible.clone());
+            root.background = Some(background.clone());
+            ctx.notify();
+        });
+
+        let presenter = app.presenter(window_id).expect("window has a presenter");
+        let frames = || presenter.borrow().frame_count();
+
+        let frames_before = frames();
+        let renders_before = *background_renders.borrow();
+        for _ in 0..10 {
+            background.update(app, |_, ctx| ctx.notify());
+        }
+        assert_eq!(
+            frames(),
+            frames_before,
+            "offscreen notifications rebuilt the scene"
+        );
+        assert_eq!(*background_renders.borrow(), renders_before + 10);
+
+        visible.update(app, |_, ctx| ctx.notify());
+        assert_eq!(frames(), frames_before + 1);
+
+        root.update(app, |root, ctx| {
+            root.show_background = true;
+            ctx.notify();
+        });
+        let frames_shown = frames();
+        background.update(app, |_, ctx| ctx.notify());
+        assert_eq!(
+            frames(),
+            frames_shown + 1,
+            "a laid out view must redraw the window"
+        );
+    })
+}
