@@ -207,7 +207,10 @@ pub enum GroupDecision {
     /// Record the tab's keys under this group.
     Learn(String),
     /// The tab's group was renamed: follow the rename, then record the tab's keys.
-    Renamed { from: String, to: String },
+    Renamed {
+        from: String,
+        to: String,
+    },
     /// Put the tab into this group.
     MoveTo(String),
 }

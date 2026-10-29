@@ -84,19 +84,6 @@ pub fn next_jump_target(order: &[EntityId], current: Option<EntityId>) -> Option
     }
 }
 
-/// The most urgent agent other than `current`, for the "Next:" hint.
-pub fn most_urgent_agent(app: &AppContext) -> Option<AgentSnapshot> {
-    let agents = all_agents(app);
-    let order = jump_order(
-        &agents
-            .iter()
-            .map(|agent| (agent.terminal_view_id, agent.state, agent.in_state))
-            .collect::<Vec<_>>(),
-    );
-    let first = *order.first()?;
-    agents.into_iter().find(|agent| agent.terminal_view_id == first)
-}
-
 /// Status filter of the vertical tabs panel.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AgentStatusFilter {
