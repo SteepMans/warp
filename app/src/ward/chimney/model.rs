@@ -3,12 +3,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use warpui::r#async::Timer;
 use warpui::{AppContext, Entity, ModelContext, SingletonEntity};
 
 use super::api::{Board, CardStatus, card_status, parse_board};
+use super::auth::{Auth, AuthError, AuthStatus, AuthorizedError, HttpAuthTransport};
 use super::bindings::{self, CardRef};
 use super::{RequestConfig, request_config};
 
@@ -24,6 +25,8 @@ pub enum FetchError {
     NotConfigured,
     /// 401 or 403: the token is missing, expired or revoked.
     Unauthorized,
+    /// Signing in with the service account failed.
+    Auth(AuthError),
     Status(u16),
     Network,
     Parse,
@@ -32,12 +35,27 @@ pub enum FetchError {
 impl FetchError {
     pub fn message(&self) -> String {
         match self {
-            Self::NotConfigured => "No Chimney access token".to_owned(),
-            Self::Unauthorized => "Chimney rejected the access token".to_owned(),
+            Self::NotConfigured => "No Chimney credentials".to_owned(),
+            Self::Unauthorized => "Chimney rejected the credentials".to_owned(),
+            Self::Auth(err) => err.message(),
             Self::Status(status) => format!("Chimney returned HTTP {status}"),
             Self::Network => "Chimney is unreachable".to_owned(),
             Self::Parse => "Unexpected response from Chimney".to_owned(),
         }
+    }
+}
+
+impl AuthorizedError for FetchError {
+    fn from_auth(err: AuthError) -> Self {
+        match err {
+            AuthError::NotConfigured => Self::NotConfigured,
+            AuthError::Network => Self::Network,
+            err => Self::Auth(err),
+        }
+    }
+
+    fn is_unauthorized(&self) -> bool {
+        *self == Self::Unauthorized
     }
 }
 
@@ -48,6 +66,8 @@ pub enum ChimneyEvent {
 
 pub struct ChimneyModel {
     client: Arc<http_client::Client>,
+    /// Tokens of the service account, shared by all requests.
+    auth: Arc<Auth>,
     boards: HashMap<u64, Board>,
     errors: HashMap<u64, FetchError>,
     in_flight: HashSet<u64>,
@@ -68,6 +88,7 @@ pub fn init(ctx: &mut AppContext) {
     ctx.add_singleton_model(|_| ChimneyModel {
         // A plain client: no Warp headers, and the network log never sees the token.
         client: Arc::new(http_client::Client::new_external()),
+        auth: Arc::new(Auth::default()),
         boards: HashMap::new(),
         errors: HashMap::new(),
         in_flight: HashSet::new(),
@@ -112,6 +133,11 @@ impl ChimneyModel {
         self.in_flight.contains(&board_id)
     }
 
+    /// Sign-in state for the settings page.
+    pub fn auth_status(&self) -> AuthStatus {
+        self.auth.status()
+    }
+
     pub fn card_status(&self, card: CardRef) -> Option<CardStatus> {
         card_status(self.boards.get(&card.board_id)?, card.task_id)
     }
@@ -146,6 +172,7 @@ impl ChimneyModel {
             return;
         }
         let Some(config) = request_config(ctx) else {
+            self.auth.set_not_configured();
             self.errors.insert(board_id, FetchError::NotConfigured);
             ctx.emit(ChimneyEvent::BoardUpdated { board_id });
             ctx.notify();
@@ -153,8 +180,9 @@ impl ChimneyModel {
         };
         self.in_flight.insert(board_id);
         let client = self.client.clone();
+        let auth = self.auth.clone();
         ctx.spawn(
-            async move { fetch_board(&client, &config, board_id).await },
+            async move { fetch_board(&client, &auth, &config, board_id).await },
             move |me, result, ctx| {
                 me.in_flight.remove(&board_id);
                 match result {
@@ -174,16 +202,38 @@ impl ChimneyModel {
     }
 }
 
-/// `GET {base}/api/v1/task-boards/{id}`, parsed on the background thread.
+/// `GET {base}/api/v1/task-boards/{id}` with a token from [`Auth`] (signing in or refreshing
+/// as needed), parsed on the background thread.
 async fn fetch_board(
     client: &http_client::Client,
+    auth: &Auth,
     config: &RequestConfig,
     board_id: u64,
 ) -> Result<Board, FetchError> {
-    let url = format!("{}/api/v1/task-boards/{board_id}", config.base_url);
+    let transport = HttpAuthTransport {
+        client,
+        timeout: REQUEST_TIMEOUT,
+    };
+    auth.send_authorized(
+        &config.base_url,
+        &config.credentials,
+        &transport,
+        &Instant::now,
+        |token| get_board(client, &config.base_url, token, board_id),
+    )
+    .await
+}
+
+async fn get_board(
+    client: &http_client::Client,
+    base_url: &str,
+    token: String,
+    board_id: u64,
+) -> Result<Board, FetchError> {
+    let url = format!("{base_url}/api/v1/task-boards/{board_id}");
     let response = client
         .get(url)
-        .bearer_auth(&config.token)
+        .bearer_auth(&token)
         .header("Accept", "application/json")
         .timeout(REQUEST_TIMEOUT)
         .send()
