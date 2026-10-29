@@ -22,7 +22,7 @@ mod tab_grouping;
 #[path = "view_tests.rs"]
 pub(crate) mod tests;
 mod vertical_tabs;
-mod ward_workspace;
+pub(super) mod ward_workspace;
 #[cfg(target_family = "wasm")]
 mod wasm_view;
 
