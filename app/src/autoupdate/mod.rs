@@ -1,5 +1,6 @@
 mod changelog;
 mod channel_versions;
+mod fork_manifest;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "macos")]
@@ -773,6 +774,12 @@ async fn fetch_version(
     update_id: &str,
     server_api: Arc<ServerApi>,
 ) -> Result<VersionInfo> {
+    // Self-published OSS builds describe their releases with a manifest next to the release
+    // assets instead of Warp's channel versions.
+    if *channel == Channel::Oss && fork_manifest::stable_dir_url().is_some() {
+        return fork_manifest::fetch_version(server_api.http_client(), update_id).await;
+    }
+
     let versions = fetch_channel_versions(update_id, server_api.clone(), false, is_daily).await?;
 
     let channel_version = match channel {
@@ -1151,6 +1158,12 @@ fn release_assets_directory_url(channel: Channel, version: &str) -> String {
             format!("{releases_base_url}/preview/{version}")
         }
         Channel::Dev => format!("{releases_base_url}/dev/{version}"),
+        Channel::Oss if fork_manifest::stable_dir_url().is_some() => {
+            format!(
+                "{}/{version}",
+                fork_manifest::stable_dir_url().unwrap_or_default()
+            )
+        }
         Channel::Local | Channel::Integration | Channel::Oss => {
             unreachable!("local/integration/oss autoupdate not supported");
         }

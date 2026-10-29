@@ -161,6 +161,11 @@ if ("$CHANNEL" -eq 'local') {
     # The OSS channel does not ship Sentry, so drop the crash_reporting feature
     # (which would otherwise pull in the Sentry SDK as a dependency).
     $FEATURES = 'release_bundle,gui'
+    # Self-published OSS builds update from the manifest under WARP_FORK_RELEASES_URL
+    # (see app/src/autoupdate/fork_manifest.rs and script/windows/publish_s3.ps1).
+    if ($env:WARP_FORK_RELEASES_URL) {
+        $FEATURES = "$FEATURES,autoupdate"
+    }
 }
 
 if ($IS_TUI) {

@@ -4,7 +4,9 @@
 
 use anyhow::Result;
 use warp_core::AppId;
-use warp_core::channel::{Channel, ChannelConfig, ChannelState, OzConfig, WarpServerConfig};
+use warp_core::channel::{
+    AutoupdateConfig, Channel, ChannelConfig, ChannelState, OzConfig, WarpServerConfig,
+};
 
 // Simple wrapper around warp::run() for Warp OSS builds.
 fn main() -> Result<()> {
@@ -17,7 +19,7 @@ fn main() -> Result<()> {
             oz_config: OzConfig::production(),
             telemetry_config: None,
             crash_reporting_config: None,
-            autoupdate_config: None,
+            autoupdate_config: fork_autoupdate_config(),
             mcp_static_config: None,
         },
     );
@@ -27,6 +29,20 @@ fn main() -> Result<()> {
     ChannelState::set(state);
 
     warp::run()
+}
+
+/// Self-published OSS builds can update themselves from an S3-compatible bucket. The base URL is
+/// baked in at build time via `WARP_FORK_RELEASES_URL` and can be overridden at runtime with the
+/// environment variable of the same name. See `app/src/autoupdate/fork_manifest.rs`.
+fn fork_autoupdate_config() -> Option<AutoupdateConfig> {
+    let releases_base_url = std::env::var("WARP_FORK_RELEASES_URL")
+        .ok()
+        .or_else(|| option_env!("WARP_FORK_RELEASES_URL").map(str::to_owned))
+        .filter(|url| !url.trim().is_empty())?;
+    Some(AutoupdateConfig {
+        releases_base_url: releases_base_url.into(),
+        show_autoupdate_menu_items: true,
+    })
 }
 
 // If we're not using an external plist, embed the following as the Info.plist.

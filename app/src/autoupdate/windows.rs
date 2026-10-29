@@ -33,11 +33,20 @@ pub(super) async fn download_update_and_cleanup(
     const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 
     let installer_file_name = installer_file_name()?;
-    let url = format!(
-        "{}/{}",
-        release_assets_directory_url(ChannelState::channel(), &version_info.version),
-        installer_file_name
-    );
+    // Self-published OSS builds list the installer and its checksum in their release manifest.
+    let fork_manifest = (ChannelState::channel() == Channel::Oss)
+        .then(|| super::fork_manifest::manifest_for_version(&version_info.version))
+        .flatten();
+    let url = fork_manifest
+        .as_ref()
+        .and_then(|manifest| manifest.url.clone())
+        .unwrap_or_else(|| {
+            format!(
+                "{}/{}",
+                release_assets_directory_url(ChannelState::channel(), &version_info.version),
+                installer_file_name
+            )
+        });
 
     // Create a temporary file that we'll write the download into.
     let mut already_exists = false;
@@ -64,9 +73,17 @@ pub(super) async fn download_update_and_cleanup(
             .send()
             .await?
             .error_for_status()?;
-        new_installer
-            .as_file_mut()
-            .write_all(&response.bytes().await?)?;
+        let bytes = response.bytes().await?;
+        if let Some(manifest) = &fork_manifest {
+            super::fork_manifest::verify_sha256(&bytes, manifest.sha256.as_deref())?;
+        }
+        new_installer.as_file_mut().write_all(&bytes)?;
+    } else if let Some(manifest) = &fork_manifest {
+        // A previous download may have been interrupted or tampered with; check it again.
+        super::fork_manifest::verify_sha256(
+            &fs::read(new_installer.path())?,
+            manifest.sha256.as_deref(),
+        )?;
     }
 
     *INSTALLER_PATH.lock() = Some(new_installer.into_temp_path());
@@ -317,7 +334,8 @@ fn app_name_prefix(channel: Channel) -> &'static str {
         Channel::Local => "warp",
         Channel::Integration => "integration",
         Channel::Dev => "WarpDev",
-        Channel::Oss => "warp-oss",
+        // Matches the installer produced by `script/windows/bundle.ps1 -CHANNEL oss`.
+        Channel::Oss => "WarpOss",
     }
 }
 
