@@ -41,7 +41,14 @@ const PRESERVED_FLAGS: &[(&str, bool)] = &[
 ];
 
 /// Flags of the original launch whose value has to be skipped together with the flag.
-const DROPPED_FLAGS_WITH_VALUE: &[&str] = &["--cd", "-C", "--image", "-i", "--remote", "--remote-auth-token-env"];
+const DROPPED_FLAGS_WITH_VALUE: &[&str] = &[
+    "--cd",
+    "-C",
+    "--image",
+    "-i",
+    "--remote",
+    "--remote-auth-token-env",
+];
 
 /// Subcommands that start an interactive session in the terminal. Anything else (`exec`,
 /// `login`, `mcp`, ...) is not resumable.
@@ -141,10 +148,12 @@ pub fn detect(shell_pid: u32, shell_type: Option<ShellType>) -> Option<ClaudeRes
 
     let (session_id, cwd) = latest_session(&sessions_dir()?, started, process_cwd.as_deref())
         .or_else(|| {
-            launch
-                .resumed_id
-                .clone()
-                .map(|id| (id, process_cwd.as_ref().map(|cwd| cwd.display().to_string())))
+            launch.resumed_id.clone().map(|id| {
+                (
+                    id,
+                    process_cwd.as_ref().map(|cwd| cwd.display().to_string()),
+                )
+            })
         })?;
     Some(ClaudeResumeInfo {
         command: build_resume_command(&launch.preserved, &session_id, shell_type),
@@ -215,8 +224,22 @@ fn parse_launch(argv: &[String]) -> Option<CodexLaunch> {
 fn is_known_subcommand(arg: &str) -> bool {
     matches!(
         arg,
-        "exec" | "e" | "review" | "login" | "logout" | "mcp" | "mcp-server" | "app-server"
-            | "completion" | "sandbox" | "debug" | "apply" | "a" | "cloud" | "features" | "help"
+        "exec"
+            | "e"
+            | "review"
+            | "login"
+            | "logout"
+            | "mcp"
+            | "mcp-server"
+            | "app-server"
+            | "completion"
+            | "sandbox"
+            | "debug"
+            | "apply"
+            | "a"
+            | "cloud"
+            | "features"
+            | "help"
     )
 }
 
@@ -309,7 +332,9 @@ fn day_dirs_since(root: &Path, first_day: &str) -> Vec<PathBuf> {
 fn read_session_meta(path: &Path) -> Option<SessionMeta> {
     let file = std::fs::File::open(path).ok()?;
     let mut first_line = String::new();
-    std::io::BufReader::new(file).read_line(&mut first_line).ok()?;
+    std::io::BufReader::new(file)
+        .read_line(&mut first_line)
+        .ok()?;
     let line: RolloutLine = serde_json::from_str(&first_line).ok()?;
     (line.kind == "session_meta" && !line.payload.id.is_empty()).then_some(line.payload)
 }
@@ -325,7 +350,11 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 }
 
 /// Builds `codex resume <preserved flags> <session id>`.
-fn build_resume_command(preserved: &[String], session_id: &str, shell_type: Option<ShellType>) -> String {
+fn build_resume_command(
+    preserved: &[String],
+    session_id: &str,
+    shell_type: Option<ShellType>,
+) -> String {
     let mut command = String::from("codex resume");
     for arg in preserved.iter().map(String::as_str).chain([session_id]) {
         command.push(' ');

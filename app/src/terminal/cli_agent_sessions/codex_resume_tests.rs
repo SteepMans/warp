@@ -20,7 +20,11 @@ fn keeps_flags_and_drops_prompt() {
     .unwrap();
     assert_eq!(launch.resumed_id, None);
     assert_eq!(
-        build_resume_command(&launch.preserved, "01a0198b-ac42-7602-91d9-db473d42b664", None),
+        build_resume_command(
+            &launch.preserved,
+            "01a0198b-ac42-7602-91d9-db473d42b664",
+            None
+        ),
         "codex resume -m gpt-5.5 --dangerously-bypass-approvals-and-sandbox -c model_reasoning_effort=high 01a0198b-ac42-7602-91d9-db473d42b664"
     );
 }
@@ -43,7 +47,10 @@ fn reads_id_of_resumed_session() {
 
 #[test]
 fn drops_cd_and_image() {
-    let launch = parse_launch(&argv(&["codex", "-C", "D:\\repo", "-i", "shot.png", "--search"])).unwrap();
+    let launch = parse_launch(&argv(&[
+        "codex", "-C", "D:\\repo", "-i", "shot.png", "--search",
+    ]))
+    .unwrap();
     assert_eq!(launch.preserved, argv(&["--search"]));
 }
 
@@ -81,7 +88,13 @@ fn picks_latest_top_level_session_in_cwd() {
     write_rollout(&old_day, "rollout-old.jsonl", "old", "C:\\repo", "user");
     write_rollout(&day, "rollout-a.jsonl", "a", "C:\\repo", "user");
     std::thread::sleep(Duration::from_millis(50));
-    write_rollout(&day, "rollout-other.jsonl", "other", "C:\\elsewhere", "user");
+    write_rollout(
+        &day,
+        "rollout-other.jsonl",
+        "other",
+        "C:\\elsewhere",
+        "user",
+    );
     write_rollout(&day, "rollout-sub.jsonl", "sub", "C:\\repo", "subagent");
 
     let started = SystemTime::now() - Duration::from_secs(60);
