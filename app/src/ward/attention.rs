@@ -51,38 +51,58 @@ pub fn all_agent_entries(app: &AppContext) -> Vec<AgentEntry> {
     if !crate::features::is_fork_oss() {
         return Vec::new();
     }
-    let sessions = CLIAgentSessionsModel::as_ref(app);
     let mut entries = Vec::new();
     for (_, workspace) in WorkspaceRegistry::as_ref(app).all_workspaces(app) {
         for pane_group in workspace.as_ref(app).tab_views() {
             for terminal_view in pane_group.as_ref(app).terminal_views(app) {
-                let Some(snapshot) = agent_snapshot(terminal_view.id(), app) else {
-                    continue;
-                };
-                let view = terminal_view.as_ref(app);
-                let session = sessions.session(terminal_view.id());
-                let directory = view
-                    .current_local_repo_path()
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .or_else(|| session.and_then(|session| session.session_context.cwd.clone()));
-                let agent_name = session
-                    .map(|session| session.agent.display_name())
-                    .unwrap_or("Agent");
-                let labels = agent_labels(
-                    view.claude_resume_info().map(|info| info.command.as_str()),
-                    directory.as_deref(),
-                    snapshot.task.as_deref(),
-                    agent_name,
-                );
-                entries.push(AgentEntry {
-                    snapshot,
-                    labels,
-                    terminal_view: terminal_view.clone(),
-                });
+                entries.extend(agent_entry(&terminal_view, app));
             }
         }
     }
     entries
+}
+
+/// The entry of one agent, found in any window; `None` when the terminal has no agent.
+pub fn agent_entry_by_id(terminal_view_id: EntityId, app: &AppContext) -> Option<AgentEntry> {
+    if !crate::features::is_fork_oss() {
+        return None;
+    }
+    WorkspaceRegistry::as_ref(app)
+        .all_workspaces(app)
+        .iter()
+        .flat_map(|(_, workspace)| {
+            workspace
+                .as_ref(app)
+                .tab_views()
+                .flat_map(|pane_group| pane_group.as_ref(app).terminal_views(app))
+                .collect::<Vec<_>>()
+        })
+        .find(|terminal_view| terminal_view.id() == terminal_view_id)
+        .and_then(|terminal_view| agent_entry(&terminal_view, app))
+}
+
+fn agent_entry(terminal_view: &ViewHandle<TerminalView>, app: &AppContext) -> Option<AgentEntry> {
+    let snapshot = agent_snapshot(terminal_view.id(), app)?;
+    let view = terminal_view.as_ref(app);
+    let session = CLIAgentSessionsModel::as_ref(app).session(terminal_view.id());
+    let directory = view
+        .current_local_repo_path()
+        .map(|path| path.to_string_lossy().into_owned())
+        .or_else(|| session.and_then(|session| session.session_context.cwd.clone()));
+    let agent_name = session
+        .map(|session| session.agent.display_name())
+        .unwrap_or("Agent");
+    let labels = agent_labels(
+        view.claude_resume_info().map(|info| info.command.as_str()),
+        directory.as_deref(),
+        snapshot.task.as_deref(),
+        agent_name,
+    );
+    Some(AgentEntry {
+        snapshot,
+        labels,
+        terminal_view: terminal_view.clone(),
+    })
 }
 
 /// Agent counts by what they need from the user.
