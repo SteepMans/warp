@@ -97,10 +97,13 @@ impl Workspace {
 
     fn ward_handle_chimney_event(
         &mut self,
-        _event: &chimney::model::ChimneyEvent,
+        event: &chimney::model::ChimneyEvent,
         ctx: &mut ViewContext<Self>,
     ) {
-        self.ward_refresh_chimney_picker(ctx);
+        let chimney::model::ChimneyEvent::BoardUpdated { board_id } = event;
+        if *board_id == chimney::board_id(ctx) {
+            self.ward_refresh_chimney_picker(ctx);
+        }
         ctx.notify();
     }
 
