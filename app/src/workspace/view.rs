@@ -15350,8 +15350,13 @@ impl Workspace {
                     request_type = Some(ChangelogRequestType::WindowLaunch);
                     // Do not show changelog on quake mode window or if it has already been shown
                     // or if we are opening Warp Drive on start up
+                    let already_shown = if crate::features::is_fork_oss() {
+                        crate::ward::changelog::has_been_shown(version, ctx)
+                    } else {
+                        Settings::has_changelog_been_shown(version, ctx)
+                    };
                     quake_mode_window_id() != Some(ctx.window_id())
-                        && !Settings::has_changelog_been_shown(version, ctx)
+                        && !already_shown
                         && !*opening_warp_drive_on_start_up
                 }
                 None => false,
@@ -15369,8 +15374,14 @@ impl Workspace {
         ) {
             (true, Some(ChangelogRequestType::WindowLaunch), _) => {
                 if let Some(version) = ChannelState::app_version() {
-                    Settings::mark_changelog_shown(version, ctx);
-                    if FeatureFlag::AvatarInTabBar.is_enabled() {
+                    // Ward opens its changelog right away instead of behind a toast.
+                    let is_fork_oss = crate::features::is_fork_oss();
+                    if is_fork_oss {
+                        crate::ward::changelog::mark_shown(version, ctx);
+                    } else {
+                        Settings::mark_changelog_shown(version, ctx);
+                    }
+                    if FeatureFlag::AvatarInTabBar.is_enabled() && !is_fork_oss {
                         self.update_toast_stack.update(ctx, |stack, ctx| {
                             // Get keybinding for view changelog action
                             let keystroke = ctx
