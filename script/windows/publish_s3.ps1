@@ -156,8 +156,10 @@ function New-Changelog($PreviousManifest, [String]$Commit) {
         [Console]::OutputEncoding = $previousEncoding
     }
 
-    # "форматирование" (formatting) and merge commits carry no user-visible change.
-    $skipPattern = '(?i)^merge\s|' + [regex]::Unescape('форматировани')
+    # "форматирование" (formatting), "неиспользуемый" (unused code cleanup), test-only fixes
+    # ("тест ...") and merge commits carry no user-visible change.
+    $skipPattern = '(?i)^merge\s|' + [regex]::Unescape('форматировани') + '|' +
+        [regex]::Unescape('неиспользуем') + '|:\s*' + [regex]::Unescape('тест') + '\s'
     # "Прочее" (other) collects titles without a "Module:" prefix.
     $otherModule = [regex]::Unescape('Прочее')
     $groups = [ordered]@{}
