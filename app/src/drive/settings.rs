@@ -57,6 +57,10 @@ impl WarpDriveSettings {
     /// regardless of the user setting.
     pub fn is_warp_drive_enabled(app: &warpui::AppContext) -> bool {
         use warpui::SingletonEntity as _;
+        // The fork's OSS build has no Warp Drive.
+        if warp_core::channel::ChannelState::channel() == warp_core::channel::Channel::Oss {
+            return false;
+        }
         *Self::as_ref(app).enable_warp_drive && Self::is_warp_drive_available(app)
     }
 }

@@ -2275,6 +2275,10 @@ impl AISettings {
     }
 
     pub fn is_any_ai_enabled(&self, app: &AppContext) -> bool {
+        // The fork's OSS build has no Warp AI, whatever the stored setting or account says.
+        if warp_core::channel::ChannelState::channel() == warp_core::channel::Channel::Oss {
+            return false;
+        }
         // Disable AI for anonymous and logged-out users.
         let is_anonymous_or_logged_out = AuthStateProvider::as_ref(app)
             .get()
