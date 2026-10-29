@@ -18,9 +18,9 @@
 #   WARP_FORK_S3_ACCESS_KEY  Access key with write access to <Bucket>/<Prefix>.
 #   WARP_FORK_S3_SECRET_KEY  Secret key for the access key.
 #
-# Uploading uses the MinIO client `mc` (winget install MinIO.Client). The
-# credentials are passed through the MC_HOST_<alias> environment variable of
-# this process only; nothing is written to the mc config.
+# Uploading uses the AWS CLI (winget install Amazon.AWSCLI) with path-style
+# addressing. The credentials are passed through AWS_* environment variables of
+# this process only; nothing is written to the AWS config.
 #
 # Examples:
 #   .\script\windows\publish_s3.ps1 -Bucket my-bucket
@@ -113,24 +113,29 @@ foreach ($name in 'WARP_FORK_S3_ENDPOINT', 'WARP_FORK_S3_ACCESS_KEY', 'WARP_FORK
         throw "$name is not set"
     }
 }
-if (-not (Get-Command mc -ErrorAction SilentlyContinue)) {
-    throw 'The MinIO client mc was not found. Install it with: winget install MinIO.Client'
+if (-not (Get-Command aws -ErrorAction SilentlyContinue)) {
+    throw 'The AWS CLI was not found. Install it with: winget install Amazon.AWSCLI'
 }
 
-$endpoint = [Uri]$env:WARP_FORK_S3_ENDPOINT
-$accessKey = [Uri]::EscapeDataString($env:WARP_FORK_S3_ACCESS_KEY)
-$secretKey = [Uri]::EscapeDataString($env:WARP_FORK_S3_SECRET_KEY)
-$env:MC_HOST_warpfork = "$($endpoint.Scheme)://${accessKey}:${secretKey}@$($endpoint.Authority)"
+$env:AWS_ACCESS_KEY_ID = $env:WARP_FORK_S3_ACCESS_KEY
+$env:AWS_SECRET_ACCESS_KEY = $env:WARP_FORK_S3_SECRET_KEY
+$env:AWS_DEFAULT_REGION = 'us-east-1'
+$env:AWS_EC2_METADATA_DISABLED = 'true'
+$env:AWS_CONFIG_FILE = Join-Path ([System.IO.Path]::GetTempPath()) 'warp-fork-aws-config'
+[System.IO.File]::WriteAllText($env:AWS_CONFIG_FILE, "[default]`ns3 =`n    addressing_style = path`n")
 
 try {
-    $target = "warpfork/$Bucket/$($Prefix.Trim('/'))/stable"
+    $endpoint = $env:WARP_FORK_S3_ENDPOINT.TrimEnd('/')
+    $target = "s3://$Bucket/$($Prefix.Trim('/'))/stable"
     # Upload the installer first so the manifest never points at a missing file.
-    mc cp --quiet $InstallerPath "$target/$Version/$InstallerName"
+    aws --endpoint-url $endpoint s3 cp --only-show-errors $InstallerPath "$target/$Version/$InstallerName" --content-type application/octet-stream
     if ($LASTEXITCODE -ne 0) { throw 'Uploading the installer failed' }
-    mc cp --quiet --attr 'Cache-Control=no-cache' $ManifestPath "$target/manifest.json"
+    aws --endpoint-url $endpoint s3 cp --only-show-errors $ManifestPath "$target/manifest.json" --content-type application/json --cache-control no-cache
     if ($LASTEXITCODE -ne 0) { throw 'Uploading the manifest failed' }
 } finally {
-    Remove-Item Env:\MC_HOST_warpfork -ErrorAction SilentlyContinue
+    foreach ($name in 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_CONFIG_FILE') {
+        Remove-Item "Env:\$name" -ErrorAction SilentlyContinue
+    }
 }
 
 Write-Output "Published $Version"

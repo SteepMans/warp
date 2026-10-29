@@ -169,20 +169,25 @@ pintest и продолжила ту же сессию (тот же `sessionId` 
   `WarpOssSetup.exe /SILENT /update=1` в ту же папку.
 - Версию сборки задаёт `GIT_RELEASE_TAG`. Без тега автообновление не работает (так у upstream).
 
-Публикация: `script/windows/publish_s3.ps1 -Bucket <bucket>` собирает установщик через
-`bundle.ps1 -CHANNEL oss` с новой версией, считает sha256, кладёт
-`<bucket>/warp-fork/stable/<version>/WarpOssSetup.exe`, затем `stable/manifest.json` (через
-MinIO client `mc`, ключи только из `WARP_FORK_S3_*`, в конфиг mc не пишутся). `-DryRun` собирает
-и считает манифест без заливки.
+Публикация идёт из CI: `.github/workflows/fork_windows.yml` на `windows-latest`. Пуш в
+`feature/claude-tab-restore` собирает установщик и кладёт его артефактом сборки; пуш в `master`
+дополнительно публикует его в MinIO Дымохода.
 
-Чего не хватает для полного цикла:
+| Что | Где |
+|---|---|
+| Бакет | `warp-fork` в `chimney/minio` (тот же MinIO, что раздаёт SideStore) |
+| Манифест | `https://chimney.steep-man.ru/warp-fork/windows/stable/manifest.json` |
+| Установщик | `https://chimney.steep-man.ru/warp-fork/windows/stable/<version>/WarpOssSetup.exe` |
+| Чтение | анонимно, только `s3:GetObject` (политика бакета) |
+| Запись | пользователь `ci-warp`, политика `warp-fork-write`; ключ в секретах `S3_ACCESS_KEY` / `S3_SECRET_KEY` репозитория |
+| Ingress | `/warp-fork` на `chimney.steep-man.ru`, манифест в git chimney `k8s/base/warp-fork-ingress.yaml` |
 
-1. MinIO (`backups/minio` в кластере Дымохода) не опубликован наружу, доступен только изнутри
-   кластера или через `kubectl port-forward`. Приложению нужен адрес, который читается без
-   ключей: либо ingress на префикс, либо отдельный публичный бакет. Нужна анонимная политика
-   на чтение `<bucket>/warp-fork/*` (`mc anonymous set download <alias>/<bucket>/warp-fork`).
-2. Нужна учётка с правом записи в выбранный бакет и `mc` (`winget install MinIO.Client`).
-3. Inno Setup ставится через winget, `publish_s3.ps1` сам добавляет его в `PATH`.
+Вручную: `script/windows/publish_s3.ps1 -Bucket warp-fork -Prefix windows` с
+`WARP_FORK_RELEASES_URL=https://chimney.steep-man.ru/warp-fork/windows`,
+`WARP_FORK_S3_ENDPOINT=https://chimney.steep-man.ru` и ключами `ci-warp` в `WARP_FORK_S3_*`.
+Скрипт собирает установщик через `bundle.ps1 -CHANNEL oss`, считает sha256, заливает
+установщик, затем `stable/manifest.json` через AWS CLI (MinIO client `mc` больше не раздаётся).
+`-DryRun` собирает и считает манифест без заливки.
 
 ## Перенос настроек из официального Warp
 
