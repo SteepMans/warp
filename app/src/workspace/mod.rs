@@ -1234,6 +1234,7 @@ pub fn init(app: &mut AppContext) {
         "Log out",
         WorkspaceAction::LogOut,
     )
+    .with_enabled(|| !crate::features::is_fork_oss())
     .with_group(bindings::BindingGroup::Settings.as_str())
     .with_context_predicate(id!("Workspace") & !id!("IsAnonymousUser"))]);
 
@@ -1555,6 +1556,7 @@ fn add_open_setting_pages_as_editable_binding(app: &mut AppContext) {
             "Open Settings: Account",
             WorkspaceAction::ShowSettingsPage(SettingsSection::Account),
         )
+        .with_enabled(|| !crate::features::is_fork_oss())
         .with_context_predicate(id!("Workspace"))
         .with_group(bindings::BindingGroup::Settings.as_str())
         .with_custom_action(CustomAction::ShowAccount),
