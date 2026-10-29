@@ -36,23 +36,15 @@ pub(super) fn render_next_waiting_chip(
     if !crate::features::is_fork_oss() {
         return None;
     }
-    let entries = attention::all_agent_entries(app);
+    // The order only needs states; labels are built for the one agent the chip shows.
     let order = jump_order(
-        &entries
+        &attention::all_agents(app)
             .iter()
-            .map(|entry| {
-                (
-                    entry.terminal_view.id(),
-                    entry.snapshot.state,
-                    entry.snapshot.in_state,
-                )
-            })
+            .map(|agent| (agent.terminal_view_id, agent.state, agent.in_state))
             .collect::<Vec<_>>(),
     );
     let target = next_other_target(&order, terminal_view_id)?;
-    let entry = entries
-        .iter()
-        .find(|entry| entry.terminal_view.id() == target)?;
+    let entry = attention::agent_entry_by_id(target, app)?;
     let theme = appearance.theme();
     let color = entry.snapshot.state.color(theme);
     let font = appearance.ui_font_family();
