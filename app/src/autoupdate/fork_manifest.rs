@@ -13,6 +13,9 @@
 //! ```
 //!
 //! `url` is optional and defaults to `<releases_base_url>/stable/<version>/<installer name>`.
+//! Newer manifests also carry the release `commit` and a `changelog_url` pointing at
+//! `<releases_base_url>/stable/<version>/changelog.json` (see `crate::ward::changelog`); both
+//! are optional and ignored here.
 
 use std::time::Duration;
 

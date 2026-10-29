@@ -1,6 +1,6 @@
 mod changelog;
 mod channel_versions;
-mod fork_manifest;
+pub(crate) mod fork_manifest;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "macos")]
