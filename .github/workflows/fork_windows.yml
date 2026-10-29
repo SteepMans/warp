@@ -1,0 +1,79 @@
+# Builds the fork's OSS channel for Windows. Pushes to master also publish the installer and
+# the update manifest to the chimney MinIO (bucket warp-fork, prefix windows); installed builds
+# poll https://chimney.steep-man.ru/warp-fork/windows/stable/manifest.json for updates.
+name: Fork Windows build
+
+on:
+  push:
+    branches:
+      - master
+      - feature/claude-tab-restore
+  workflow_dispatch:
+
+concurrency:
+  group: fork-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 330
+    env:
+      WARP_FORK_RELEASES_URL: https://chimney.steep-man.ru/warp-fork/windows
+      CARGO_INCREMENTAL: "0"
+      # Thin LTO linking of the app takes ~10 GB of RAM; keep rustc parallelism low on the
+      # 16 GB hosted runner.
+      CARGO_BUILD_JOBS: "4"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.92.0 --profile minimal --target x86_64-pc-windows-msvc
+          rustup default 1.92.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fork-windows-rlto
+          cache-on-failure: true
+
+      - name: Install protoc, Inno Setup and mc
+        shell: pwsh
+        run: |
+          choco install protoc innosetup --no-progress -y
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\bin" | Out-Null
+          Invoke-WebRequest https://dl.min.io/client/mc/release/windows-amd64/mc.exe -OutFile "$env:RUNNER_TEMP\bin\mc.exe"
+          "$env:RUNNER_TEMP\bin" >> $env:GITHUB_PATH
+          "${env:ProgramFiles(x86)}\Inno Setup 6" >> $env:GITHUB_PATH
+
+      - name: Pick version
+        id: version
+        shell: pwsh
+        run: |
+          $v = 'v0.' + (Get-Date).ToUniversalTime().ToString('yyyy.MM.dd.HH.mm') + '.oss_00'
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Output "Version $v"
+
+      - name: Build installer
+        shell: pwsh
+        run: .\script\windows\publish_s3.ps1 -Bucket warp-fork -Prefix windows -Version ${{ steps.version.outputs.version }} -DryRun
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WarpOssSetup-${{ steps.version.outputs.version }}
+          path: script/windows/Output/WarpOssSetup.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish to MinIO
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        shell: pwsh
+        env:
+          WARP_FORK_S3_ENDPOINT: https://chimney.steep-man.ru
+          WARP_FORK_S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY }}
+          WARP_FORK_S3_SECRET_KEY: ${{ secrets.S3_SECRET_KEY }}
+        run: .\script\windows\publish_s3.ps1 -Bucket warp-fork -Prefix windows -Version ${{ steps.version.outputs.version }} -SkipBuild
