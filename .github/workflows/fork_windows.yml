@@ -24,8 +24,10 @@ jobs:
     env:
       WARP_FORK_RELEASES_URL: https://chimney.steep-man.ru/warp-fork/windows
       CARGO_INCREMENTAL: "0"
-      # Thin LTO linking of the app takes ~10 GB of RAM; keep rustc parallelism low on the
-      # 16 GB hosted runner.
+      # Thin LTO and line-table debuginfo took the build to ~46 minutes on the hosted runner;
+      # the fork ships without both to keep runner minutes down.
+      CARGO_PROFILE_RLTO_LTO: "off"
+      CARGO_PROFILE_RLTO_DEBUG: "0"
       CARGO_BUILD_JOBS: "4"
     steps:
       - uses: actions/checkout@v4
