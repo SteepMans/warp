@@ -22,6 +22,7 @@ mod tab_grouping;
 #[path = "view_tests.rs"]
 pub(crate) mod tests;
 mod vertical_tabs;
+mod ward_workspace;
 #[cfg(target_family = "wasm")]
 mod wasm_view;
 
@@ -3794,6 +3795,7 @@ impl Workspace {
         event: &CLIAgentSessionsModelEvent,
         ctx: &mut ViewContext<Self>,
     ) {
+        self.ward_handle_cli_agent_sessions_event(event, ctx);
         if matches!(
             event,
             CLIAgentSessionsModelEvent::Started { .. }
@@ -5541,6 +5543,7 @@ impl Workspace {
             self.set_active_tab_index(index, ctx);
             self.focus_active_tab(ctx);
             self.update_window_title(ctx);
+            self.ward_mark_active_tab_seen(ctx);
         }
     }
 

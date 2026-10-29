@@ -1,4 +1,5 @@
 pub mod telemetry;
+mod ward;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -59,7 +60,7 @@ use crate::tab::{
     SelectedTabColor, TAB_INDICATOR_SYNCED_COLOR, TabData, reveals_tab_shortcut_hints,
     tab_activate_binding_name, tab_position_id,
 };
-use crate::terminal::cli_agent_sessions::{CLIAgentSessionStatus, CLIAgentSessionsModel};
+use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::session_settings::SessionSettings;
 use crate::terminal::view::TerminalViewState;
 use crate::terminal::{CLIAgent, TerminalView};
@@ -1052,26 +1053,6 @@ fn sort_summary_primary_labels_status_first(values: &mut [VerticalTabsSummaryPri
 fn normalize_summary_text(text: &str) -> Option<String> {
     let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
     (!normalized.is_empty()).then_some(normalized)
-}
-
-/// In the fork's OSS build, returns the message of a CLI agent that is blocked waiting for the
-/// user in this terminal (empty when the agent gave none), or `None` when it is not waiting.
-fn oss_cli_agent_waiting_message(terminal_view_id: EntityId, app: &AppContext) -> Option<String> {
-    if !crate::features::is_fork_oss() {
-        return None;
-    }
-    let session = CLIAgentSessionsModel::as_ref(app)
-        .session(terminal_view_id)
-        .filter(|session| session.supports_rich_status())?;
-    match &session.status {
-        CLIAgentSessionStatus::Blocked { message, .. } => Some(
-            message
-                .as_deref()
-                .and_then(normalize_summary_text)
-                .unwrap_or_default(),
-        ),
-        _ => None,
-    }
 }
 
 /// Returns the conversation status for a terminal pane, used to render the per-line status
@@ -3976,13 +3957,12 @@ impl<'a> PaneProps<'a> {
             pane_configuration.title().trim(),
             pane_configuration.title_secondary().trim(),
         );
-        // Highlight rows whose CLI agent is waiting for the user, unless the row has its own color.
+        // Highlight rows whose CLI agent needs the user, unless the row has its own color.
         let mut pane_color = pane_row_state.pane_color;
         if pane_color.is_none()
             && let TypedPane::Terminal(terminal_pane) = &typed
-            && oss_cli_agent_waiting_message(terminal_pane.terminal_view(app).id(), app).is_some()
         {
-            pane_color = Some(Appearance::as_ref(app).theme().ansi_fg_yellow().into());
+            pane_color = ward::row_highlight_color(terminal_pane.terminal_view(app).id(), app);
         }
 
         Some(Self {
@@ -4687,19 +4667,8 @@ fn render_terminal_row_content(
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Start);
     content.add_child(first_line_element);
-    if let Some(message) =
-        oss_cli_agent_waiting_message(terminal_view.id(), app).filter(|message| !message.is_empty())
-    {
-        content.add_child(
-            Container::new(render_text_line(
-                &message,
-                theme.ansi_fg_yellow().into(),
-                ClipConfig::ellipsis(),
-                appearance,
-            ))
-            .with_margin_top(2.)
-            .finish(),
-        );
+    if let Some(agent_line) = ward::render_agent_status_line(terminal_view.id(), appearance, app) {
+        content.add_child(Container::new(agent_line).with_margin_top(2.).finish());
     }
     content.add_child(Container::new(second_line).with_margin_top(2.).finish());
     content.add_child(
