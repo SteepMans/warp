@@ -100,6 +100,8 @@ pub struct CardStatus {
     pub archived: bool,
 }
 
+/// One card's status by scanning the board; the reference [`card_statuses`] is tested against.
+#[cfg(test)]
 pub fn card_status(board: &Board, task_id: u64) -> Option<CardStatus> {
     let task = board.tasks.iter().find(|task| task.id == task_id)?;
     let column = task
