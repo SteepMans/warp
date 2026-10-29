@@ -223,6 +223,7 @@ impl PrivacyPageView {
             Box::new(SecretRedactionWidget::default()),
             Box::new(AppAnalyticsWidget::default()),
             Box::new(CrashReportsWidget::default()),
+            Box::new(WardMetricsWidget::default()),
             Box::new(CloudConversationStorageWidget::default()),
         ];
         if ContextFlag::NetworkLogConsole.is_enabled() {
@@ -496,6 +497,7 @@ pub enum PrivacyPageAction {
     SetSecretDisplayMode(SecretDisplayMode),
     ToggleTelemetry,
     ToggleCrashReporting,
+    ToggleWardMetrics,
     ToggleCloudConversationStorage,
     LaunchNetworkLogging,
     RemoveCustomRegex(usize),
@@ -577,6 +579,11 @@ impl TypedActionView for PrivacyPageView {
             }
             PrivacyPageAction::ToggleTelemetry => self.toggle_telemetry(ctx),
             PrivacyPageAction::ToggleCrashReporting => self.toggle_crash_reporting(ctx),
+            PrivacyPageAction::ToggleWardMetrics => {
+                let enabled = crate::ward::metrics::is_enabled_by_user(ctx);
+                crate::ward::metrics::set_enabled_by_user(!enabled, ctx);
+                ctx.notify();
+            }
             PrivacyPageAction::ToggleCloudConversationStorage => {
                 self.toggle_cloud_conversation_storage(ctx)
             }
@@ -1617,6 +1624,75 @@ impl SettingsWidget for CrashReportsWidget {
                 ui_builder
                     .paragraph(
                         "Crash reports assist with debugging and stability improvements."
+                            .to_owned(),
+                    )
+                    .with_style(UiComponentStyles {
+                        font_color: Some(
+                            appearance
+                                .theme()
+                                .sub_text_color(appearance.theme().surface_2())
+                                .into_solid(),
+                        ),
+                        margin: Some(
+                            Coords::default()
+                                .top(styles::DESCRIPTION_NEGATIVE_MARGIN_OFFSET)
+                                .bottom(styles::DESCRIPTION_MARGIN_BOTTOM),
+                        ),
+                        ..Default::default()
+                    })
+                    .build()
+                    .finish(),
+            )
+            .finish()
+    }
+}
+
+/// Ward's own anonymous usage metrics (see `crate::ward::metrics`), shown only in OSS builds
+/// that ship them.
+#[derive(Default)]
+struct WardMetricsWidget {
+    switch_state: SwitchStateHandle,
+}
+
+impl SettingsWidget for WardMetricsWidget {
+    type View = PrivacyPageView;
+
+    fn search_terms(&self) -> &str {
+        "telemetry usage metrics analytics ward data collection"
+    }
+
+    fn should_render(&self, _app: &AppContext) -> bool {
+        crate::ward::metrics::is_available()
+    }
+
+    fn render(
+        &self,
+        _view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let ui_builder = appearance.ui_builder();
+        Flex::column()
+            .with_child(render_body_item::<PrivacyPageAction>(
+                "Send anonymous usage metrics".into(),
+                None,
+                LocalOnlyIconState::Hidden,
+                ToggleState::Enabled,
+                appearance,
+                ui_builder
+                    .switch(self.switch_state.clone())
+                    .check(crate::ward::metrics::is_enabled_by_user(app))
+                    .build()
+                    .on_click(move |ctx, _, _| {
+                        ctx.dispatch_typed_action(PrivacyPageAction::ToggleWardMetrics)
+                    })
+                    .finish(),
+                None,
+            ))
+            .with_child(
+                ui_builder
+                    .paragraph(
+                        "Ward reports its version, launches, crashes, update results and the                          number of Claude Code and Codex sessions to the fork's own server under                          a random installation id. Commands, output, paths and prompts are never                          sent."
                             .to_owned(),
                     )
                     .with_style(UiComponentStyles {
