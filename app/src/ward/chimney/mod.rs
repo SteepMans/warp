@@ -6,6 +6,7 @@
 //! never logged.
 
 pub mod api;
+pub mod auth;
 pub mod bindings;
 pub mod chip;
 pub mod model;
