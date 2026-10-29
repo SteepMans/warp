@@ -36,8 +36,8 @@ pub fn render_card_chip(
     }
     let card = bindings::card_of_view(terminal_view_id, app)?;
     let status = model(app).and_then(|model| model.card_status(card));
-    let color = chip_color(status.as_ref(), appearance);
-    let text = chip_text(card.board_id, card.task_id, status.as_ref());
+    let color = chip_color(status, appearance);
+    let text = chip_text(card.board_id, card.task_id, status);
     Some(
         Container::new(
             Text::new_inline(text, appearance.ui_font_family(), 11.)
