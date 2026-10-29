@@ -22,6 +22,7 @@ mod tab_grouping;
 #[path = "view_tests.rs"]
 pub(crate) mod tests;
 mod vertical_tabs;
+mod ward_chimney;
 mod ward_overview;
 pub(super) mod ward_workspace;
 #[cfg(target_family = "wasm")]

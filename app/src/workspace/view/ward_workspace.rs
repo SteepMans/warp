@@ -100,6 +100,7 @@ impl Workspace {
         _event: &chimney::model::ChimneyEvent,
         ctx: &mut ViewContext<Self>,
     ) {
+        self.ward_refresh_chimney_picker(ctx);
         ctx.notify();
     }
 
