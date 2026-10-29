@@ -1884,6 +1884,7 @@ pub(crate) fn initialize_app(
         autoupdate::check_and_report_update_errors(ctx);
         // After the installer log check, which tells whether an update attempt failed.
         ward::metrics::init(ctx);
+        ward::chimney::model::init(ctx);
     }
 
     ctx.set_fallback_font_source_provider(|url| ::asset_cache::url_source(url));
