@@ -119,6 +119,7 @@ fn main() -> Result<()> {
         println!("cargo:rerun-if-env-changed=CARGO_BIN_NAME");
         println!("cargo:rerun-if-env-changed=GIT_RELEASE_TAG");
         println!("cargo:rerun-if-env-changed=WARP_APP_NAME");
+        println!("cargo:rerun-if-env-changed=WARP_APP_DISPLAY_NAME");
         // Retrieve the Cargo profile name so that we can put a copy of ConPTY in
         // the correct target subdirectory.
         //
@@ -471,6 +472,17 @@ fn embed_resource_file(target_dir: &Path) {
     let version = env::var("GIT_RELEASE_TAG").unwrap_or("v0".to_owned());
     let app_name = env::var("WARP_APP_NAME").unwrap_or("Warp".to_owned());
     let bin_name = env::var("CARGO_BIN_NAME").unwrap_or("local".to_owned());
+    // User-visible name in the version resource (Task Manager, file properties). The fork's OSS
+    // build is branded "Ward" while WARP_APP_NAME keeps the internal "WarpOss" id.
+    let is_oss = bin_name == "oss";
+    let display_name = env::var("WARP_APP_DISPLAY_NAME").unwrap_or_else(|_| {
+        if is_oss {
+            "Ward".to_owned()
+        } else {
+            app_name.clone()
+        }
+    });
+    let product_name = if is_oss { display_name.as_str() } else { "Warp" };
 
     let icon_path = Path::new("channels")
         .join(bin_name)
@@ -505,12 +517,12 @@ BEGIN
         BLOCK "040904E4"
         BEGIN
             VALUE "CompanyName",      "Denver Technologies, Inc\0"
-            VALUE "FileDescription",  "{app_name}\0"
+            VALUE "FileDescription",  "{display_name}\0"
             VALUE "FileVersion",      "{version}\0"
             VALUE "LegalCopyright",   "© 2025, Denver Technologies, Inc\0"
             VALUE "InternalName",     "\0"
             VALUE "OriginalFilename", "\0"
-            VALUE "ProductName",      "Warp\0"
+            VALUE "ProductName",      "{product_name}\0"
             VALUE "ProductVersion",   "{version}\0"
         END
     END
