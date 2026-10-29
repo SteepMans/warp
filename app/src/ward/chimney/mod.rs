@@ -8,6 +8,8 @@
 pub mod api;
 pub mod bindings;
 pub mod model;
+pub mod repos;
+pub mod slug;
 
 use warp_core::user_preferences::GetUserPreferences as _;
 use warpui::AppContext;
