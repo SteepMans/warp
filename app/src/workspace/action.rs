@@ -206,6 +206,8 @@ pub enum WorkspaceAction {
     WardJumpBack,
     /// Ward: filters the vertical tabs by CLI agent status.
     WardSetAgentStatusFilter(crate::ward::attention::AgentStatusFilter),
+    /// Ward (OSS build) actions: agent overview board, agents palette and Chimney cards.
+    Ward(crate::ward::action::WardAction),
     /// Creates a new tab group from the current tab multi-selection.
     NewTabGroupFromSelectedTabs,
     /// Context-aware "create group" entry point for the keybinding: groups
@@ -1180,6 +1182,7 @@ impl WorkspaceAction {
             | WardJumpToWaitingAgent
             | WardJumpBack
             | WardSetAgentStatusFilter(_)
+            | Ward(_)
             | CancelActiveRename
             | StartNewConversation { .. }
             | UndoRevertInCodeReviewPane { .. }

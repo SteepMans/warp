@@ -1558,6 +1558,23 @@ pub fn init(app: &mut AppContext) {
     .with_mac_key_binding("cmd-shift-M")
     .with_linux_or_windows_key_binding("ctrl-shift-M")
     .with_group(bindings::BindingGroup::WarpAi.as_str())]);
+
+    register_ward_bindings(app);
+}
+
+/// Ward (OSS build) bindings. Registered last so they take precedence over upstream bindings
+/// on the same keys (Ctrl+Shift+O opens the files palette upstream).
+fn register_ward_bindings(app: &mut AppContext) {
+    use crate::ward::action::WardAction;
+    app.register_editable_bindings([EditableBinding::new(
+        "workspace:ward_toggle_agent_overview",
+        "Toggle agent overview",
+        WorkspaceAction::Ward(WardAction::ToggleOverview),
+    )
+    .with_key_binding("ctrl-shift-O")
+    .with_enabled(crate::features::is_fork_oss)
+    .with_group(bindings::BindingGroup::Navigation.as_str())
+    .with_context_predicate(id!("Workspace"))]);
 }
 
 fn add_open_setting_pages_as_editable_binding(app: &mut AppContext) {

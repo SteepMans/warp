@@ -22,6 +22,7 @@ mod tab_grouping;
 #[path = "view_tests.rs"]
 pub(crate) mod tests;
 mod vertical_tabs;
+mod ward_overview;
 pub(super) mod ward_workspace;
 #[cfg(target_family = "wasm")]
 mod wasm_view;
@@ -22407,7 +22408,9 @@ impl Workspace {
     ) -> Box<dyn Element> {
         let active_tab_data = &self.tabs[self.active_tab_index];
 
-        let active_content = if FeatureFlag::AgentManagementView.is_enabled()
+        let active_content = if let Some(overview) = self.ward_render_overview(app) {
+            overview
+        } else if FeatureFlag::AgentManagementView.is_enabled()
             && self.current_workspace_state.is_agent_management_view_open
         {
             ChildView::new(&self.agent_management_view).finish()
@@ -24389,6 +24392,7 @@ impl TypedActionView for Workspace {
                 crate::ward::attention::set_status_filter(*filter);
                 ctx.notify();
             }
+            Ward(action) => self.ward_handle_action(action, ctx),
             NewTabGroupFromSelectedTabs => self.new_tab_group_from_selected_tabs(ctx),
             NewTabGroupFromActiveOrSelectedTabs => {
                 self.new_tab_group_from_active_or_selected_tabs(ctx)
