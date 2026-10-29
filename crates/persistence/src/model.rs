@@ -433,6 +433,9 @@ pub struct TerminalPane {
     pub conversation_ids: Option<String>,
     /// The active conversation ID if the agent view was open in fullscreen mode.
     pub active_conversation_id: Option<String>,
+    /// A command that resumes the CLI agent session (e.g. Claude Code) that was running in the
+    /// pane, executed once the restored pane's shell has bootstrapped.
+    pub cli_agent_resume_command: Option<String>,
 }
 
 #[derive(Identifiable, Queryable, Selectable)]
@@ -611,6 +614,9 @@ pub struct NewTerminalPane {
     pub conversation_ids: Option<String>,
     /// The active conversation ID if the agent view was open in fullscreen mode.
     pub active_conversation_id: Option<String>,
+    /// A command that resumes the CLI agent session (e.g. Claude Code) that was running in the
+    /// pane, executed once the restored pane's shell has bootstrapped.
+    pub cli_agent_resume_command: Option<String>,
 }
 
 #[derive(Insertable)]
