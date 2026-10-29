@@ -1,5 +1,5 @@
 //! The agent overview board: every CLI agent of every window in four columns by what it needs
-//! from the user, toggled per window with Ctrl+Shift+O or the header button.
+//! from the user, toggled per window with Ctrl+Alt+W or the header button.
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
