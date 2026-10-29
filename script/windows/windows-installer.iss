@@ -7,8 +7,6 @@
 #ifndef MyAppName
   #define MyAppName "WarpDev"
 #endif
-; User-visible name (Start menu, Apps & features, context menu). MyAppName stays the internal id
-; used for registry keys, data dirs and the AppUserModelID, so upgrades keep the existing install.
 #ifndef MyAppDisplayName
   #define MyAppDisplayName MyAppName
 #endif
@@ -42,6 +40,8 @@
 ; NOTE: The value of AppId uniquely identifies this application. Do not use the same AppId value in installers for other applications.
 ; (To generate a new GUID, click Tools | Generate GUID inside the IDE.)
 AppId=warp-terminal-{#ReleaseChannel}
+; MyAppDisplayName is the user-visible name (Start menu, Apps & features, context menu);
+; MyAppName stays the internal id for registry keys, data dirs and the AppUserModelID.
 AppName={#MyAppDisplayName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppDisplayName} {#MyAppVersion}
