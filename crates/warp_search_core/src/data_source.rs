@@ -229,6 +229,9 @@ pub enum QueryFilter {
 
     /// Ward (fork OSS build): CLI agents of all windows, most urgent first.
     WardAgents,
+
+    /// Ward (fork OSS build): cards of the configured Chimney board, for the card pickers.
+    WardChimneyCards,
 }
 
 impl QueryFilter {
@@ -270,6 +273,7 @@ impl QueryFilter {
                 "Search conversations in current directory"
             }
             QueryFilter::WardAgents => "Search agents by project, task or question",
+            QueryFilter::WardChimneyCards => "Search Chimney cards",
         }
     }
 
@@ -303,6 +307,7 @@ impl QueryFilter {
             QueryFilter::FullTerminalUseModels => &NO_FILTER_ATOM,
             QueryFilter::CurrentDirectoryConversations => &NO_FILTER_ATOM,
             QueryFilter::WardAgents => &WARD_AGENTS_FILTER_ATOM,
+            QueryFilter::WardChimneyCards => &NO_FILTER_ATOM,
         }
     }
 
@@ -336,6 +341,7 @@ impl QueryFilter {
             QueryFilter::FullTerminalUseModels => "full terminal use models",
             QueryFilter::CurrentDirectoryConversations => "current directory conversations",
             QueryFilter::WardAgents => "agents",
+            QueryFilter::WardChimneyCards => "Chimney cards",
         }
     }
 
@@ -376,6 +382,7 @@ impl QueryFilter {
             QueryFilter::FullTerminalUseModels => None,
             QueryFilter::CurrentDirectoryConversations => None,
             QueryFilter::WardAgents => Some("bundled/svg/terminal-input.svg"),
+            QueryFilter::WardChimneyCards => None,
         }
     }
 }

@@ -13,4 +13,6 @@ pub enum WardAction {
     MarkAgentSeen(EntityId),
     /// Closes the tab that holds the agent's terminal.
     CloseAgentTab(EntityId),
+    /// A card was picked in the Chimney card picker.
+    ChimneyCardPicked { board_id: u64, task_id: u64 },
 }
