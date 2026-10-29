@@ -340,6 +340,7 @@ pub enum SettingsSection {
 
 /// Pages for Warp's own AI, account and cloud features, hidden in the fork's OSS build.
 const OSS_HIDDEN_SECTIONS: &[SettingsSection] = &[
+    SettingsSection::Account,
     SettingsSection::WarpAgent,
     SettingsSection::AgentProfiles,
     SettingsSection::AgentMCPServers,
@@ -352,6 +353,15 @@ const OSS_HIDDEN_SECTIONS: &[SettingsSection] = &[
     SettingsSection::CloudEnvironments,
     SettingsSection::WarpCloudAgentAPIKeys,
 ];
+
+/// Maps a page hidden in the OSS build (including the default Account page) to a visible one.
+fn oss_visible_section(section: SettingsSection) -> SettingsSection {
+    if crate::features::is_fork_oss() && OSS_HIDDEN_SECTIONS.contains(&section) {
+        SettingsSection::Appearance
+    } else {
+        section
+    }
+}
 
 use std::fmt::{self, Display};
 
@@ -1490,6 +1500,7 @@ impl SettingsView {
             }
             other => other.unwrap_or_default(),
         };
+        let initial_page = oss_visible_section(initial_page);
 
         // Auto-expand the umbrella if the initial page is one of its subpages.
         for item in &mut nav_items {
@@ -2070,6 +2081,7 @@ impl SettingsView {
         allow_steal_focus: bool,
         ctx: &mut ViewContext<Self>,
     ) {
+        let section = oss_visible_section(section);
         // Every nav target owns its backing page. Check it exists.
         if self.settings_page(section).is_none() {
             return;
