@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use warpui::r#async::Timer;
 use warpui::{AppContext, Entity, ModelContext, SingletonEntity};
 
-use super::api::{Board, CardStatus, card_status, parse_board};
+use super::api::{Board, CardStatus, card_statuses, parse_board};
 use super::auth::{Auth, AuthError, AuthStatus, AuthorizedError, HttpAuthTransport};
 use super::bindings::{self, CardRef};
 use super::{RequestConfig, request_config};
@@ -69,6 +69,9 @@ pub struct ChimneyModel {
     /// Tokens of the service account, shared by all requests.
     auth: Arc<Auth>,
     boards: HashMap<u64, Board>,
+    /// Card status by board and task id, rebuilt when a board is fetched; chips read it on
+    /// every render.
+    statuses: HashMap<u64, HashMap<u64, CardStatus>>,
     errors: HashMap<u64, FetchError>,
     in_flight: HashSet<u64>,
     polling: bool,
@@ -90,6 +93,7 @@ pub fn init(ctx: &mut AppContext) {
         client: Arc::new(http_client::Client::new_external()),
         auth: Arc::new(Auth::default()),
         boards: HashMap::new(),
+        statuses: HashMap::new(),
         errors: HashMap::new(),
         in_flight: HashSet::new(),
         polling: false,
@@ -138,8 +142,8 @@ impl ChimneyModel {
         self.auth.status()
     }
 
-    pub fn card_status(&self, card: CardRef) -> Option<CardStatus> {
-        card_status(self.boards.get(&card.board_id)?, card.task_id)
+    pub fn card_status(&self, card: CardRef) -> Option<&CardStatus> {
+        self.statuses.get(&card.board_id)?.get(&card.task_id)
     }
 
     fn start_polling(&mut self, ctx: &mut ModelContext<Self>) {
@@ -188,6 +192,7 @@ impl ChimneyModel {
                 match result {
                     Ok(board) => {
                         me.errors.remove(&board_id);
+                        me.statuses.insert(board_id, card_statuses(&board));
                         me.boards.insert(board_id, board);
                     }
                     Err(err) => {

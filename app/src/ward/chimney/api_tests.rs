@@ -85,6 +85,17 @@ fn card_status_reads_column_and_archive() {
 }
 
 #[test]
+fn card_statuses_index_matches_card_status() {
+    let board = board();
+    let statuses = card_statuses(&board);
+    assert_eq!(statuses.len(), board.tasks.len());
+    for task in &board.tasks {
+        assert_eq!(statuses.get(&task.id).cloned(), card_status(&board, task.id));
+    }
+    assert_eq!(statuses.get(&9999), None);
+}
+
+#[test]
 fn picker_puts_active_work_first_and_skips_archive() {
     let board = board();
     let ids: Vec<u64> = picker_cards(&board, false)

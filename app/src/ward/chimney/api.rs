@@ -2,6 +2,8 @@
 //! card status for chips and card lists for pickers. Field names follow the chimney-mcp types;
 //! everything Ward does not need is ignored, everything optional has a default.
 
+use std::collections::HashMap;
+
 use serde::Deserialize;
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
@@ -103,12 +105,33 @@ pub fn card_status(board: &Board, task_id: u64) -> Option<CardStatus> {
     let column = task
         .column_id
         .and_then(|id| board.columns.iter().find(|column| column.id == id));
-    Some(CardStatus {
+    Some(task_status(task, column))
+}
+
+fn task_status(task: &BoardTask, column: Option<&BoardColumn>) -> CardStatus {
+    CardStatus {
         title: task.title.trim().to_owned(),
         column: column.map(|column| column.title.trim().to_owned()).unwrap_or_default(),
         column_kind: ColumnKind::of(column.and_then(|column| column.column_type.as_deref())),
         archived: task.archived.unwrap_or(false),
-    })
+    }
+}
+
+/// [`card_status`] of every card, built once per fetched board so chips do not scan the board
+/// on each render. The first card wins when ids repeat, as in [`card_status`].
+pub fn card_statuses(board: &Board) -> HashMap<u64, CardStatus> {
+    let mut columns: HashMap<u64, &BoardColumn> = HashMap::new();
+    for column in &board.columns {
+        columns.entry(column.id).or_insert(column);
+    }
+    let mut statuses = HashMap::with_capacity(board.tasks.len());
+    for task in &board.tasks {
+        statuses.entry(task.id).or_insert_with(|| {
+            let column = task.column_id.and_then(|id| columns.get(&id).copied());
+            task_status(task, column)
+        });
+    }
+    statuses
 }
 
 /// A card offered by a picker.
