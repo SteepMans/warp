@@ -4939,6 +4939,26 @@ impl Workspace {
         });
     }
 
+    /// Adds a new terminal tab and runs `command` once its shell has bootstrapped, like a
+    /// launch config command.
+    fn add_terminal_tab_with_command(&mut self, command: String, ctx: &mut ViewContext<Self>) {
+        self.add_new_session_tab_internal_with_default_session_mode_behavior(
+            NewSessionSource::Tab,
+            Some(ctx.window_id()),
+            None,
+            None,
+            false,
+            DefaultSessionModeBehavior::Ignore,
+            ctx,
+        );
+        if let Some(terminal_view) = self.active_session_view(ctx) {
+            terminal_view.update(ctx, |view, ctx| {
+                view.set_pending_command_queue(vec![command], ctx);
+            });
+        }
+        ctx.notify();
+    }
+
     /// Add a new terminal tab and enter the agent view with a new conversation.
     fn add_terminal_tab_with_new_agent_view(&mut self, ctx: &mut ViewContext<Self>) {
         let was_left_panel_open = self.active_tab_pane_group().as_ref(ctx).left_panel_open;
@@ -7036,6 +7056,24 @@ impl Workspace {
                     terminal_item = terminal_item.with_key_shortcut_label(shortcut_label.clone());
                 }
                 menu_items.push(terminal_item.into_item());
+            }
+        }
+
+        // The fork's OSS build has no Warp agent; offer third-party CLI agents instead.
+        if crate::features::is_fork_oss() {
+            for (label, command, icon) in [
+                ("Claude Code", "claude", icons::Icon::ClaudeLogo),
+                ("Claude Code (continue)", "claude --continue", icons::Icon::ClaudeLogo),
+                ("Codex", "codex", icons::Icon::OpenAILogo),
+            ] {
+                menu_items.push(
+                    MenuItemFields::new(label)
+                        .with_on_select_action(WorkspaceAction::AddTerminalTabWithCommand {
+                            command: command.to_owned(),
+                        })
+                        .with_icon(icon)
+                        .into_item(),
+                );
             }
         }
 
@@ -24407,6 +24445,9 @@ impl TypedActionView for Workspace {
                     ctx,
                 );
                 ctx.notify();
+            }
+            AddTerminalTabWithCommand { command } => {
+                self.add_terminal_tab_with_command(command.clone(), ctx);
             }
             AddTabWithShell { shell, source } => {
                 self.add_tab_with_shell(shell.clone(), *source, ctx)
