@@ -22335,7 +22335,11 @@ impl Workspace {
                     Flex::row()
                         .with_child(
                             Text::new_inline(
-                                UPDATE_READY_TEXT,
+                                if crate::features::is_fork_oss() {
+                                    "Update Ward"
+                                } else {
+                                    UPDATE_READY_TEXT
+                                },
                                 appearance.ui_font_family(),
                                 PILL_FONT_SIZE,
                             )
