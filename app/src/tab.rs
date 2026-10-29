@@ -765,6 +765,13 @@ impl TabData {
         ];
         if let Some(card) = bound {
             menu_items.push(
+                MenuItemFields::new("Open Chimney card in browser")
+                    .with_on_select_action(WorkspaceAction::Ward(
+                        WardAction::OpenChimneyCardInBrowser(card),
+                    ))
+                    .into_item(),
+            );
+            menu_items.push(
                 MenuItemFields::new(format!(
                     "Unbind Chimney card {}/{}",
                     card.board_id, card.task_id

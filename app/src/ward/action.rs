@@ -3,6 +3,8 @@
 
 use warpui::EntityId;
 
+use super::chimney::bindings::CardRef;
+
 #[derive(Debug, Clone)]
 pub enum WardAction {
     /// Shows or hides the agent overview board in this window.
@@ -21,4 +23,6 @@ pub enum WardAction {
     StartAgentFromCard,
     /// A card was picked in the Chimney card picker.
     ChimneyCardPicked { board_id: u64, task_id: u64 },
+    /// Opens a bound card (or its board) in the Chimney web app.
+    OpenChimneyCardInBrowser(CardRef),
 }
