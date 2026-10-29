@@ -21667,7 +21667,9 @@ impl Workspace {
             );
         }
 
-        if let Some(pill) = self.render_team_switcher_pill(appearance, ctx) {
+        if let Some(pill) = self.render_team_switcher_pill(appearance, ctx)
+            && !crate::features::is_fork_oss()
+        {
             target.add_child(pill);
         }
 
