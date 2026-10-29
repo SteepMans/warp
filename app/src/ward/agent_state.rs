@@ -178,12 +178,27 @@ pub struct ToolActivity {
     pub input_preview: Option<String>,
 }
 
+/// Detail and task text of a snapshot, kept until the session changes or the derived state
+/// moves on. Building them collapses whitespace over the whole prompt, question or response,
+/// and every tab row, group counter, filter chip, header strip and footer asks on each render.
+#[derive(Clone, Debug)]
+struct CachedTexts {
+    revision: u64,
+    state: AgentState,
+    detail: Option<String>,
+    task: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 struct TrackedAgent {
     kind: StatusKind,
     changed_at: Instant,
     last_tool: Option<ToolActivity>,
     unseen: bool,
+    /// Bumped whenever `CLIAgentSessionsModel` reports a change of the session (status or
+    /// context), so [`CachedTexts`] of an older revision are rebuilt.
+    revision: u64,
+    texts: Option<CachedTexts>,
 }
 
 impl TrackedAgent {
@@ -193,7 +208,38 @@ impl TrackedAgent {
             changed_at: now,
             last_tool: None,
             unseen: false,
+            revision: 0,
+            texts: None,
         }
+    }
+
+    /// The session's status or context changed.
+    fn touch(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// Detail and task for `state`, from the cache when neither the session nor the state
+    /// changed since they were built; `build` gets the last tool and runs otherwise.
+    fn texts(
+        &mut self,
+        state: AgentState,
+        build: impl FnOnce(Option<&ToolActivity>) -> (Option<String>, Option<String>),
+    ) -> (Option<String>, Option<String>) {
+        let fresh = self
+            .texts
+            .as_ref()
+            .is_some_and(|texts| texts.revision == self.revision && texts.state == state);
+        if !fresh {
+            let (detail, task) = build(self.last_tool.as_ref());
+            self.texts = Some(CachedTexts {
+                revision: self.revision,
+                state,
+                detail,
+                task,
+            });
+        }
+        let texts = self.texts.as_ref().expect("texts filled above");
+        (texts.detail.clone(), texts.task.clone())
     }
 
     /// Applies an observed status; restarts the clock only when the coarse status changed.
@@ -202,6 +248,7 @@ impl TrackedAgent {
             return;
         }
         self.kind = kind;
+        self.touch();
         self.changed_at = now;
         self.unseen = kind == StatusKind::Success;
     }
@@ -233,6 +280,7 @@ pub fn observe_status(terminal_view_id: EntityId, status: &CLIAgentSessionStatus
     }
     let kind = StatusKind::of(status);
     with_tracked(terminal_view_id, kind, |agent| {
+        agent.touch();
         agent.observe(kind, Instant::now())
     });
 }
@@ -267,6 +315,7 @@ pub fn observe_event(
             }
             _ => {}
         }
+        agent.touch();
         agent.observe(kind, Instant::now());
     });
 }
@@ -309,23 +358,31 @@ pub fn agent_snapshot(terminal_view_id: EntityId, app: &AppContext) -> Option<Ag
         .filter(|session| session.supports_rich_status())
         .filter(|session| !matches!(session.agent, CLIAgent::Unknown))?;
     let kind = StatusKind::of(&session.status);
-    let (changed_at, last_tool, unseen) = with_tracked(terminal_view_id, kind, |agent| {
+    let now = Instant::now();
+    Some(with_tracked(terminal_view_id, kind, |agent| {
         // Sessions whose status changed before tracking started are adopted here.
-        agent.observe(kind, Instant::now());
-        (agent.changed_at, agent.last_tool.clone(), agent.unseen)
-    });
-    let in_state = Instant::now().saturating_duration_since(changed_at);
-    let state = derive_state(kind, last_tool.is_some(), unseen, in_state);
-    Some(AgentSnapshot {
-        terminal_view_id,
-        state,
-        in_state,
-        detail: detail_text(state, session, last_tool.as_ref()),
-        task: session
-            .session_context
-            .latest_user_prompt()
-            .map(|t| clip(&t)),
-    })
+        agent.observe(kind, now);
+        // State and time are derived on every call: they depend on the clock (idle after
+        // `IDLE_AFTER`, minutes in state), the texts only on the session and the state.
+        let in_state = now.saturating_duration_since(agent.changed_at);
+        let state = derive_state(kind, agent.last_tool.is_some(), agent.unseen, in_state);
+        let (detail, task) = agent.texts(state, |last_tool| {
+            (
+                detail_text(state, session, last_tool),
+                session
+                    .session_context
+                    .latest_user_prompt()
+                    .map(|t| clip(&t)),
+            )
+        });
+        AgentSnapshot {
+            terminal_view_id,
+            state,
+            in_state,
+            detail,
+            task,
+        }
+    }))
 }
 
 fn detail_text(

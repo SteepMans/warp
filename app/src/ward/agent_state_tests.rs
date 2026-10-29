@@ -136,3 +136,60 @@ fn clip_limits_long_text() {
     assert_eq!(clipped.chars().count(), MAX_DETAIL_CHARS);
     assert!(clipped.ends_with('\u{2026}'));
 }
+
+#[test]
+fn snapshot_texts_are_built_once_per_session_change() {
+    let mut agent = TrackedAgent::new(StatusKind::InProgress, Instant::now());
+    let mut built = 0;
+    for _ in 0..50 {
+        let (detail, task) = agent.texts(AgentState::Thinking, |_| {
+            built += 1;
+            (Some("first".to_owned()), Some("task".to_owned()))
+        });
+        assert_eq!(detail.as_deref(), Some("first"));
+        assert_eq!(task.as_deref(), Some("task"));
+    }
+    assert_eq!(built, 1);
+
+    // A plugin event or status update invalidates the texts.
+    agent.touch();
+    let (detail, _) = agent.texts(AgentState::Thinking, |_| {
+        built += 1;
+        (Some("second".to_owned()), None)
+    });
+    assert_eq!(detail.as_deref(), Some("second"));
+    assert_eq!(built, 2);
+}
+
+#[test]
+fn snapshot_texts_follow_the_derived_state() {
+    let start = Instant::now();
+    let mut agent = TrackedAgent::new(StatusKind::Success, start);
+    let mut built = Vec::new();
+    agent.texts(AgentState::Done, |_| {
+        built.push(AgentState::Done);
+        (Some("All tests pass".to_owned()), None)
+    });
+    agent.texts(AgentState::Done, |_| {
+        built.push(AgentState::Done);
+        (None, None)
+    });
+    // Time alone moves a finished agent to idle: the text is rebuilt for the new state.
+    let (detail, _) = agent.texts(AgentState::Idle, |_| {
+        built.push(AgentState::Idle);
+        (Some("Idle".to_owned()), None)
+    });
+    assert_eq!(detail.as_deref(), Some("Idle"));
+    assert_eq!(built, vec![AgentState::Done, AgentState::Idle]);
+}
+
+#[test]
+fn status_kind_change_invalidates_snapshot_texts() {
+    let start = Instant::now();
+    let mut agent = TrackedAgent::new(StatusKind::Success, start);
+    agent.texts(AgentState::Done, |_| (Some("Done".to_owned()), None));
+    // Success and Cancelled both show as Done, with different texts.
+    agent.observe(StatusKind::Cancelled, start + MINUTE);
+    let (detail, _) = agent.texts(AgentState::Done, |_| (Some("Cancelled".to_owned()), None));
+    assert_eq!(detail.as_deref(), Some("Cancelled"));
+}
