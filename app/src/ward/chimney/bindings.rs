@@ -41,6 +41,7 @@ impl BindingMap {
         self.panes.remove(pane_uuid).is_some()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.panes.is_empty()
     }
@@ -132,10 +133,6 @@ pub fn register_view(terminal_view_id: EntityId, pane_uuid: String) {
     STORE.with(|store| {
         store.borrow_mut().views.insert(terminal_view_id, pane_uuid);
     });
-}
-
-pub fn pane_uuid_of(terminal_view_id: EntityId) -> Option<String> {
-    STORE.with(|store| store.borrow().views.get(&terminal_view_id).cloned())
 }
 
 pub fn card_of_view(terminal_view_id: EntityId, app: &AppContext) -> Option<CardRef> {
