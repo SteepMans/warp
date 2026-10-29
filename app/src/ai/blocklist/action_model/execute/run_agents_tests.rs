@@ -51,6 +51,66 @@ struct RunAgentsTestState {
 }
 
 #[test]
+fn approved_child_roster_requires_confirmation_for_renamed_agents() {
+    let _child_models = FeatureFlag::ChildModelRouting.override_enabled(true);
+    App::test((), |mut app| async move {
+        let state = initialize_run_agents_test(&mut app, ExecutionMode::App);
+        let mut action = with_plan_id(remote_run_agents_action("oz"), "plan-1");
+        let AIAgentActionType::RunAgents(request) = &mut action.action else {
+            panic!("expected run_agents action");
+        };
+        let mut config = OrchestrationConfig {
+            agent_models: vec![ai::agent::orchestration_config::OrchestrationAgentModel {
+                name: request.agent_run_configs[0].name.clone(),
+                model_id: String::new(),
+            }],
+            model_id: String::new(),
+            harness_type: "oz".to_string(),
+            execution_mode: OrchestrationExecutionMode::Local,
+        };
+        BlocklistAIHistoryModel::handle(&app).update(&mut app, |history, _| {
+            history
+                .conversation_mut(&state.conversation_id)
+                .unwrap()
+                .set_orchestration_config_for_plan(
+                    "plan-1".into(),
+                    config.clone(),
+                    OrchestrationConfigStatus::Approved,
+                );
+        });
+        state.executor.update(&mut app, |executor, ctx| {
+            assert!(executor.should_autoexecute(
+                ExecuteActionInput {
+                    action: &action,
+                    conversation_id: state.conversation_id
+                },
+                ctx,
+            ));
+        });
+        config.agent_models[0].name = "renamed".into();
+        BlocklistAIHistoryModel::handle(&app).update(&mut app, |history, _| {
+            history
+                .conversation_mut(&state.conversation_id)
+                .unwrap()
+                .set_orchestration_config_for_plan(
+                    "plan-1".into(),
+                    config,
+                    OrchestrationConfigStatus::Approved,
+                );
+        });
+        state.executor.update(&mut app, |executor, ctx| {
+            assert!(!executor.should_autoexecute(
+                ExecuteActionInput {
+                    action: &action,
+                    conversation_id: state.conversation_id
+                },
+                ctx,
+            ));
+        });
+    });
+}
+
+#[test]
 fn child_model_overrides_require_a_batch_fallback_only_when_routing_is_enabled() {
     for enabled in [false, true] {
         let _child_models = FeatureFlag::ChildModelRouting.override_enabled(enabled);
@@ -104,6 +164,7 @@ fn persist_plan_config_with_harness(
             .set_orchestration_config_for_plan(
                 plan_id.to_string(),
                 OrchestrationConfig {
+                    agent_models: Vec::new(),
                     model_id: "auto".to_string(),
                     harness_type: harness_type.to_string(),
                     execution_mode: OrchestrationExecutionMode::Remote {
@@ -498,6 +559,7 @@ fn child_models_survive_approved_batch_defaults_and_local_remote_translation() {
         resolve_request_from_config(
             &mut request,
             &OrchestrationConfig {
+                agent_models: Vec::new(),
                 model_id: "approved-batch".to_string(),
                 harness_type: "oz".to_string(),
                 execution_mode: OrchestrationExecutionMode::Local,
@@ -586,7 +648,7 @@ fn dispatch_reports_child_models_and_rejects_incompatible_harness_overrides() {
             assert_eq!(model_id, "approved-batch");
             assert_eq!(agents.len(), 2);
             for (agent, expected_model) in agents.iter().zip(["child-model", "approved-batch"]) {
-                assert_eq!(agent.resolved_model_id, expected_model);
+                assert!(agent.resolved_model_id.is_empty());
                 let RunAgentsAgentOutcomeKind::Failed { error } = &agent.kind else {
                     panic!("expected per-child launch failure");
                 };
@@ -651,6 +713,7 @@ fn dispatch_preserves_models_in_successful_launches_and_partial_failures() {
         resolve_request_from_config(
             &mut request,
             &OrchestrationConfig {
+                agent_models: Vec::new(),
                 model_id: "approved-batch".to_string(),
                 harness_type: "oz".to_string(),
                 execution_mode: OrchestrationExecutionMode::Local,
@@ -697,6 +760,10 @@ fn dispatch_preserves_models_in_successful_launches_and_partial_failures() {
                     false,
                     ctx,
                 );
+                history
+                    .conversation_mut(&child_id)
+                    .unwrap()
+                    .set_configured_launch_model_id(Some(format!("configured-{expected_model}")));
                 history.assign_run_id_for_conversation(
                     child_id,
                     run_id.to_string(),
@@ -723,7 +790,10 @@ fn dispatch_preserves_models_in_successful_launches_and_partial_failures() {
                 "00000000-0000-0000-0000-000000000003",
             ),
         ] {
-            assert_eq!(agent.resolved_model_id, expected_model);
+            assert_eq!(
+                agent.resolved_model_id,
+                format!("configured-{expected_model}")
+            );
             assert_eq!(
                 agent.kind,
                 RunAgentsAgentOutcomeKind::Launched {
@@ -731,12 +801,12 @@ fn dispatch_preserves_models_in_successful_launches_and_partial_failures() {
                 }
             );
         }
-        assert_eq!(agents[2].resolved_model_id, "invalid-child-model");
+        assert!(agents[2].resolved_model_id.is_empty());
         let RunAgentsAgentOutcomeKind::Failed { error } = &agents[2].kind else {
             panic!("expected named-local launch failure");
         };
         assert!(error.contains("requires remote execution"));
-        assert_eq!(agents[3].resolved_model_id, "non-oz-model");
+        assert!(agents[3].resolved_model_id.is_empty());
         let RunAgentsAgentOutcomeKind::Failed { error } = &agents[3].kind else {
             panic!("expected incompatible Oz model failure");
         };

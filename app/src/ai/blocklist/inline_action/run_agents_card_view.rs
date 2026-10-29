@@ -12,16 +12,14 @@ use ai::agent::orchestration_config::{OrchestrationConfig, OrchestrationConfigSt
 use ai::skills::SkillReference;
 use pathfinder_geometry::vector::vec2f;
 use warp_core::send_telemetry_from_ctx;
-use warp_core::ui::color::coloru_with_opacity;
 use warp_errors::report_error;
 use warp_graphql::queries::get_runners::RunnerSortBy;
 use warpui::elements::{
     Border, ChildAnchor, ChildView, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
-    Empty, Expanded, Flex, MainAxisSize, OffsetPositioning, ParentAnchor, ParentElement,
-    ParentOffsetBounds, Radius, Stack, Text, Wrap,
+    Empty, Expanded, Flex, OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds,
+    Radius, Stack, Text, Wrap,
 };
 use warpui::keymap::FixedBinding;
-use warpui::text_layout::ClipConfig;
 use warpui::{
     AppContext, Element, Entity, ModelHandle, SingletonEntity, TypedActionView, View, ViewContext,
     ViewHandle,
@@ -33,9 +31,7 @@ use crate::ai::blocklist::action_model::{
     AIActionStatus, BlocklistAIActionEvent, BlocklistAIActionModel, RunAgentsExecutor,
     RunAgentsExecutorEvent, RunAgentsSpawningSnapshot,
 };
-use crate::ai::blocklist::agent_view::orchestration_pill_bar::{
-    render_agent_avatar_disc, render_static_agent_pill,
-};
+use crate::ai::blocklist::agent_view::orchestration_pill_bar::render_static_agent_pill;
 use crate::ai::blocklist::block::AIBlock;
 use crate::ai::blocklist::block::model::{AIBlockModel, AIBlockOutputStatus};
 use crate::ai::blocklist::block::view_impl::WithContentItemSpacing;
@@ -66,7 +62,7 @@ use crate::ai::llms::{LLMPreferences, LLMPreferencesEvent};
 use crate::ai::orchestration::{OptionSnapshot, model_snapshot};
 use crate::appearance::Appearance;
 use crate::features::FeatureFlag;
-use crate::menu::{Event as MenuEvent, Menu, MenuItem, MenuItemFields, MenuVariant};
+use crate::menu::{Event as MenuEvent, Menu, MenuItemFields, MenuVariant};
 use crate::server::experiments::{ServerExperiments, ServerExperimentsEvent};
 use crate::server::server_api::ServerApiProvider;
 use crate::server::team_scope::RequestTeamScope;
@@ -79,7 +75,7 @@ use crate::view_components::compactible_action_button::{
     CompactibleActionButton, MEDIUM_SIZE_SWITCH_THRESHOLD, RenderCompactibleActionButton,
 };
 use crate::view_components::compactible_split_action_button::CompactibleSplitActionButton;
-use crate::view_components::dropdown::{DropdownAction, DropdownEvent};
+use crate::view_components::dropdown::DropdownEvent;
 use crate::view_components::{
     FilterableDropdown, FilterableDropdownEvent, FilterableDropdownOrientation,
 };
@@ -384,12 +380,15 @@ impl RunAgentsCardView {
     ) -> Self {
         let RunAgentsEditState {
             mut orchestration_config_state,
-            card,
+            mut card,
         } = RunAgentsEditState::from_request(request);
         if let Some((config, status)) = &active_config
             && status.is_approved()
         {
             orchestration_config_state.override_from_approved_config(config);
+            if FeatureFlag::ChildModelRouting.is_enabled() {
+                config.resolve_agent_models(&mut card.agent_run_configs);
+            }
         }
         // Snapshot the raw incoming request so we can diff against the
         // edited state at Accept time.
@@ -715,6 +714,9 @@ impl RunAgentsCardView {
             new_state
                 .orchestration_config_state
                 .override_from_approved_config(config);
+            if FeatureFlag::ChildModelRouting.is_enabled() {
+                config.resolve_agent_models(&mut new_state.card.agent_run_configs);
+            }
         }
         if !self
             .active_config
@@ -965,22 +967,35 @@ impl RunAgentsCardView {
     fn accept_disabled_reason(&self, ctx: &AppContext) -> Option<String> {
         if let Some((config, status)) = &self.active_config
             && status.is_approved()
-            && self
-                .orchestration_edit_state
-                .orchestration_config_state
-                .to_orchestration_config()
-                != *config
+            && {
+                let mut edited = self
+                    .orchestration_edit_state
+                    .orchestration_config_state
+                    .to_orchestration_config();
+                edited.agent_models = config.agent_models.clone();
+                edited != *config
+                    || (FeatureFlag::ChildModelRouting.is_enabled()
+                        && self.card.agent_run_configs.iter().any(|agent| {
+                            config.agent_models.iter().any(|approved| {
+                                approved.name.trim().eq_ignore_ascii_case(agent.name.trim())
+                                    && approved.model_id != agent.model_id
+                            })
+                        }))
+            }
         {
-            return Some("Batch settings are controlled by the approved plan. Update the plan configuration to change them.".to_string());
+            return Some("These settings are controlled by the approved plan. Update the plan configuration to change them.".to_string());
         }
         oc::accept_disabled_reason_with_auth(
             &self.orchestration_edit_state.orchestration_config_state,
             ctx,
         )
         .or_else(|| {
-            child_model_validation_error(
+            crate::ai::orchestration::child_model_validation_error(
                 &self.orchestration_edit_state.orchestration_config_state,
-                &self.card,
+                self.card
+                    .agent_run_configs
+                    .iter()
+                    .map(|agent| (agent.name.as_str(), agent.model_id.as_str())),
                 ctx,
             )
         })
@@ -1680,86 +1695,17 @@ fn populate_run_agents_model_picker(
     child_index: Option<usize>,
     ctx: &mut ViewContext<RunAgentsCardView>,
 ) {
-    let mut model_state = state.clone();
-    model_state.model_id = model_id.to_string();
-    let snapshot = model_snapshot(&model_state, ctx);
-    let inherited_label = match child_index {
-        Some(_) if !state.model_id.is_empty() => "Use batch default".to_string(),
-        Some(_) => "Use agent default".to_string(),
-        None => "Use agent defaults".to_string(),
-    };
-    let action = |model_id| match child_index {
-        Some(index) => RunAgentsCardViewAction::ChildModelChanged { index, model_id },
-        None => RunAgentsCardViewAction::ModelChanged { model_id },
-    };
-    let selected_label = if model_id.is_empty() {
-        inherited_label.clone()
-    } else {
-        snapshot
-            .rows
-            .iter()
-            .find(|row| row.id == model_id)
-            .map(|row| row.label.clone())
-            .unwrap_or_else(|| format!("{model_id} (unavailable)"))
-    };
-    let mut items = vec![MenuItem::Item(
-        MenuItemFields::new(&inherited_label).with_on_select_action(
-            DropdownAction::select_action_and_close(action(String::new())),
-        ),
-    )];
-    for row in snapshot.rows.into_iter().filter(|row| !row.id.is_empty()) {
-        let mut item = MenuItemFields::new(&row.label);
-        if let Some(reason) = row.disabled_reason {
-            item = item.with_disabled(true).with_tooltip(reason);
-        } else {
-            item =
-                item.with_on_select_action(DropdownAction::select_action_and_close(action(row.id)));
-        }
-        items.push(MenuItem::Item(item));
-    }
-    if !model_id.is_empty() && selected_label.ends_with(" (unavailable)") {
-        items.push(MenuItem::Item(
-            MenuItemFields::new(&selected_label).with_disabled(true),
-        ));
-    }
-    picker.update(ctx, |dropdown, ctx| {
-        dropdown.set_rich_items(items, ctx);
-        dropdown.set_selected_by_name(&selected_label, ctx);
-    });
-}
-
-fn child_model_validation_error(
-    state: &OrchestrationConfigState,
-    card: &RunAgentsCardFields,
-    ctx: &AppContext,
-) -> Option<String> {
-    if !FeatureFlag::ChildModelRouting.is_enabled() {
-        return None;
-    }
-    if state.model_id.trim().is_empty()
-        && card
-            .agent_run_configs
-            .iter()
-            .any(|cfg| !cfg.model_id.trim().is_empty())
-    {
-        return Some("Choose a batch model before using child model overrides.".to_string());
-    }
-    let snapshot = model_snapshot(state, ctx);
-    card.agent_run_configs.iter().find_map(|cfg| {
-        let model_id = if cfg.model_id.trim().is_empty() {
-            state.model_id.trim()
-        } else {
-            cfg.model_id.trim()
-        };
-        if model_id.is_empty() {
-            return None;
-        }
-        let reason = match snapshot.rows.iter().find(|row| row.id == model_id) {
-            Some(row) => row.disabled_reason.clone(),
-            None => Some("unavailable for this harness and location".to_string()),
-        };
-        reason.map(|reason| format!("{}: model '{model_id}' is {reason}.", cfg.name))
-    })
+    oc::populate_agent_model_picker(
+        picker,
+        state,
+        model_id,
+        child_index.is_some(),
+        |model_id| match child_index {
+            Some(index) => RunAgentsCardViewAction::ChildModelChanged { index, model_id },
+            None => RunAgentsCardViewAction::ModelChanged { model_id },
+        },
+        ctx,
+    );
 }
 
 fn render_confirmation_card(
@@ -1922,7 +1868,7 @@ fn render_agents_section(
                             Flex::row()
                                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
                                 .with_spacing(8.)
-                                .with_child(render_agent_chip(&cfg.name, None, appearance))
+                                .with_child(oc::render_agent_chip(&cfg.name, None, appearance))
                                 .with_child(
                                     Expanded::new(1., ChildView::new(picker).finish()).finish(),
                                 )
@@ -1952,7 +1898,7 @@ fn render_agents_section(
                             .unwrap_or_else(|| format!("{} (unavailable)", cfg.model_id)),
                     )
                 };
-                render_agent_chip(&cfg.name, model_label.as_deref(), appearance)
+                oc::render_agent_chip(&cfg.name, model_label.as_deref(), appearance)
             }))
             .finish()
     } else {
@@ -2012,48 +1958,6 @@ fn render_agents_section(
         )
         .with_child(agents)
         .finish()
-}
-
-fn render_agent_chip(
-    name: &str,
-    model_label: Option<&str>,
-    appearance: &Appearance,
-) -> Box<dyn Element> {
-    let theme = appearance.theme();
-    let text_color = theme.ansi_fg_magenta();
-    let label = Text::new(name.to_string(), appearance.ui_font_family(), 12.)
-        .with_color(text_color)
-        .soft_wrap(false)
-        .with_clip(ClipConfig::ellipsis())
-        .finish();
-    let mut row = Flex::row()
-        .with_cross_axis_alignment(CrossAxisAlignment::Center)
-        .with_main_axis_size(MainAxisSize::Min)
-        .with_spacing(6.)
-        .with_child(render_agent_avatar_disc(name, 16., theme, appearance))
-        .with_child(ConstrainedBox::new(label).with_max_width(110.).finish());
-    if let Some(model_label) = model_label {
-        row.add_child(
-            ConstrainedBox::new(
-                Text::new(format!("· {model_label}"), appearance.ui_font_family(), 12.)
-                    .with_color(blended_colors::text_main(theme, theme.background()))
-                    .soft_wrap(false)
-                    .with_clip(ClipConfig::ellipsis())
-                    .finish(),
-            )
-            .with_max_width(200.)
-            .finish(),
-        );
-    }
-    ConstrainedBox::new(
-        Container::new(row.finish())
-            .with_horizontal_padding(8.)
-            .with_background_color(coloru_with_opacity(text_color, 10))
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
-            .finish(),
-    )
-    .with_height(AGENT_ROW_CONTROL_HEIGHT)
-    .finish()
 }
 
 fn render_terminal_state(

@@ -29,7 +29,7 @@ use warp::tui_export::{
     descendant_conversations_in_pill_order, finish_local_oz_child_conversation,
     inherit_child_agent_settings, loaded_subtree_rollup, orchestration_root_conversation_id,
     oz_run_url, prepare_local_oz_child_launch, prepare_remote_child_launch,
-    register_agent_event_consumer, unregister_agent_event_consumer,
+    record_local_oz_child_model, register_agent_event_consumer, unregister_agent_event_consumer,
 };
 use warp_core::features::FeatureFlag;
 use warpui::SingletonEntity;
@@ -843,6 +843,7 @@ impl TuiOrchestrationModel {
             history.set_active_conversation_id(conversation_id, child_surface_id, ctx);
             conversation_id
         });
+        record_local_oz_child_model(conversation_id, child_surface_id, task_id, team_scope, ctx);
         finish_local_oz_child_conversation(
             conversation_id,
             child_surface_id,

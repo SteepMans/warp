@@ -569,6 +569,7 @@ mod override_from_approved_config_tests {
 
     fn local_config(model: &str, harness: &str) -> OrchestrationConfig {
         OrchestrationConfig {
+            agent_models: Vec::new(),
             model_id: model.to_string(),
             harness_type: harness.to_string(),
             execution_mode: OrchestrationExecutionMode::Local,
@@ -577,6 +578,7 @@ mod override_from_approved_config_tests {
 
     fn remote_config(model: &str, harness: &str, env: &str) -> OrchestrationConfig {
         OrchestrationConfig {
+            agent_models: Vec::new(),
             model_id: model.to_string(),
             harness_type: harness.to_string(),
             execution_mode: OrchestrationExecutionMode::Remote {

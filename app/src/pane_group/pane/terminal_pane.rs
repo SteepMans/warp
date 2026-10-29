@@ -39,7 +39,7 @@ use crate::ai::blocklist::{
 #[cfg(not(target_family = "wasm"))]
 use crate::ai::blocklist::{
     apply_child_agent_model_override, finish_local_oz_child_conversation,
-    prepare_local_oz_child_launch,
+    prepare_local_oz_child_launch, record_local_oz_child_model,
 };
 use crate::ai::conversation_utils;
 use crate::ai::llms::LLMPreferences;
@@ -1747,6 +1747,13 @@ fn launch_local_no_harness_child(
                         model_id.as_deref(),
                         ctx,
                     );
+                    record_local_oz_child_model(
+                        conversation_id,
+                        terminal_view_id,
+                        child_task_id,
+                        &team_context,
+                        ctx,
+                    );
                     finish_local_oz_child_conversation(
                         conversation_id,
                         terminal_view_id,
@@ -1870,6 +1877,7 @@ fn launch_local_harness_child(
                     env_vars,
                     run_id,
                     task_id,
+                    configured_model_id,
                 } = launch;
                 let is_shared_session_creator =
                     inherit_share_for_local_child(host_source.as_ref(), task_id);
@@ -1902,6 +1910,9 @@ fn launch_local_harness_child(
                         );
 
                         BlocklistAIHistoryModel::handle(ctx).update(ctx, |model, ctx| {
+                            if let Some(conversation) = model.conversation_mut(&conversation_id) {
+                                conversation.set_configured_launch_model_id(configured_model_id);
+                            }
                             model.record_new_conversation_request_complete(
                                 request_id,
                                 conversation_id,

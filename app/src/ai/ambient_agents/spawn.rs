@@ -70,6 +70,9 @@ pub enum AmbientAgentEvent {
         task_id: AmbientAgentTaskId,
         run_id: String,
     },
+    ConfiguredModel {
+        receipt: crate::server::server_api::ai::ConfiguredAgentModel,
+    },
     /// The task state changed.
     StateChanged {
         state: AmbientAgentTaskState,
@@ -111,7 +114,12 @@ pub fn spawn_task(
     async_stream::stream! {
         // First, spawn the ambient agent task.
         let (task_id, run_id, at_capacity) = match ai_client.spawn_agent(request, team_scope).await {
-            Ok(response) => (response.task_id, response.run_id, response.at_capacity),
+            Ok(response) => {
+                if let Some(receipt) = response.configured_model {
+                    yield Ok(AmbientAgentEvent::ConfiguredModel { receipt });
+                }
+                (response.task_id, response.run_id, response.at_capacity)
+            },
             Err(err) => {
                 yield Err(err);
                 return;

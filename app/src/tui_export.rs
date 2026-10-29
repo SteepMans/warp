@@ -125,7 +125,7 @@ pub use crate::ai::blocklist::{
 #[cfg(not(target_family = "wasm"))]
 pub use crate::ai::blocklist::{
     PreparedLocalOzChildLaunch, apply_child_agent_model_override,
-    finish_local_oz_child_conversation, prepare_local_oz_child_launch,
+    finish_local_oz_child_conversation, prepare_local_oz_child_launch, record_local_oz_child_model,
 };
 pub use crate::ai::cloud_environments::{
     CloudEnvironment, CloudEnvironmentCatalog, CloudEnvironmentCatalogEvent, OZ_ENVIRONMENTS_URL,

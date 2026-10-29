@@ -1274,6 +1274,20 @@ impl AmbientAgentViewModel {
         ctx: &mut ModelContext<Self>,
     ) {
         match event {
+            AmbientAgentEvent::ConfiguredModel { receipt } => {
+                if let Some(conversation_id) = self.conversation_id {
+                    BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, _| {
+                        if let Some(conversation) = history.conversation_mut(&conversation_id) {
+                            conversation.set_configured_launch_model_id(receipt.model_id);
+                            if let Some(harness) =
+                                Harness::parse_orchestration_harness(&receipt.harness_type)
+                            {
+                                conversation.set_orchestration_harness(harness);
+                            }
+                        }
+                    });
+                }
+            }
             AmbientAgentEvent::TaskSpawned { task_id, run_id } => {
                 self.task_id = Some(task_id);
                 if matches!(self.status, Status::Cancelled { .. }) {

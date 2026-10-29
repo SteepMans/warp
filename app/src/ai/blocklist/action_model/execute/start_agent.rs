@@ -16,6 +16,7 @@ pub const TEAM_CHANGED_DURING_CHILD_LAUNCH_ERROR: &str =
 pub enum StartAgentOutcome {
     Started {
         agent_id: String,
+        configured_model_id: String,
     },
     /// An error occurred while starting the agent.
     Error(String),
@@ -115,6 +116,11 @@ impl StartAgentExecutor {
             Some(id) => {
                 let _ = pending.sender.try_send(StartAgentOutcome::Started {
                     agent_id: id.clone(),
+                    configured_model_id: BlocklistAIHistoryModel::as_ref(ctx)
+                        .conversation(&child_conversation_id)
+                        .and_then(|conversation| conversation.configured_launch_model_id())
+                        .unwrap_or_default()
+                        .to_string(),
                 });
                 OrchestrationEventStreamer::handle(ctx).update(ctx, |streamer, ctx| {
                     streamer.register_watched_run_id(pending.parent_conversation_id, id, ctx);

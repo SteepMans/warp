@@ -1,6 +1,8 @@
+use std::collections::HashSet;
+
 use warp_multi_agent_api as api;
 
-use super::action::RunAgentsRequest;
+use super::action::{RunAgentsAgentRunConfig, RunAgentsRequest};
 
 /// Client-side representation of the orchestration config attached to a
 /// conversation via `OrchestrationConfigSnapshot`.
@@ -12,6 +14,13 @@ pub struct OrchestrationConfig {
     pub model_id: String,
     pub harness_type: String,
     pub execution_mode: OrchestrationExecutionMode,
+    pub agent_models: Vec<OrchestrationAgentModel>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct OrchestrationAgentModel {
+    pub name: String,
+    pub model_id: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -106,6 +115,36 @@ pub fn matches_active_config(request: &RunAgentsRequest, config: &OrchestrationC
 // ---------------------------------------------------------------------------
 
 impl OrchestrationConfig {
+    pub fn has_matching_agent_roster(&self, agents: &[RunAgentsAgentRunConfig]) -> bool {
+        if self.agent_models.is_empty() || self.agent_models.len() != agents.len() {
+            return false;
+        }
+        let mut names = HashSet::new();
+        agents.iter().all(|agent| {
+            let name = agent.name.trim().to_ascii_lowercase();
+            !name.is_empty()
+                && names.insert(name.clone())
+                && self
+                    .agent_models
+                    .iter()
+                    .filter(|approved| approved.name.trim().eq_ignore_ascii_case(&name))
+                    .count()
+                    == 1
+        })
+    }
+
+    pub fn resolve_agent_models(&self, agents: &mut [RunAgentsAgentRunConfig]) {
+        for agent in agents {
+            if let Some(approved) = self
+                .agent_models
+                .iter()
+                .find(|approved| approved.name.trim().eq_ignore_ascii_case(agent.name.trim()))
+            {
+                agent.model_id = approved.model_id.clone();
+            }
+        }
+    }
+
     /// Converts from the proto `OrchestrationConfig` message.
     pub fn from_proto(proto: &api::OrchestrationConfig) -> Self {
         let execution_mode = match &proto.execution_mode {
@@ -127,6 +166,14 @@ impl OrchestrationConfig {
             model_id: proto.model_id.clone(),
             harness_type,
             execution_mode,
+            agent_models: proto
+                .agent_models
+                .iter()
+                .map(|agent| OrchestrationAgentModel {
+                    name: agent.name.clone(),
+                    model_id: agent.model_id.clone(),
+                })
+                .collect(),
         }
     }
 
@@ -155,6 +202,14 @@ impl OrchestrationConfig {
             model_id: self.model_id.clone(),
             harness: harness_type_to_proto(&self.harness_type),
             execution_mode,
+            agent_models: self
+                .agent_models
+                .iter()
+                .map(|agent| api::orchestration_config::AgentModel {
+                    name: agent.name.clone(),
+                    model_id: agent.model_id.clone(),
+                })
+                .collect(),
         }
     }
 }

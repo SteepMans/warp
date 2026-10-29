@@ -560,12 +560,19 @@ pub struct ReadAgentMessageResponse {
     pub read_at: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ConfiguredAgentModel {
+    pub harness_type: String,
+    pub model_id: Option<String>,
+}
+
 #[derive(serde::Deserialize)]
 pub struct SpawnAgentResponse {
     pub task_id: AmbientAgentTaskId,
     pub run_id: String,
     #[serde(default)]
     pub at_capacity: bool,
+    pub configured_model: Option<ConfiguredAgentModel>,
 }
 
 /// Response from the artifact endpoint.
@@ -1375,6 +1382,14 @@ pub trait AIClient: 'static + Send + Sync {
         session_debug_until: Option<DateTime<Utc>>,
         debug_agent_active: Option<bool>,
     ) -> anyhow::Result<(), anyhow::Error>;
+
+    async fn report_local_agent_model(
+        &self,
+        task_id: AmbientAgentTaskId,
+        harness_type: String,
+        model_id: String,
+        team_scope: RequestTeamScope,
+    ) -> anyhow::Result<()>;
 
     async fn spawn_agent(
         &self,
@@ -2593,6 +2608,7 @@ impl AIClient for ServerApi {
             input: UpdateAgentTaskInput {
                 task_id: task_id.to_string().into(),
                 task_state,
+                configured_model: None,
                 session_id: session_id.map(|id| id.to_string().into()),
                 conversation_id: conversation_id.map(|id| id.into()),
                 status_message: status_message.map(agent_task_status_message_input),
@@ -2611,6 +2627,43 @@ impl AIClient for ServerApi {
                 Err(anyhow!(get_user_facing_error_message(e)))
             }
             UpdateAgentTaskResult::Unknown => Err(anyhow!("failed to update agent task")),
+        }
+    }
+
+    async fn report_local_agent_model(
+        &self,
+        task_id: AmbientAgentTaskId,
+        harness_type: String,
+        model_id: String,
+        team_scope: RequestTeamScope,
+    ) -> anyhow::Result<()> {
+        let variables = UpdateAgentTaskVariables {
+            input: UpdateAgentTaskInput {
+                task_id: task_id.to_string().into(),
+                configured_model: Some(
+                    warp_graphql::mutations::update_agent_task::LocalAgentConfiguredModelInput {
+                        harness_type,
+                        model_id,
+                    },
+                ),
+                task_state: None,
+                session_id: None,
+                conversation_id: None,
+                status_message: None,
+                session_debug_until: None,
+                debug_agent_active: None,
+            },
+            request_context: get_request_context(),
+        };
+        let response = self
+            .send_graphql_request_for_team(UpdateAgentTask::build(variables), team_scope)
+            .await?;
+        match response.update_agent_task {
+            UpdateAgentTaskResult::UpdateAgentTaskOutput(_) => Ok(()),
+            UpdateAgentTaskResult::UserFacingError(e) => {
+                Err(anyhow!(get_user_facing_error_message(e)))
+            }
+            UpdateAgentTaskResult::Unknown => Err(anyhow!("failed to report local agent model")),
         }
     }
 

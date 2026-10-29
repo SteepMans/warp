@@ -82,7 +82,7 @@ pub use child_agent_launch::inherit_child_agent_settings;
 #[cfg_attr(not(feature = "tui"), allow(unused_imports))]
 pub use child_agent_launch::{
     PreparedLocalOzChildLaunch, apply_child_agent_model_override,
-    finish_local_oz_child_conversation, prepare_local_oz_child_launch,
+    finish_local_oz_child_conversation, prepare_local_oz_child_launch, record_local_oz_child_model,
 };
 #[cfg(feature = "tui")]
 pub use context_model::PendingAttachmentSummary;

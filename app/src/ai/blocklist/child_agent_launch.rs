@@ -19,6 +19,8 @@ use crate::AIExecutionProfilesModel;
 #[cfg(not(target_family = "wasm"))]
 use crate::ai::llms::LLMId;
 use crate::ai::llms::LLMPreferences;
+#[cfg(not(target_family = "wasm"))]
+use crate::features::FeatureFlag;
 use crate::workspaces::user_workspaces::TeamScope;
 
 /// Server-side state prepared before a frontend creates the child's surface.
@@ -138,5 +140,41 @@ pub fn apply_child_agent_model_override(
     let model_id = LLMId::from(model_id);
     LLMPreferences::handle(ctx).update(ctx, |preferences, ctx| {
         preferences.set_agent_mode_llm_override(scope, child_surface_id, model_id, ctx);
+    });
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub fn record_local_oz_child_model(
+    conversation_id: AIConversationId,
+    terminal_surface_id: EntityId,
+    task_id: AmbientAgentTaskId,
+    scope: &impl TeamScope,
+    ctx: &mut AppContext,
+) {
+    let model_id = LLMPreferences::as_ref(ctx)
+        .get_active_base_model(scope, ctx, Some(terminal_surface_id))
+        .id
+        .to_string();
+    let team_scope = RequestTeamScope::from_scope(scope);
+    let client = ServerApiProvider::as_ref(ctx).get_ai_client();
+    BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+        if let Some(conversation) = history.conversation_mut(&conversation_id) {
+            conversation.set_configured_launch_model_id(Some(model_id.clone()));
+        }
+        if !FeatureFlag::ChildModelRouting.is_enabled() {
+            return;
+        }
+        ctx.spawn(
+            async move {
+                client
+                    .report_local_agent_model(task_id, "oz".to_string(), model_id, team_scope)
+                    .await
+            },
+            |_, result, _| {
+                if let Err(error) = result {
+                    log::warn!("Failed to persist local child model: {error}");
+                }
+            },
+        );
     });
 }

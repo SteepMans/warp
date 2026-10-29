@@ -37,8 +37,8 @@ use crate::ai::document::plan_publication::{
 use crate::ai::llms::{LLMId, LLMPreferences};
 use crate::ai::local_harness_setup::local_harness_product_disabled_message;
 use crate::ai::orchestration::{
-    OrchestrationConfigState, can_execute_with_auth_secret, is_model_in_filtered_choices,
-    populate_default_auth_secret_for_execution,
+    OrchestrationConfigState, can_execute_with_auth_secret, child_model_validation_error,
+    is_model_in_filtered_choices, populate_default_auth_secret_for_execution,
 };
 use crate::features::FeatureFlag;
 use crate::server::team_scope::RequestTeamScope;
@@ -341,8 +341,10 @@ impl RunAgentsExecutor {
 
         ctx.spawn(
             async move {
-                let mut outcomes: Vec<RunAgentsAgentOutcomeKind> = Vec::with_capacity(slots.len());
+                let mut outcomes: Vec<(RunAgentsAgentOutcomeKind, String)> =
+                    Vec::with_capacity(slots.len());
                 for slot in slots {
+                    let mut configured_model_id = String::new();
                     let kind = match slot {
                         ChildSlot::Failed(error) => RunAgentsAgentOutcomeKind::Failed { error },
                         ChildSlot::Pending(recv) => {
@@ -351,9 +353,15 @@ impl RunAgentsExecutor {
                                 .await
                             {
                                 futures::future::Either::Left((
-                                    Ok(StartAgentOutcome::Started { agent_id }),
+                                    Ok(StartAgentOutcome::Started {
+                                        agent_id,
+                                        configured_model_id: receipt,
+                                    }),
                                     _,
-                                )) => RunAgentsAgentOutcomeKind::Launched { agent_id },
+                                )) => {
+                                    configured_model_id = receipt;
+                                    RunAgentsAgentOutcomeKind::Launched { agent_id }
+                                }
                                 futures::future::Either::Left((
                                     Ok(StartAgentOutcome::Error(error)),
                                     _,
@@ -379,7 +387,7 @@ impl RunAgentsExecutor {
                             }
                         }
                     };
-                    outcomes.push(kind);
+                    outcomes.push((kind, configured_model_id));
                 }
                 outcomes
             },
@@ -387,10 +395,10 @@ impl RunAgentsExecutor {
                 let agents: Vec<RunAgentsAgentOutcome> = agent_run_configs_for_result
                     .iter()
                     .zip(outcomes)
-                    .map(|(cfg, kind)| RunAgentsAgentOutcome {
+                    .map(|(cfg, (kind, configured_model_id))| RunAgentsAgentOutcome {
                         name: cfg.name.clone(),
                         kind,
-                        resolved_model_id: effective_child_model_id(&run_model_id, cfg).to_string(),
+                        resolved_model_id: configured_model_id,
                     })
                     .collect();
                 me.record_launched_agents(parent_conversation_id_for_result, &agents);
@@ -548,12 +556,38 @@ fn approved_orchestration_config_can_autoexecute(
     ctx: &ModelContext<RunAgentsExecutor>,
 ) -> bool {
     let mut resolved_request = request.clone();
-    resolve_request_from_approved_config(&mut resolved_request, parent_conversation_id, ctx)
-        .is_some_and(|status| status.is_approved())
-        && resolved_request.agent_run_configs.iter().all(|cfg| {
-            effective_child_model_id(&resolved_request.model_id, cfg)
-                == resolved_request.model_id.trim()
-        })
+    let approved =
+        resolve_request_from_approved_config(&mut resolved_request, parent_conversation_id, ctx)
+            .is_some_and(|status| status.is_approved());
+    let config = BlocklistAIHistoryModel::as_ref(ctx)
+        .conversation(&parent_conversation_id)
+        .and_then(|conversation| conversation.orchestration_config_for_plan(&request.plan_id));
+    let allocation_approved = config.is_some_and(|(config, _)| {
+        if config.agent_models.is_empty() {
+            resolved_request.agent_run_configs.iter().all(|cfg| {
+                effective_child_model_id(&resolved_request.model_id, cfg)
+                    == resolved_request.model_id.trim()
+            })
+        } else {
+            FeatureFlag::ChildModelRouting.is_enabled()
+                && config.has_matching_agent_roster(&resolved_request.agent_run_configs)
+                && child_model_validation_error(
+                    &OrchestrationConfigState::from_run_agents_fields(
+                        Some(&resolved_request.model_id),
+                        Some(&resolved_request.harness_type),
+                        &resolved_request.execution_mode,
+                    ),
+                    resolved_request
+                        .agent_run_configs
+                        .iter()
+                        .map(|agent| (agent.name.as_str(), agent.model_id.as_str())),
+                    ctx,
+                )
+                .is_none()
+        }
+    });
+    approved
+        && allocation_approved
         && can_execute_with_auth_secret(&resolved_request, team_scope, ctx)
 }
 
@@ -739,6 +773,9 @@ fn resolve_request_from_config(request: &mut RunAgentsRequest, config: &Orchestr
     request.model_id = config_state.model_id;
     request.harness_type = config_state.harness_type;
     request.execution_mode = config_state.execution_mode;
+    if FeatureFlag::ChildModelRouting.is_enabled() {
+        config.resolve_agent_models(&mut request.agent_run_configs);
+    }
 }
 
 /// Defence-in-depth validation; mirrors the card view's
