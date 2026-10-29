@@ -7,7 +7,6 @@ on:
   push:
     branches:
       - master
-      - feature/claude-tab-restore
   workflow_dispatch:
 
 concurrency:
@@ -29,6 +28,7 @@ jobs:
       CARGO_PROFILE_RLTO_LTO: "off"
       CARGO_PROFILE_RLTO_DEBUG: "0"
       CARGO_BUILD_JOBS: "4"
+      WARP_LICENSES_CACHE: ${{ github.workspace }}/.licenses-cache
     steps:
       - uses: actions/checkout@v4
 
@@ -42,6 +42,12 @@ jobs:
         with:
           shared-key: fork-windows-rlto
           cache-on-failure: true
+
+      # cargo-about output only changes with the dependency set.
+      - uses: actions/cache@v4
+        with:
+          path: .licenses-cache
+          key: cargo-about-${{ hashFiles('Cargo.lock', 'about.toml', 'about.hbs') }}
 
       # Third-party license attribution for the bundle; version pinned as in
       # script/install_cargo_release_deps.

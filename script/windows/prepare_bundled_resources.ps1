@@ -136,10 +136,21 @@ $AdditionalLicenses += @(
 
 $LicensesOutput = Join-Path $DestinationDir 'THIRD_PARTY_LICENSES.txt'
 Write-Output "Generating third-party licenses at $LicensesOutput"
-cargo about generate --workspace --manifest-path "$RepoRoot\Cargo.toml" -c "$RepoRoot\about.toml" -o "$LicensesOutput" "$RepoRoot\about.hbs"
-if (-Not $?) {
-    Write-Error 'Failed to generate third-party licenses'
-    exit 1
+# CI keeps the cargo-about output keyed on Cargo.lock; it takes minutes to regenerate.
+$LicensesCache = if ($env:WARP_LICENSES_CACHE) { Join-Path $env:WARP_LICENSES_CACHE 'cargo-about.txt' } else { $null }
+if ($LicensesCache -and (Test-Path $LicensesCache)) {
+    Write-Output "Using cached cargo-about output $LicensesCache"
+    Copy-Item -Path $LicensesCache -Destination $LicensesOutput -Force
+} else {
+    cargo about generate --workspace --manifest-path "$RepoRoot\Cargo.toml" -c "$RepoRoot\about.toml" -o "$LicensesOutput" "$RepoRoot\about.hbs"
+    if (-Not $?) {
+        Write-Error 'Failed to generate third-party licenses'
+        exit 1
+    }
+    if ($LicensesCache) {
+        New-Item -ItemType Directory -Force -Path $env:WARP_LICENSES_CACHE | Out-Null
+        Copy-Item -Path $LicensesOutput -Destination $LicensesCache -Force
+    }
 }
 
 # Append additional (non-Cargo) third-party licenses.
