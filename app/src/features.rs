@@ -12,6 +12,11 @@ pub fn init_feature_flags() {
     mark_initialized();
 }
 
+/// True for the fork's OSS build, which hides Warp's own AI, account and cloud UI.
+pub fn is_fork_oss() -> bool {
+    ChannelState::channel() == Channel::Oss
+}
+
 /// Returns all feature flags which should be enabled in the current channel.
 fn enabled_features() -> HashSet<FeatureFlag> {
     // Enable features overridden for the given channel.
@@ -545,7 +550,7 @@ fn enabled_features() -> HashSet<FeatureFlag> {
 
     // The fork's OSS build ships without Warp's own AI agents and cloud features; CLI agents
     // such as Claude Code and Codex running in the terminal are unaffected.
-    if ChannelState::channel() == Channel::Oss {
+    if is_fork_oss() {
         for flag in OSS_DISABLED_FLAGS {
             flags.remove(flag);
         }
@@ -592,4 +597,6 @@ const OSS_DISABLED_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::GlobalAIAnalyticsBanner,
     FeatureFlag::GlobalAIAnalyticsCollection,
     FeatureFlag::DriveObjectsAsContext,
+    FeatureFlag::CreatingSharedSessions,
+    FeatureFlag::HOARemoteControl,
 ];
