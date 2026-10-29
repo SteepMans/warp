@@ -6,9 +6,12 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use instant::Instant;
-use warpui::{AppContext, EntityId, SingletonEntity};
+use warpui::{AppContext, EntityId, SingletonEntity, ViewHandle, WindowId};
 
 use super::agent_state::{AgentSnapshot, AgentState, agent_snapshot};
+use super::labels::{AgentLabels, agent_labels};
+use crate::terminal::TerminalView;
+use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::workspace::WorkspaceRegistry;
 
 /// At most one desktop notification per agent in this window.
@@ -31,6 +34,57 @@ pub fn all_agents(app: &AppContext) -> Vec<AgentSnapshot> {
         })
         .filter_map(|terminal_view| agent_snapshot(terminal_view.id(), app))
         .collect()
+}
+
+/// One CLI agent with what the overview board, the agents palette and the footer show of it.
+#[derive(Clone)]
+pub struct AgentEntry {
+    pub snapshot: AgentSnapshot,
+    pub labels: AgentLabels,
+    pub window_id: WindowId,
+    pub terminal_view: ViewHandle<TerminalView>,
+}
+
+/// Every CLI agent of every window with its labels, in window and tab order. Windows whose
+/// workspace is being updated right now are skipped (the framework hides a view while it
+/// handles an action), so call this from render or from other views.
+pub fn all_agent_entries(app: &AppContext) -> Vec<AgentEntry> {
+    if !crate::features::is_fork_oss() {
+        return Vec::new();
+    }
+    let sessions = CLIAgentSessionsModel::as_ref(app);
+    let mut entries = Vec::new();
+    for (window_id, workspace) in WorkspaceRegistry::as_ref(app).all_workspaces(app) {
+        for pane_group in workspace.as_ref(app).tab_views() {
+            for terminal_view in pane_group.as_ref(app).terminal_views(app) {
+                let Some(snapshot) = agent_snapshot(terminal_view.id(), app) else {
+                    continue;
+                };
+                let view = terminal_view.as_ref(app);
+                let session = sessions.session(terminal_view.id());
+                let directory = view
+                    .current_local_repo_path()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .or_else(|| session.and_then(|session| session.session_context.cwd.clone()));
+                let agent_name = session
+                    .map(|session| session.agent.display_name())
+                    .unwrap_or("Agent");
+                let labels = agent_labels(
+                    view.claude_resume_info().map(|info| info.command.as_str()),
+                    directory.as_deref(),
+                    snapshot.task.as_deref(),
+                    agent_name,
+                );
+                entries.push(AgentEntry {
+                    snapshot,
+                    labels,
+                    window_id,
+                    terminal_view: terminal_view.clone(),
+                });
+            }
+        }
+    }
+    entries
 }
 
 /// Agent counts by what they need from the user.
