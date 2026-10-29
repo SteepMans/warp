@@ -1934,7 +1934,8 @@ impl RootView {
                     AuthOnboardingState::WebImport(AuthOnboardingTarget::Workspace(workspace_args.into()))
                 } else {
 
-                    if FeatureFlag::ForceLogin.is_enabled() {
+                    // The OSS build has no Warp account and never starts on the auth screen.
+                    if FeatureFlag::ForceLogin.is_enabled() && !crate::features::is_fork_oss() {
                         // ForceLogin is true for Preview
                         AuthOnboardingState::Auth(workspace_args.into())
                     } else if FeatureFlag::AgentOnboarding.is_enabled()
@@ -1950,7 +1951,9 @@ impl RootView {
                             onboarding_view,
                             target: AuthOnboardingTarget::Workspace(workspace_args_box),
                         }
-                    } else if FeatureFlag::SkipFirebaseAnonymousUser.is_enabled() {
+                    } else if FeatureFlag::SkipFirebaseAnonymousUser.is_enabled()
+                        || crate::features::is_fork_oss()
+                    {
                         // When SkipFirebaseAnonymousUser is enabled, skip the login screen
                         // entirely and go directly into the workspace.
                         AuthOnboardingState::Terminal(workspace_args.create_workspace(ctx))
@@ -4316,7 +4319,12 @@ impl AuthOnboardingState {
                 // Auth no longer holds the original workspace view handle
                 // This way it is destroyed at this step, and we will re-create
                 // a new workspace view handle when the user logs in.
-                *self = AuthOnboardingState::Auth(workspace_args.into());
+                // The OSS build never shows the auth screen and opens a fresh workspace instead.
+                *self = if crate::features::is_fork_oss() {
+                    AuthOnboardingState::Terminal(workspace_args.create_workspace(ctx))
+                } else {
+                    AuthOnboardingState::Auth(workspace_args.into())
+                };
                 ctx.emit(RootViewEvent::AuthOnboardingStateChanged);
             }
         }
