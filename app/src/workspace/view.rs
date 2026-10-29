@@ -24367,6 +24367,8 @@ impl TypedActionView for Workspace {
             ShiftSelectTabRange { locator } => self.shift_select_tab_range(*locator, ctx),
             ToggleTabMultiSelection { locator } => self.toggle_tab_multi_selection(*locator, ctx),
             ClearTabMultiSelection => self.clear_tab_multi_selection(ctx),
+            WardJumpToWaitingAgent => self.ward_jump_to_waiting_agent(ctx),
+            WardJumpBack => self.ward_jump_back(ctx),
             NewTabGroupFromSelectedTabs => self.new_tab_group_from_selected_tabs(ctx),
             NewTabGroupFromActiveOrSelectedTabs => {
                 self.new_tab_group_from_active_or_selected_tabs(ctx)
