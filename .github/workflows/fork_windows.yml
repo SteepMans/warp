@@ -41,13 +41,11 @@ jobs:
           shared-key: fork-windows-rlto
           cache-on-failure: true
 
-      - name: Install protoc, Inno Setup and mc
+      # Inno Setup and the AWS CLI come preinstalled on windows-latest.
+      - name: Install protoc
         shell: pwsh
         run: |
-          choco install protoc innosetup --no-progress -y
-          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\bin" | Out-Null
-          Invoke-WebRequest https://dl.min.io/client/mc/release/windows-amd64/mc.exe -OutFile "$env:RUNNER_TEMP\bin\mc.exe"
-          "$env:RUNNER_TEMP\bin" >> $env:GITHUB_PATH
+          choco install protoc --no-progress -y
           "${env:ProgramFiles(x86)}\Inno Setup 6" >> $env:GITHUB_PATH
 
       - name: Pick version
