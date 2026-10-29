@@ -24373,6 +24373,10 @@ impl TypedActionView for Workspace {
             ClearTabMultiSelection => self.clear_tab_multi_selection(ctx),
             WardJumpToWaitingAgent => self.ward_jump_to_waiting_agent(ctx),
             WardJumpBack => self.ward_jump_back(ctx),
+            WardSetAgentStatusFilter(filter) => {
+                crate::ward::attention::set_status_filter(*filter);
+                ctx.notify();
+            }
             NewTabGroupFromSelectedTabs => self.new_tab_group_from_selected_tabs(ctx),
             NewTabGroupFromActiveOrSelectedTabs => {
                 self.new_tab_group_from_active_or_selected_tabs(ctx)

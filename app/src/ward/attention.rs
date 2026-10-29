@@ -97,6 +97,43 @@ pub fn most_urgent_agent(app: &AppContext) -> Option<AgentSnapshot> {
     agents.into_iter().find(|agent| agent.terminal_view_id == first)
 }
 
+/// Status filter of the vertical tabs panel.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AgentStatusFilter {
+    #[default]
+    All,
+    Waiting,
+    Running,
+    Errors,
+}
+
+impl AgentStatusFilter {
+    pub const ALL: [Self; 4] = [Self::All, Self::Waiting, Self::Running, Self::Errors];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Waiting => "Waiting",
+            Self::Running => "Running",
+            Self::Errors => "Errors",
+        }
+    }
+
+    pub fn matches(self, state: AgentState) -> bool {
+        match self {
+            Self::All => true,
+            Self::Waiting => state.is_waiting(),
+            Self::Running => state.is_running(),
+            Self::Errors => state == AgentState::Error,
+        }
+    }
+
+    /// How many of `states` the filter keeps.
+    pub fn count(self, states: &[AgentState]) -> usize {
+        states.iter().filter(|state| self.matches(**state)).count()
+    }
+}
+
 #[derive(Default)]
 struct JumpState {
     /// Where the first jump of a series started, for jumping back.
@@ -104,8 +141,17 @@ struct JumpState {
 }
 
 thread_local! {
+    static STATUS_FILTER: RefCell<AgentStatusFilter> = RefCell::new(AgentStatusFilter::All);
     static JUMP: RefCell<JumpState> = RefCell::new(JumpState::default());
     static LAST_NOTIFIED: RefCell<HashMap<EntityId, Instant>> = RefCell::new(HashMap::new());
+}
+
+pub fn status_filter() -> AgentStatusFilter {
+    STATUS_FILTER.with(|filter| *filter.borrow())
+}
+
+pub fn set_status_filter(filter: AgentStatusFilter) {
+    STATUS_FILTER.with(|current| *current.borrow_mut() = filter);
 }
 
 /// Picks the next agent to jump to from the focused terminal and remembers where the series

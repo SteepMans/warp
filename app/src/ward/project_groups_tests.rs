@@ -65,6 +65,15 @@ fn remote_control_project_reads_quoted_session_name() {
 }
 
 #[test]
+fn remote_control_session_name_is_unquoted() {
+    assert_eq!(
+        remote_control_session_name("claude --remote-control 'hassle. payments-refund-webhook'"),
+        Some("hassle. payments-refund-webhook".to_owned())
+    );
+    assert_eq!(remote_control_session_name("claude --remote-control"), None);
+}
+
+#[test]
 fn remote_control_project_needs_a_project_prefix() {
     assert_eq!(remote_control_project("claude --remote-control 'just a task'"), None);
     assert_eq!(remote_control_project("claude --remote-control --resume abc"), None);

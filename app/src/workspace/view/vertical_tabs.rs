@@ -1435,7 +1435,7 @@ fn render_control_bar(
     let settings_button = render_settings_button(state, appearance);
     let new_tab_button = render_new_tab_button(state, workspace, appearance, app);
 
-    Container::new(
+    let control_bar = Container::new(
         Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
@@ -1450,7 +1450,8 @@ fn render_control_bar(
             .with_left(GROUP_HORIZONTAL_PADDING)
             .with_right(GROUP_HORIZONTAL_PADDING),
     )
-    .finish()
+    .finish();
+    ward::with_status_filter_chips(control_bar, workspace, appearance, app)
 }
 
 fn render_detail_kind_badge_icon(
@@ -1914,6 +1915,7 @@ fn render_groups(
 
         merge_group_name_matches(&tab_group_ids, &matched_groups, own_matches)
     };
+    let visible_tabs = ward::filter_tabs_by_agent_status(visible_tabs, workspace, app);
 
     if visible_tabs.is_empty() {
         if query.is_empty() {
@@ -4252,14 +4254,16 @@ fn terminal_pane_search_text_fragments(
         .as_deref()
         .map(terminal_pull_request_badge_label);
 
-    terminal_search_text_fragments(
+    let mut fragments = terminal_search_text_fragments(
         primary_text,
         working_directory,
         terminal_view.current_git_branch(app),
         terminal_kind_badge_label(agent_text.is_oz_agent, agent_text.cli_agent),
         pull_request_label,
         terminal_view.current_diff_line_changes(app),
-    )
+    );
+    fragments.extend(ward::agent_search_fragments(terminal_view, app));
+    fragments
 }
 
 fn terminal_search_text_fragments(

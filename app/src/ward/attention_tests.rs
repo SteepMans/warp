@@ -63,6 +63,22 @@ fn next_jump_target_starts_at_most_urgent_and_walks_the_list() {
 }
 
 #[test]
+fn status_filter_matches_and_counts() {
+    let states = [
+        AgentState::WaitingPermission,
+        AgentState::WaitingAnswer,
+        AgentState::Thinking,
+        AgentState::Error,
+        AgentState::Idle,
+    ];
+    assert_eq!(AgentStatusFilter::All.count(&states), 5);
+    assert_eq!(AgentStatusFilter::Waiting.count(&states), 2);
+    assert_eq!(AgentStatusFilter::Running.count(&states), 1);
+    assert_eq!(AgentStatusFilter::Errors.count(&states), 1);
+    assert!(!AgentStatusFilter::Running.matches(AgentState::DoneUnseen));
+}
+
+#[test]
 fn notifications_only_for_attention_states_and_throttled() {
     let now = Instant::now();
     assert!(notification_due(AgentState::WaitingAnswer, None, now));
