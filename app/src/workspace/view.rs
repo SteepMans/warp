@@ -21671,7 +21671,15 @@ impl Workspace {
             target.add_child(pill);
         }
 
-        if FeatureFlag::AvatarInTabBar.is_enabled() {
+        if crate::features::is_fork_oss() {
+            // The fork's OSS build has no Warp account, so a plain settings button replaces
+            // the avatar and its account menu.
+            target.add_child(
+                Container::new(self.render_settings_button(appearance))
+                    .with_margin_left(TAB_BAR_PADDING_LEFT)
+                    .finish(),
+            );
+        } else if FeatureFlag::AvatarInTabBar.is_enabled() {
             target.add_child(
                 Container::new(self.render_avatar_button(appearance, ctx))
                     .with_margin_left(TAB_BAR_PADDING_LEFT)
