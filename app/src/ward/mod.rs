@@ -3,4 +3,5 @@
 //! and jumps to agents waiting for the user. Everything here is a no-op outside the OSS build.
 
 pub mod agent_state;
+pub mod attention;
 pub mod project_groups;
