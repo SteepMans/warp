@@ -1882,6 +1882,8 @@ pub(crate) fn initialize_app(
 
     if let LaunchMode::App { .. } = launch_mode {
         autoupdate::check_and_report_update_errors(ctx);
+        // After the installer log check, which tells whether an update attempt failed.
+        ward::metrics::init(ctx);
     }
 
     ctx.set_fallback_font_source_provider(|url| ::asset_cache::url_source(url));
@@ -2792,6 +2794,9 @@ pub(crate) fn app_callbacks(
 
             #[cfg(all(feature = "local_tty", windows))]
             terminal::local_tty::shutdown_all_pty_event_loops(ctx);
+
+            // Records the clean exit and sends the final metrics push (bounded wait).
+            ward::metrics::on_will_terminate(ctx);
 
             // Tear down app services before spawning the new process, to
             // ensure that the new process doesn't find the old process while

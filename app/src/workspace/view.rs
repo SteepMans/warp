@@ -4132,6 +4132,7 @@ impl Workspace {
                     .enumerate()
                     .for_each(|(tab_index, saved_tab)| {
                         let custom_title = saved_tab.custom_title.clone();
+                        crate::ward::metrics::record_restored_panes(&saved_tab.root);
                         self.add_tab_with_pane_layout(
                             PanesLayout::Snapshot(Box::new(saved_tab.root.clone())),
                             block_lists.clone(),
