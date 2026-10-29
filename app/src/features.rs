@@ -599,4 +599,5 @@ const OSS_DISABLED_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::DriveObjectsAsContext,
     FeatureFlag::CreatingSharedSessions,
     FeatureFlag::HOARemoteControl,
+    FeatureFlag::Changelog,
 ];
