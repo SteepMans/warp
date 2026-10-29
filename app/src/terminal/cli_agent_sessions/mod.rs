@@ -426,6 +426,11 @@ impl CLIAgentSessionsModel {
         self.sessions.get(&terminal_view_id)
     }
 
+    /// All tracked sessions, keyed by terminal view.
+    pub fn sessions(&self) -> impl Iterator<Item = (&EntityId, &CLIAgentSession)> {
+        self.sessions.iter()
+    }
+
     /// Returns `true` if the rich input editor is currently open for this terminal.
     pub fn is_input_open(&self, terminal_view_id: EntityId) -> bool {
         self.sessions
