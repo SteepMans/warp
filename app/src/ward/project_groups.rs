@@ -54,6 +54,14 @@ pub fn project_keys(remote_control_project: Option<&str>, directory: Option<&str
 /// `--remote-control-session-name-prefix '<project>.'`) argument of a Claude Code command line.
 /// Session names without a `<project>.` prefix yield `None`.
 pub fn remote_control_project(command: &str) -> Option<String> {
+    let name = remote_control_session_name(command)?;
+    let (project, _) = name.split_once('.')?;
+    let project = project.trim();
+    (!project.is_empty() && !project.contains(char::is_whitespace)).then(|| project.to_owned())
+}
+
+/// The session name given to `--remote-control` (or its prefix flag), unquoted.
+pub fn remote_control_session_name(command: &str) -> Option<String> {
     let args = split_command_line(command);
     let mut value = None;
     for (index, arg) in args.iter().enumerate() {
@@ -70,9 +78,9 @@ pub fn remote_control_project(command: &str) -> Option<String> {
             break;
         }
     }
-    let (project, _) = value?.split_once('.')?;
-    let project = project.trim();
-    (!project.is_empty() && !project.contains(char::is_whitespace)).then(|| project.to_owned())
+    value
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
 }
 
 fn is_session_name_flag(arg: &str) -> bool {
