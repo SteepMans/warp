@@ -349,6 +349,7 @@ const OSS_HIDDEN_SECTIONS: &[SettingsSection] = &[
     SettingsSection::CodeIndexing,
     SettingsSection::Teams,
     SettingsSection::Referrals,
+    SettingsSection::SharedBlocks,
     SettingsSection::WarpDrive,
     SettingsSection::CloudEnvironments,
     SettingsSection::WarpCloudAgentAPIKeys,
