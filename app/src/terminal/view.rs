@@ -401,6 +401,7 @@ use crate::terminal::block_list_viewport::{
 };
 use crate::terminal::bootstrap::init_subshell_command;
 use crate::terminal::cli_agent_sessions::claude_resume::{self, ClaudeResumeInfo};
+use crate::terminal::cli_agent_sessions::codex_resume;
 use crate::terminal::cli_agent_sessions::event::{
     CLI_AGENT_NOTIFICATION_SENTINEL, CLIAgentEvent, CLIAgentEventPayload, CLIAgentEventSource,
     CLIAgentEventType, parse_event,
@@ -10103,7 +10104,7 @@ impl TerminalView {
         ctx.spawn(Timer::after(delay), |me, _, ctx| me.poll_claude_resume(ctx));
     }
 
-    /// Checks whether Claude Code is running in this pane's shell, and saves the app state whenever the resumable session changes so that a restart or crash
+    /// Checks whether Claude Code or Codex is running in this pane's shell, and saves the app state whenever the resumable session changes so that a restart or crash
     /// restores what was open at that moment.
     fn poll_claude_resume(&mut self, ctx: &mut ViewContext<Self>) {
         // Not gated on a long-running block: Claude Code may also be started from a shell
@@ -10117,7 +10118,10 @@ impl TerminalView {
 
         let shell_type = self.active_session_shell_type(ctx);
         ctx.spawn(
-            async move { claude_resume::detect(shell_pid, shell_type) },
+            async move {
+                claude_resume::detect(shell_pid, shell_type)
+                    .or_else(|| codex_resume::detect(shell_pid, shell_type))
+            },
             |me, info, ctx| {
                 me.set_claude_resume(info, ctx);
                 me.schedule_claude_resume_poll(CLAUDE_RESUME_POLL_INTERVAL, ctx);
@@ -10130,8 +10134,8 @@ impl TerminalView {
             return;
         }
         match &info {
-            Some(info) => log::info!("Detected Claude Code session {}", info.session_id),
-            None => log::info!("Claude Code session ended"),
+            Some(info) => log::info!("Detected CLI agent session {}", info.session_id),
+            None => log::info!("CLI agent session ended"),
         }
         self.claude_resume = info;
         ctx.dispatch_global_action("workspace:save_app", ());

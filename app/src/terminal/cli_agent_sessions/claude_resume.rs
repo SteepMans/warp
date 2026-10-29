@@ -255,7 +255,7 @@ fn build_resume_command(
     command
 }
 
-fn quote_arg(arg: &str, shell_type: Option<ShellType>) -> String {
+pub(super) fn quote_arg(arg: &str, shell_type: Option<ShellType>) -> String {
     let is_plain = !arg.is_empty()
         && arg
             .chars()
