@@ -6,7 +6,7 @@ fn agent(id: usize, state: AgentState, minutes: u64, project: &str, task: &str) 
     PaletteAgent {
         terminal_view_id: EntityId::from_usize(id),
         state,
-        in_state: minutes * MINUTE,
+        in_state: MINUTE * minutes as u32,
         project: Some(project.to_owned()),
         task: task.to_owned(),
         detail: None,
