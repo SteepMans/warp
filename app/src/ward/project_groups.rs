@@ -179,6 +179,27 @@ impl ProjectGroupMap {
         changed
     }
 
+    /// Directories (path keys) Ward has seen in the group a project belongs to. The project is
+    /// a remote-control project name or a group name; matching is case-insensitive.
+    pub fn paths_for_project(&self, project: &str) -> Vec<String> {
+        let project = project.trim().to_lowercase();
+        if project.is_empty() {
+            return Vec::new();
+        }
+        let group = self
+            .groups
+            .get(&format!("{REMOTE_CONTROL_KEY_PREFIX}{project}"))
+            .cloned()
+            .unwrap_or_else(|| project.clone());
+        self.groups
+            .iter()
+            .filter(|(key, name)| {
+                !key.starts_with(REMOTE_CONTROL_KEY_PREFIX) && same_group_name(name, &group)
+            })
+            .map(|(key, _)| key.clone())
+            .collect()
+    }
+
     /// Follows a group rename. Returns whether anything changed.
     pub fn rename_group(&mut self, from: &str, to: &str) -> bool {
         let mut changed = false;
@@ -319,6 +340,17 @@ pub fn observe_tab(
         }
         store.observed.insert(pane_group_id, observation);
         move_to
+    })
+}
+
+/// Directories learned for a project; see [`ProjectGroupMap::paths_for_project`].
+pub fn known_paths_for_project(project: &str, app: &AppContext) -> Vec<String> {
+    STORE.with(|store| {
+        let mut store = store.borrow_mut();
+        store
+            .map
+            .get_or_insert_with(|| load_map(app))
+            .paths_for_project(project)
     })
 }
 

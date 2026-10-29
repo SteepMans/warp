@@ -243,3 +243,24 @@ fn map_round_trips_through_json() {
     let json = serde_json::to_string(&map).unwrap();
     assert_eq!(serde_json::from_str::<ProjectGroupMap>(&json).unwrap(), map);
 }
+
+#[test]
+fn paths_for_project_follow_groups_and_remote_control_names() {
+    let mut map = ProjectGroupMap::default();
+    map.learn(
+        &["rc:hassle".to_owned(), "c:/work/hassle-backend".to_owned()],
+        "Hassle",
+    );
+    map.learn(&["c:/work/hassle-admin".to_owned()], "hassle");
+    map.learn(&["c:/work/karandash".to_owned()], "Karandash");
+    assert_eq!(
+        map.paths_for_project("HASSLE"),
+        vec!["c:/work/hassle-admin".to_owned(), "c:/work/hassle-backend".to_owned()]
+    );
+    assert_eq!(
+        map.paths_for_project("karandash"),
+        vec!["c:/work/karandash".to_owned()]
+    );
+    assert!(map.paths_for_project("chimney").is_empty());
+    assert!(map.paths_for_project(" ").is_empty());
+}
