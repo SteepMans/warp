@@ -249,6 +249,10 @@ pub enum WorkspaceAction {
     AddTerminalTab {
         hide_homepage: bool,
     },
+    /// Adds a terminal tab and runs `command` in it once the shell has bootstrapped.
+    AddTerminalTabWithCommand {
+        command: String,
+    },
     AddTabWithShell {
         shell: AvailableShell,
         source: AddTabWithShellSource,
@@ -986,6 +990,7 @@ impl WorkspaceAction {
             | ToggleTabGroupColor { .. }
             | AddDefaultTab
             | AddTerminalTab { .. }
+            | AddTerminalTabWithCommand { .. }
             | AddTabWithShell { .. }
             | AddGetStartedTab
             | AddAgentTab
