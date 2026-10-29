@@ -134,6 +134,7 @@ fn save_app(_: &(), ctx: &mut AppContext) {
     // Ward learns and applies project groups on every save, whether or not sessions are restored.
     if !CrossWindowTabDrag::as_ref(ctx).is_active() {
         super::view::ward_workspace::ward_sync_project_groups_in_all_windows(ctx);
+        super::view::ward_workspace::ward_sync_chimney_bindings_in_all_windows(ctx);
     }
 
     if !AppExecutionMode::as_ref(ctx).can_save_session() {
