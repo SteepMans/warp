@@ -46,7 +46,8 @@ pub(crate) fn ward_sync_project_groups_in_all_windows(ctx: &mut AppContext) {
 
 impl Workspace {
     /// Header pills with agent counts across all windows: "2 waiting · 1 error · 3 running ·
-    /// 1 done". Only waiting and error are colored; clicking them jumps to the waiting agent.
+    /// 1 done", followed by the agent overview button. Only waiting and error are colored;
+    /// clicking them jumps to the waiting agent.
     pub(super) fn ward_render_attention_strip(
         &self,
         appearance: &Appearance,
@@ -60,9 +61,6 @@ impl Workspace {
                 .into_iter()
                 .map(|agent| agent.state),
         );
-        if counts.is_empty() {
-            return None;
-        }
         let theme = appearance.theme();
         let quiet = theme.sub_text_color(theme.background()).into_solid();
         let jump_shortcut =
@@ -105,6 +103,12 @@ impl Workspace {
                 appearance,
             ));
         }
+        strip.add_child(render_overview_button(
+            crate::ward::overview::is_open(self.window_id),
+            quiet,
+            keybinding_name_to_display_string("workspace:ward_toggle_agent_overview", app),
+            appearance,
+        ));
         Some(
             Container::new(strip.finish())
                 .with_margin_left(8.)
@@ -165,6 +169,8 @@ impl Workspace {
         if !crate::features::is_fork_oss() {
             return;
         }
+        // Moving to a tab by any means leaves the agent overview board.
+        self.ward_close_overview();
         let mut changed = false;
         for terminal_view_id in self.ward_active_tab_terminal_ids(ctx) {
             changed |= agent_state::mark_seen(terminal_view_id);
@@ -330,6 +336,47 @@ impl Workspace {
         ctx.dispatch_global_action("workspace:save_app", ());
         ctx.notify();
     }
+}
+
+/// Header button that shows or hides the agent overview board.
+fn render_overview_button(
+    is_open: bool,
+    quiet: ColorU,
+    shortcut: Option<String>,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    let font_family = appearance.ui_font_family();
+    let mut content = Flex::row()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_spacing(6.)
+        .with_child(
+            Text::new_inline("Overview", font_family, 12.)
+                .with_color(quiet)
+                .with_style(Properties::default().weight(Weight::Semibold))
+                .finish(),
+        );
+    if let Some(shortcut) = shortcut {
+        content.add_child(
+            Text::new_inline(shortcut, font_family, 10.)
+                .with_color(quiet)
+                .finish(),
+        );
+    }
+    let button = Container::new(content.finish())
+        .with_horizontal_padding(8.)
+        .with_vertical_padding(3.)
+        .with_background(coloru_with_opacity(quiet, if is_open { 24 } else { 10 }))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
+        .finish();
+    EventHandler::new(button)
+        .on_left_mouse_down(|ctx, _, _| {
+            ctx.dispatch_typed_action(WorkspaceAction::Ward(
+                crate::ward::action::WardAction::ToggleOverview,
+            ));
+            DispatchEventResult::StopPropagation
+        })
+        .finish()
 }
 
 /// One attention pill. Accented pills (waiting, error) get a tinted background and jump to the
