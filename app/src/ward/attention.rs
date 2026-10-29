@@ -198,6 +198,17 @@ pub fn claim_notification(terminal_view_id: EntityId, state: AgentState) -> bool
     })
 }
 
+/// Whether to send a desktop notification for the agent's new status: it needs the user, the
+/// user cannot see it (other tab or window unfocused) and it was not notified recently.
+pub fn should_notify_agent(terminal_view_id: EntityId, app: &AppContext) -> bool {
+    let Some(snapshot) = agent_snapshot(terminal_view_id, app) else {
+        return false;
+    };
+    snapshot.state.needs_attention()
+        && !is_terminal_visible(terminal_view_id, app)
+        && claim_notification(terminal_view_id, snapshot.state)
+}
+
 /// Whether the terminal is in the active tab of the focused window.
 pub fn is_terminal_visible(terminal_view_id: EntityId, app: &AppContext) -> bool {
     let Some(window_id) = app.windows().active_window() else {
