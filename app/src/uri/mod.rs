@@ -1001,6 +1001,12 @@ impl Action {
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         let primary_window_id = self.window_behavior_hint().resolve(primary_window_id, ctx);
         match self {
+            Self::NewTab
+                if crate::features::is_fork_oss()
+                    && crate::ward::uri_launch::is_ward_new_tab(url) =>
+            {
+                crate::ward::uri_launch::handle_new_tab(primary_window_id, url, ctx);
+            }
             Self::NewTab | Self::NewWindow => {
                 let window_id = if let Self::NewTab = self {
                     primary_window_id

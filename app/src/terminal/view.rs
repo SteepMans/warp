@@ -17003,6 +17003,8 @@ impl TerminalView {
         // for the resulting block to complete.
         if had_pending && !self.input.read(ctx, |input, _| input.has_pending_command()) {
             self.awaiting_pending_command_completion = true;
+            // Ward: confirms a command a `new_tab` URI asked for.
+            crate::ward::uri_launch::pending_command_sent(ctx.view_id());
         }
     }
 
