@@ -9,6 +9,7 @@ pub mod changelog;
 pub mod chimney;
 pub mod claude_launch;
 pub mod claude_usage;
+pub mod codex_usage;
 pub mod labels;
 pub mod metrics;
 pub mod overview;

@@ -47,6 +47,8 @@ pub(super) struct WorkspaceMouseStates {
     pub(super) team_switcher_pill: MouseStateHandle,
     /// Ward: the Claude subscription usage chip in the header.
     pub(super) ward_claude_usage: MouseStateHandle,
+    /// Ward: the Codex plan usage chip in the header.
+    pub(super) ward_codex_usage: MouseStateHandle,
     #[cfg(target_family = "wasm")]
     pub(super) warp_logo: MouseStateHandle,
 }

@@ -52,6 +52,7 @@ use crate::view_components::{Dropdown, SubmittableTextInput, SubmittableTextInpu
 use crate::ward::chimney as ward_chimney;
 use crate::ward::claude_launch as ward_claude_launch;
 use crate::ward::claude_usage as ward_claude_usage;
+use crate::ward::codex_usage as ward_codex_usage;
 use crate::{TelemetryEvent, send_telemetry_from_ctx};
 
 const PAGE_TITLE: &str = "Third party CLI agents";
@@ -260,6 +261,7 @@ impl CLIAgentsPageView {
             Box::new(CLIAgentCommandsWidget),
             Box::new(CLIAgentToolbarLayoutWidget),
             Box::new(ClaudeUsageChipWidget::default()),
+            Box::new(CodexUsageChipWidget::default()),
             Box::new(ClaudeNoFlickerWidget::default()),
             Box::new(ChimneyWidget::default()),
         ];
@@ -378,6 +380,8 @@ pub enum CLIAgentsPageAction {
     RemoveChimneyAccount,
     /// Ward: shows or hides the Claude subscription usage chip in the header.
     ToggleClaudeUsageChip,
+    /// Ward: shows or hides the Codex plan usage chip in the header.
+    ToggleCodexUsageChip,
     /// Ward: starts Claude Code tabs with `CLAUDE_CODE_NO_FLICKER=1`.
     ToggleClaudeNoFlicker,
 }
@@ -464,6 +468,12 @@ impl TypedActionView for CLIAgentsPageView {
                 // Turning the chip on fetches now instead of at the next poll; turning it off
                 // re-renders the headers without it.
                 ward_claude_usage::model::refresh(ctx);
+                ctx.notify();
+            }
+            CLIAgentsPageAction::ToggleCodexUsageChip => {
+                let enabled = ward_codex_usage::is_enabled_by_user(ctx);
+                ward_codex_usage::set_enabled_by_user(!enabled, ctx);
+                ward_codex_usage::model::refresh(ctx);
                 ctx.notify();
             }
             CLIAgentsPageAction::ToggleClaudeNoFlicker => {
@@ -1049,12 +1059,52 @@ impl SettingsWidget for ClaudeUsageChipWidget {
         }
         render_ward_toggle(
             "Show Claude subscription usage",
-            "Shows the 5-hour and 7-day Claude limits in the header, e.g. 5h 2% \u{b7} 7d 60%. \
+            "Shows the 5-hour and 7-day Claude limits in the header, e.g. Claude 5h 2% \u{b7} 7d 60%. \
              Ward reads the Claude Code sign-in from ~/.claude/.credentials.json every 5 minutes \
              and only sends it to api.anthropic.com. Hidden when Claude Code is not signed in.",
             ward_claude_usage::is_enabled_by_user(app),
             self.toggle.clone(),
             CLIAgentsPageAction::ToggleClaudeUsageChip,
+            appearance,
+            app,
+        )
+    }
+}
+
+/// Ward (OSS build): the Codex plan usage chip in the header.
+#[derive(Default)]
+struct CodexUsageChipWidget {
+    toggle: SwitchStateHandle,
+}
+
+impl SettingsWidget for CodexUsageChipWidget {
+    type View = CLIAgentsPageView;
+
+    fn search_terms(&self) -> &str {
+        "codex openai chatgpt plan usage limit quota 5h 7d weekly chip header ward"
+    }
+
+    fn should_render(&self, _app: &AppContext) -> bool {
+        crate::features::is_fork_oss()
+    }
+
+    fn render(
+        &self,
+        _view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        if !self.should_render(app) {
+            return Empty::new().finish();
+        }
+        render_ward_toggle(
+            "Show Codex plan usage",
+            "Shows the Codex limits in the header, e.g. Codex 5h 10% \u{b7} 7d 30%. Ward reads \
+             them from the newest Codex CLI session in ~/.codex/sessions, so they are as fresh \
+             as the last Codex turn. No network, no credentials. Hidden once the limits reset.",
+            ward_codex_usage::is_enabled_by_user(app),
+            self.toggle.clone(),
+            CLIAgentsPageAction::ToggleCodexUsageChip,
             appearance,
             app,
         )
