@@ -1006,6 +1006,16 @@ impl TerminalView {
         self.is_ambient_agent_session(ctx) || self.model.lock().is_cloud_agent_conversation()
     }
 
+    /// [`Self::is_cloud_agent_session`] with the model half already read (see
+    /// [`TerminalRowModelState`](super::tab_metadata::TerminalRowModelState)).
+    pub fn is_cloud_agent_session_given(
+        &self,
+        is_cloud_agent_conversation: bool,
+        ctx: &AppContext,
+    ) -> bool {
+        self.is_ambient_agent_session(ctx) || is_cloud_agent_conversation
+    }
+
     fn selected_conversation_for_user_facing_chrome<'a>(
         &'a self,
         ctx: &'a AppContext,

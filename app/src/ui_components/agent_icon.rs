@@ -35,6 +35,20 @@ pub(crate) fn terminal_view_agent_icon_variant(
     terminal_view: &TerminalView,
     app: &AppContext,
 ) -> Option<IconWithStatusVariant> {
+    terminal_view_agent_icon_variant_given(
+        terminal_view,
+        terminal_view.is_cloud_agent_session(app),
+        app,
+    )
+}
+
+/// [`terminal_view_agent_icon_variant`] for a caller that already knows
+/// [`TerminalView::is_cloud_agent_session`], which locks the terminal model.
+pub(crate) fn terminal_view_agent_icon_variant_given(
+    terminal_view: &TerminalView,
+    is_cloud_agent_session: bool,
+    app: &AppContext,
+) -> Option<IconWithStatusVariant> {
     let cli_agent_session = CLIAgentSessionsModel::as_ref(app).session(terminal_view.id());
 
     // Ambient task id from a restored cloud transcript's server metadata. This is a genuine
@@ -61,8 +75,7 @@ pub(crate) fn terminal_view_agent_icon_variant(
     // NOT the mere presence of an orchestrator task id — a manually shared *local* (`User`)
     // session carries a `source_task_id` sidecar but is not cloud (see QUALITY-726). Local
     // orchestration children always keep the local treatment.
-    let is_cloud = (terminal_view.is_cloud_agent_session(app) || server_ambient_task_id.is_some())
-        && !is_local_child;
+    let is_cloud = (is_cloud_agent_session || server_ambient_task_id.is_some()) && !is_local_child;
 
     // Defer to the card helper when we have task data and no CLI session takes precedence.
     if cli_agent_session.is_none()

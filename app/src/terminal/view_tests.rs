@@ -11060,3 +11060,38 @@ fn repeated_terminal_title_does_not_refresh_pane_header() {
         );
     });
 }
+
+#[test]
+fn row_model_state_matches_the_single_field_getters() {
+    App::test((), |mut app| async move {
+        initialize_workspace_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let terminal = workspace.read(&app, |workspace, ctx| {
+            workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .active_session_view(ctx)
+                .expect("tab should contain a terminal")
+        });
+        terminal.update(&mut app, |view, _| {
+            ansi::Handler::set_title(&mut *view.model.lock(), Some("claude".to_owned()));
+        });
+        terminal.read(&app, |view, ctx| {
+            let row_state = view.row_model_state();
+            assert_eq!(row_state.title_from_shell, "claude");
+            assert_eq!(row_state.title_from_shell, view.terminal_title_from_shell());
+            assert_eq!(
+                row_state.is_long_running_and_user_controlled,
+                view.is_long_running_and_user_controlled()
+            );
+            assert_eq!(
+                row_state.last_completed_command_text,
+                view.last_completed_command_text()
+            );
+            assert_eq!(
+                view.is_cloud_agent_session_given(row_state.is_cloud_agent_conversation, ctx),
+                view.is_cloud_agent_session(ctx)
+            );
+        });
+    });
+}
