@@ -245,4 +245,5 @@ Settings → Privacy. Дашборд «Ward — Users» в Grafana Chimney.
 
 - `.github/workflows/fork_windows.yml`: сборка установщика на `windows-latest` при пуше в
   `master`, без LTO и отладочной информации, с кешем cargo и списка лицензий, публикация в
-  MinIO (`script/windows/publish_s3.ps1`).
+  MinIO (`script/windows/publish_s3.ps1`). В бакете хранится только последняя версия: после
+  загрузки манифеста папки старых версий удаляются.
