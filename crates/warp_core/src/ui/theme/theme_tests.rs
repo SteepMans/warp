@@ -356,7 +356,10 @@ fn ansi_color_identifier_ignores_case() {
         AnsiColorIdentifier::Magenta
     );
     assert_eq!(
-        serde_yaml::to_string(&AnsiColorIdentifier::Cyan).unwrap().trim(),
+        serde_yaml::to_string(&AnsiColorIdentifier::Cyan)
+            .unwrap()
+            .trim_start_matches("---")
+            .trim(),
         "cyan"
     );
     assert!(serde_yaml::from_str::<AnsiColorIdentifier>("teal").is_err());
