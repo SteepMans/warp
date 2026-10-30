@@ -544,9 +544,20 @@ impl AgentInputFooter {
         });
 
         let update_plugin_button = ctx.add_typed_action_view(|_ctx| {
-            ActionButton::new("Update Warp plugin", InstallPluginButtonTheme)
+            let (label, tooltip) = if crate::features::is_fork_oss() {
+                (
+                    "Update notifications plugin",
+                    "A new version of the agent notifications plugin is available",
+                )
+            } else {
+                (
+                    "Update Warp plugin",
+                    "A new version of the Warp plugin is available",
+                )
+            };
+            ActionButton::new(label, InstallPluginButtonTheme)
                 .with_icon(Icon::Download)
-                .with_tooltip("A new version of the Warp plugin is available")
+                .with_tooltip(tooltip)
                 .with_size(cli_button_size)
                 .with_tooltip_alignment(TooltipAlignment::Left)
                 .with_adjoined_side(AdjoinedSide::Right)
@@ -1253,7 +1264,13 @@ impl AgentInputFooter {
             if session.supports_rich_status() && manager.supports_update() {
                 let needs_update = match &session.plugin_version {
                     // No version reported = pre-versioning plugin, definitely outdated.
-                    None => true,
+                    // Ward also gets rich events from the user's own hooks, which report no
+                    // version either: there only the plugin on disk decides.
+                    None => {
+                        !crate::features::is_fork_oss()
+                            || session.is_remote()
+                            || manager.needs_update()
+                    }
                     Some(v) => compare_versions(v, min_version).is_lt(),
                 };
                 if !needs_update {
