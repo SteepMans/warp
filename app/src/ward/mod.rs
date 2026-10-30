@@ -3,6 +3,7 @@
 //! and jumps to agents waiting for the user. Everything here is a no-op outside the OSS build.
 
 pub mod action;
+pub mod agent_liveness;
 pub mod agent_state;
 pub mod attention;
 pub mod changelog;
