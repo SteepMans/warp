@@ -62,10 +62,12 @@ use crate::tab::{
 };
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::session_settings::SessionSettings;
-use crate::terminal::view::TerminalViewState;
+use crate::terminal::view::{TerminalRowModelState, TerminalViewState};
 use crate::terminal::{CLIAgent, TerminalView};
 use crate::themes::theme::Fill as ThemeFill;
-use crate::ui_components::agent_icon::terminal_view_agent_icon_variant;
+use crate::ui_components::agent_icon::{
+    terminal_view_agent_icon_variant, terminal_view_agent_icon_variant_given,
+};
 use crate::ui_components::buttons::combo_inner_button;
 use crate::ui_components::icon_with_status::{IconWithStatusVariant, render_icon_with_status};
 use crate::ui_components::icons::Icon as UiIcon;
@@ -3339,9 +3341,12 @@ fn render_passive_terminal_diff_stats_badge(
     )
 }
 
+/// `row_state` is the terminal model state the row already read, if any; without it the
+/// terminal model is locked once more.
 fn resolve_icon_with_status_variant(
     typed: &TypedPane<'_>,
     title: &str,
+    row_state: Option<&TerminalRowModelState>,
     appearance: &Appearance,
     app: &AppContext,
 ) -> IconWithStatusVariant {
@@ -3357,7 +3362,16 @@ fn resolve_icon_with_status_variant(
         TypedPane::Terminal(terminal_pane) => {
             let terminal_view = terminal_pane.terminal_view(app);
             let terminal_view = terminal_view.as_ref(app);
-            match terminal_view_agent_icon_variant(terminal_view, app) {
+            let variant = match row_state {
+                Some(row_state) => terminal_view_agent_icon_variant_given(
+                    terminal_view,
+                    terminal_view
+                        .is_cloud_agent_session_given(row_state.is_cloud_agent_conversation, app),
+                    app,
+                ),
+                None => terminal_view_agent_icon_variant(terminal_view, app),
+            };
+            match variant {
                 Some(variant) => variant,
                 _ => {
                     // Plain terminal: use foreground color per design spec
@@ -3533,14 +3547,37 @@ fn render_row_title_line(
         .finish()
 }
 
+/// The terminal model state of a terminal pane row, read once per row render.
+fn terminal_row_model_state(
+    typed: &TypedPane<'_>,
+    app: &AppContext,
+) -> Option<TerminalRowModelState> {
+    match typed {
+        TypedPane::Terminal(terminal_pane) => Some(
+            terminal_pane
+                .terminal_view(app)
+                .as_ref(app)
+                .row_model_state(),
+        ),
+        _ => None,
+    }
+}
+
 fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
     let effective_subtitle = props.subtitle.clone();
     let appearance = Appearance::as_ref(app);
     let theme = appearance.theme();
     let font_family = appearance.ui_font_family();
+    let row_state = terminal_row_model_state(&props.typed, app);
 
     let icon = render_pane_icon_with_status(
-        resolve_icon_with_status_variant(&props.typed, &props.title, appearance, app),
+        resolve_icon_with_status_variant(
+            &props.typed,
+            &props.title,
+            row_state.as_ref(),
+            appearance,
+            app,
+        ),
         theme,
     );
 
@@ -3553,10 +3590,13 @@ fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
             CrossAxisAlignment::Center
         };
 
-    let text_content = if let TypedPane::Terminal(terminal_pane) = &props.typed {
+    let text_content = if let (TypedPane::Terminal(terminal_pane), Some(row_state)) =
+        (&props.typed, row_state.as_ref())
+    {
         render_terminal_row_content(
             &props,
             terminal_pane.terminal_view(app).as_ref(app),
+            row_state,
             appearance,
             app,
         )
@@ -3821,7 +3861,8 @@ fn build_vertical_tabs_summary_data(
                 let terminal_view = terminal_view.as_ref(app);
                 has_unread_activity |=
                     has_unread_activity_for_terminal_view(terminal_view.id(), app);
-                let title_text = terminal_view.terminal_title_from_shell();
+                let row_state = terminal_view.row_model_state();
+                let title_text = row_state.title_from_shell.clone();
                 let working_directory = resolved_terminal_working_directory(terminal_view, app);
                 let working_directory_text = working_directory
                     .clone()
@@ -3832,13 +3873,13 @@ fn build_vertical_tabs_summary_data(
                     preferred_agent_tab_titles(&agent_text, agent_tab_text_preference(app));
 
                 let primary_label = terminal_primary_line_data(
-                    terminal_view.is_long_running_and_user_controlled(),
+                    row_state.is_long_running_and_user_controlled,
                     conversation_display_title,
                     cli_agent_title,
                     title_text.as_str(),
                     working_directory_text.as_str(),
                     terminal_title_fallback_font(&agent_text),
-                    terminal_view.last_completed_command_text(),
+                    row_state.last_completed_command_text,
                 );
                 let status = summary_conversation_status_for_terminal(terminal_view, app);
                 push_normalized_unique_summary_label(
@@ -4227,9 +4268,10 @@ fn terminal_pane_search_text_fragments(
 ) -> Vec<String> {
     let terminal_view = terminal_pane.terminal_view(app);
     let terminal_view = terminal_view.as_ref(app);
-    let title_text = terminal_view.terminal_title_from_shell();
+    let row_state = terminal_view.row_model_state();
+    let title_text = row_state.title_from_shell.as_str();
     let working_directory = resolved_terminal_working_directory(terminal_view, app)
-        .unwrap_or_else(|| title_text.clone());
+        .unwrap_or_else(|| title_text.to_owned());
     let agent_text = terminal_agent_text(terminal_view, app);
     let (conversation_display_title, cli_agent_title) =
         preferred_agent_tab_titles(&agent_text, agent_tab_text_preference(app));
@@ -4238,13 +4280,13 @@ fn terminal_pane_search_text_fragments(
         .map(str::to_owned)
         .unwrap_or_else(|| {
             terminal_primary_line_data(
-                terminal_view.is_long_running_and_user_controlled(),
+                row_state.is_long_running_and_user_controlled,
                 conversation_display_title,
                 cli_agent_title,
-                title_text.as_str(),
+                title_text,
                 working_directory.as_str(),
                 terminal_title_fallback_font(&agent_text),
-                terminal_view.last_completed_command_text(),
+                row_state.last_completed_command_text.clone(),
             )
             .text()
             .to_string()
@@ -4560,6 +4602,7 @@ fn cloud_agent_working_directory_and_env(
 fn render_terminal_row_content(
     props: &PaneProps<'_>,
     terminal_view: &TerminalView,
+    row_state: &TerminalRowModelState,
     appearance: &Appearance,
     app: &AppContext,
 ) -> Box<dyn Element> {
@@ -4568,9 +4611,8 @@ fn render_terminal_row_content(
     let sub_text_color = theme.sub_text_color(theme.background());
     let primary_info = *TabSettings::as_ref(app).vertical_tabs_primary_info.value();
 
-    let title_text = terminal_view.terminal_title_from_shell();
     let working_directory = resolved_terminal_working_directory(terminal_view, app)
-        .unwrap_or_else(|| title_text.clone());
+        .unwrap_or_else(|| row_state.title_from_shell.clone());
 
     let git_branch = terminal_view.current_git_branch(app);
 
@@ -4589,6 +4631,7 @@ fn render_terminal_row_content(
                 || {
                     render_terminal_primary_line_for_view(
                         terminal_view,
+                        row_state,
                         appearance,
                         main_text_color,
                         app,
@@ -4625,7 +4668,13 @@ fn render_terminal_row_content(
                 appearance,
                 app,
             ),
-            render_terminal_primary_line_for_view(terminal_view, appearance, sub_text_color, app),
+            render_terminal_primary_line_for_view(
+                terminal_view,
+                row_state,
+                appearance,
+                sub_text_color,
+                app,
+            ),
             MetadataLeftContent::GitBranch(git_branch),
         ),
         VerticalTabsPrimaryInfo::Branch => {
@@ -4654,6 +4703,7 @@ fn render_terminal_row_content(
                 ),
                 render_terminal_primary_line_for_view(
                     terminal_view,
+                    row_state,
                     appearance,
                     sub_text_color,
                     app,
@@ -4887,7 +4937,7 @@ fn render_summary_tab_item(
         .map(|icons| render_summary_pane_kind_icons(icons, VERTICAL_TABS_ICON_SIZE, appearance))
         .unwrap_or_else(|| {
             render_pane_icon_with_status(
-                resolve_icon_with_status_variant(&props.typed, &props.title, appearance, app),
+                resolve_icon_with_status_variant(&props.typed, &props.title, None, appearance, app),
                 theme,
             )
         });
@@ -5416,26 +5466,27 @@ fn render_summary_branch_line(
 
 fn render_terminal_primary_line_for_view(
     terminal_view: &TerminalView,
+    row_state: &TerminalRowModelState,
     appearance: &Appearance,
     text_color: WarpThemeFill,
     app: &AppContext,
 ) -> Box<dyn Element> {
-    let title_text = terminal_view.terminal_title_from_shell();
+    let title_text = row_state.title_from_shell.as_str();
     let working_directory = resolved_terminal_working_directory(terminal_view, app)
-        .unwrap_or_else(|| title_text.clone());
+        .unwrap_or_else(|| title_text.to_owned());
     let agent_text = terminal_agent_text(terminal_view, app);
     let (conversation_display_title, cli_agent_title) =
         preferred_agent_tab_titles(&agent_text, agent_tab_text_preference(app));
 
     render_terminal_primary_line(
         terminal_primary_line_data(
-            terminal_view.is_long_running_and_user_controlled(),
+            row_state.is_long_running_and_user_controlled,
             conversation_display_title,
             cli_agent_title,
-            title_text.as_str(),
+            title_text,
             working_directory.as_str(),
             terminal_title_fallback_font(&agent_text),
-            terminal_view.last_completed_command_text(),
+            row_state.last_completed_command_text.clone(),
         ),
         terminal_view,
         appearance,
@@ -6978,15 +7029,16 @@ fn render_terminal_detail_section(
         None
     };
 
-    let title_text = terminal_view.terminal_title_from_shell();
+    let row_state = terminal_view.row_model_state();
+    let title_text = row_state.title_from_shell.as_str();
     let primary_line = terminal_primary_line_data(
-        terminal_view.is_long_running_and_user_controlled(),
+        row_state.is_long_running_and_user_controlled,
         conversation_display_title,
         cli_agent_title,
-        title_text.as_str(),
-        working_directory.as_deref().unwrap_or(title_text.as_str()),
+        title_text,
+        working_directory.as_deref().unwrap_or(title_text),
         terminal_title_fallback_font(&agent_text),
-        terminal_view.last_completed_command_text(),
+        row_state.last_completed_command_text.clone(),
     );
 
     let mut section = Flex::column()
@@ -7405,9 +7457,16 @@ fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn El
     let sub_text_color = theme.sub_text_color(theme.background());
     let font_family = appearance.ui_font_family();
     let has_indicator = props.typed.badge(app).is_some() || has_unread_activity(&props.typed, app);
+    let row_state = terminal_row_model_state(&props.typed, app);
 
     let icon = render_pane_icon_with_status(
-        resolve_icon_with_status_variant(&props.typed, &props.title, appearance, app),
+        resolve_icon_with_status_variant(
+            &props.typed,
+            &props.title,
+            row_state.as_ref(),
+            appearance,
+            app,
+        ),
         theme,
     );
 
@@ -7422,9 +7481,11 @@ fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn El
     // Build title (line 1) based on "Pane title as" and subtitle (line 2) based on
     // "Additional metadata" setting.
     let (title_element, subtitle_element): (Box<dyn Element>, Option<Box<dyn Element>>) =
-        if let TypedPane::Terminal(terminal_pane) = &props.typed {
+        if let (TypedPane::Terminal(terminal_pane), Some(row_state)) =
+            (&props.typed, row_state.as_ref())
+        {
             let terminal_view = terminal_pane.terminal_view(app).as_ref(app);
-            let terminal_title = terminal_view.terminal_title_from_shell();
+            let terminal_title = &row_state.title_from_shell;
             let git_branch = terminal_view.current_git_branch(app);
             let working_directory = resolved_terminal_working_directory(terminal_view, app);
             let working_directory_text = working_directory
@@ -7439,6 +7500,7 @@ fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn El
                 || match primary_info {
                     VerticalTabsPrimaryInfo::Command => render_terminal_primary_line_for_view(
                         terminal_view,
+                        row_state,
                         appearance,
                         main_text_color,
                         app,
@@ -7493,13 +7555,13 @@ fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn El
                     let (conv_title, cli_title) =
                         preferred_agent_tab_titles(&agent_text, agent_tab_text_preference(app));
                     let line_data = terminal_primary_line_data(
-                        terminal_view.is_long_running_and_user_controlled(),
+                        row_state.is_long_running_and_user_controlled,
                         conv_title,
                         cli_title,
                         terminal_title.as_str(),
                         working_directory_text.as_str(),
                         terminal_title_fallback_font(&agent_text),
-                        terminal_view.last_completed_command_text(),
+                        row_state.last_completed_command_text.clone(),
                     );
                     Some(
                         Text::new_inline(line_data.text().to_string(), font_family, 10.)

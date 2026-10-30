@@ -46,6 +46,7 @@ pub(crate) mod ssh_remote_server_choice_view;
 pub(crate) mod ssh_remote_server_failed_banner;
 pub(crate) mod ssh_tmux_deprecation_banner;
 mod tab_metadata;
+pub use tab_metadata::TerminalRowModelState;
 #[cfg(any(test, feature = "integration_tests"))]
 mod testing;
 mod tooltips;
@@ -9754,11 +9755,7 @@ impl TerminalView {
     /// (i.e. the user ran it, or took it over from the agent). Returns `false` for commands
     /// that are currently being driven by the agent.
     pub fn is_long_running_and_user_controlled(&self) -> bool {
-        let model = self.model.lock();
-        let active_block = model.block_list().active_block();
-        active_block.is_active_and_long_running()
-            && !active_block.is_agent_driving_command()
-            && !model.is_read_only()
+        tab_metadata::is_long_running_and_user_controlled(&self.model.lock())
     }
 
     pub fn was_ever_visible(&self) -> bool {
