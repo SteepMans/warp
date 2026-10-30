@@ -13206,6 +13206,8 @@ impl Workspace {
 
         let is_new_terminal = matches!(panes_layout, PanesLayout::SingleTerminal(_));
         let is_restoration = matches!(panes_layout, PanesLayout::Snapshot(_));
+        let joins_tab_group = !crate::features::is_fork_oss()
+            || crate::ward::project_groups::layout_joins_tab_group(&panes_layout);
         let new_pane_group = ctx.add_typed_action_view(|ctx| {
             let mut pane_group = PaneGroup::new_with_panes_layout(
                 self.tips_completed.clone(),
@@ -13235,6 +13237,17 @@ impl Workspace {
             (0, None)
         } else {
             self.new_tab_index_and_group(ctx)
+        };
+        // Ward: a non-terminal tab (Settings) goes right after the active tab's group instead.
+        let (insert_idx, inherited_group_id) = match inherited_group_id {
+            Some(group_id) if !joins_tab_group => (
+                self.clamp_to_unpinned_region(
+                    &self.tabs,
+                    self.index_after_group(group_id).unwrap_or(insert_idx),
+                ),
+                None,
+            ),
+            inherited => (insert_idx, inherited),
         };
         self.tabs.insert(insert_idx, TabData::new(new_pane_group));
         self.tab_mru_order

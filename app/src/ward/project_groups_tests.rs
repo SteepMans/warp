@@ -264,3 +264,37 @@ fn paths_for_project_follow_groups_and_remote_control_names() {
     assert!(map.paths_for_project("chimney").is_empty());
     assert!(map.paths_for_project(" ").is_empty());
 }
+
+fn settings_leaf() -> crate::app_state::PaneNodeSnapshot {
+    use crate::app_state::{LeafContents, LeafSnapshot, PaneNodeSnapshot, SettingsPaneSnapshot};
+    PaneNodeSnapshot::Leaf(LeafSnapshot {
+        is_focused: true,
+        custom_vertical_tabs_title: None,
+        contents: LeafContents::Settings(SettingsPaneSnapshot::Local {
+            current_page: Default::default(),
+            search_query: None,
+        }),
+    })
+}
+
+#[test]
+fn only_tabs_with_a_terminal_join_a_tab_group() {
+    use crate::app_state::{BranchSnapshot, PaneFlex, SplitDirection};
+    use crate::pane_group::PanesLayout;
+
+    assert!(layout_joins_tab_group(&PanesLayout::default()));
+    assert!(!layout_joins_tab_group(&PanesLayout::Snapshot(Box::new(
+        settings_leaf()
+    ))));
+    let split = crate::app_state::PaneNodeSnapshot::Branch(BranchSnapshot {
+        direction: SplitDirection::Vertical,
+        children: vec![
+            (PaneFlex(1.), settings_leaf()),
+            (PaneFlex(1.), settings_leaf()),
+        ],
+    });
+    assert!(!layout_joins_tab_group(&PanesLayout::Snapshot(Box::new(
+        split
+    ))));
+    assert!(!layout_joins_tab_group(&PanesLayout::AmbientAgent));
+}
