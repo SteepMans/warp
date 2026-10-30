@@ -1,3 +1,20 @@
+# Ward
+
+This repository is a fork of [Warp](https://github.com/warpdotdev/warp) that builds **Ward**: the
+OSS channel of Warp for Windows, tuned for working with CLI agents (Claude Code, Codex) without a
+Warp account or Warp cloud features.
+
+- Download: the latest installer is listed in
+  [manifest.json](https://chimney.steep-man.ru/warp-fork/windows/stable/manifest.json); Ward
+  updates itself from the same manifest.
+- What Ward changes compared to Warp: [WARD.md](WARD.md).
+- Building, publishing and migrating settings: [FORK.md](FORK.md).
+
+Ward installs next to the official Warp and does not touch its data. The original Warp README
+follows.
+
+---
+
 <a href="https://www.warp.dev">
     <img width="1024" alt="Warp Agentic Development Environment product preview" src="https://github.com/user-attachments/assets/9976b2da-2edd-4604-a36c-8fd53719c6d4" />
 </a>
