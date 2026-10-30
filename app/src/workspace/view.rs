@@ -15482,7 +15482,13 @@ impl Workspace {
         }
     }
 
-    fn manual_check_for_update(&self, ctx: &mut ViewContext<Self>) {
+    fn manual_check_for_update(&mut self, ctx: &mut ViewContext<Self>) {
+        if crate::features::is_fork_oss() {
+            // Ward shows the check on the Updates page, so it never happens out of sight.
+            self.show_settings_with_section(Some(SettingsSection::Updates), ctx);
+            crate::ward::updates::check_now(ctx);
+            return;
+        }
         AutoupdateState::handle(ctx).update(ctx, |autoupdate_state, ctx| {
             autoupdate_state.manually_check_for_update(ctx);
         });
