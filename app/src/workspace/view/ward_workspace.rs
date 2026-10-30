@@ -584,7 +584,9 @@ fn render_usage_chip(
     .with_background(coloru_with_opacity(color, opacity))
     .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
     .finish();
-    appearance.ui_builder().tool_tip_on_element(
+    // An overlay, like the header icon buttons: a plain positioned child is clipped by the
+    // header and only a few pixels of the tooltip would show under the chip.
+    appearance.ui_builder().overlay_tool_tip_on_element(
         tooltip,
         mouse_state,
         chip,
