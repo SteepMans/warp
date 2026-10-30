@@ -145,6 +145,7 @@ impl Workspace {
         self.add_tab_with_pane_layout(
             PanesLayout::SingleTerminal(Box::new(NewTerminalOptions {
                 initial_directory: Some(PathBuf::from(&path)),
+                env_vars: crate::ward::claude_launch::env_vars_for_command(&command, ctx),
                 hide_homepage: true,
                 ..Default::default()
             })),
