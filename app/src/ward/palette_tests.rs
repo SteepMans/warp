@@ -56,3 +56,15 @@ fn section_labels_follow_columns() {
     assert_eq!(section_label(AgentState::Thinking), "Running");
     assert_eq!(section_label(AgentState::Idle), "Done & idle");
 }
+
+#[test]
+fn matched_indices_mark_the_query_in_each_field() {
+    let mut agent = agent(1, AgentState::WaitingAnswer, 5, "hassle", "refund-webhook");
+    agent.detail = Some("Apply migration?".to_owned());
+    let indices = matched_indices(&agent, "  ref ");
+    assert_eq!(indices.task, vec![0, 1, 2]);
+    assert!(indices.project.is_empty());
+    assert!(indices.detail.is_empty());
+    assert_eq!(matched_indices(&agent, "HAS").project, vec![0, 1, 2]);
+    assert_eq!(matched_indices(&agent, " "), MatchedIndices::default());
+}
