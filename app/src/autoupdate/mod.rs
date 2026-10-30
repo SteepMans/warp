@@ -113,6 +113,13 @@ pub struct AutoupdateState {
     /// executed until `start_polling` is called. This ensures no version-check requests are made
     /// before onboarding completes.
     polling_started: bool,
+    /// When the last update check (and the download it started, if any) finished. Only shown to
+    /// the user; it does not affect when checks run.
+    last_check_finished_at: Option<DateTime<chrono::Local>>,
+    /// Why the last update check or download failed; `None` after a successful one.
+    last_check_error: Option<String>,
+    /// The latest version reported by the release server in the last successful check.
+    latest_known_version: Option<VersionInfo>,
 }
 
 impl AutoupdateState {
@@ -124,7 +131,41 @@ impl AutoupdateState {
             downloaded_update: None,
             request_queue: VecDeque::new(),
             polling_started: false,
+            last_check_finished_at: None,
+            last_check_error: None,
+            latest_known_version: None,
         }
+    }
+
+    /// The current stage of the update state machine.
+    pub fn stage(&self) -> &AutoupdateStage {
+        &self.stage
+    }
+
+    /// Whether update checks run at all: requests made before polling starts wait in the queue.
+    pub fn is_polling_started(&self) -> bool {
+        self.polling_started
+    }
+
+    /// When the last update check (and its download, if any) finished.
+    pub fn last_check_finished_at(&self) -> Option<DateTime<chrono::Local>> {
+        self.last_check_finished_at
+    }
+
+    /// Why the last update check or download failed, if it did.
+    pub fn last_check_error(&self) -> Option<&str> {
+        self.last_check_error.as_deref()
+    }
+
+    /// The latest version the release server reported in the last successful check.
+    pub fn latest_known_version(&self) -> Option<&VersionInfo> {
+        self.latest_known_version.as_ref()
+    }
+
+    /// Records the outcome of a finished check or download for display.
+    fn record_check_result(&mut self, error: Option<&anyhow::Error>) {
+        self.last_check_finished_at = Some(chrono::Local::now());
+        self.last_check_error = error.map(|err| err.root_cause().to_string());
     }
 
     pub fn register(ctx: &mut AppContext, server_api: Arc<ServerApi>) {
@@ -396,8 +437,16 @@ impl AutoupdateState {
             self.last_successful_daily_update_check = Some(chrono::Local::now().fixed_offset());
         }
 
+        match &version {
+            Ok(version) => self.latest_known_version = Some(version.clone()),
+            Err(err) => self.record_check_result(Some(err)),
+        }
+
         // If one update was already applied, we cannot apply another.
         if matches!(self.stage, AutoupdateStage::UpdatedPendingRestart { .. }) {
+            if version.is_ok() {
+                self.record_check_result(None);
+            }
             return;
         }
 
@@ -438,9 +487,11 @@ impl AutoupdateState {
                         update_id: update_id.clone(),
                     };
                 }
+                self.record_check_result(None);
                 ctx.emit(AutoupdateStateEvent::UpdateAvailable);
             }
             Ok(UpdateReady::No) => {
+                self.record_check_result(None);
                 self.stage = AutoupdateStage::NoUpdateAvailable;
                 log::info!("No update available");
             }
@@ -501,6 +552,7 @@ impl AutoupdateState {
         download_ready: Result<DownloadReady>,
         ctx: &mut ModelContext<AutoupdateState>,
     ) {
+        self.record_check_result(download_ready.as_ref().err());
         let was_update_available = match download_ready {
             Ok(DownloadReady::Yes) => {
                 self.clear_old_autoupdate_dirs(&update_id, ctx);

@@ -585,3 +585,45 @@ fn test_should_update() {
         });
     });
 }
+
+/// A failed check or download is remembered with its reason and time so the Updates page can
+/// show it; the next successful check clears the error.
+#[test]
+fn test_last_check_result_is_recorded() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|ctx| AppExecutionMode::new(ExecutionMode::App, false, ctx));
+        let autoupdate_state = initialize_app(&mut app);
+
+        app.update_model(&autoupdate_state, |autoupdate, ctx| {
+            assert!(autoupdate.last_check_finished_at().is_none());
+            assert!(autoupdate.last_check_error().is_none());
+
+            autoupdate.on_download_update_complete(
+                RequestType::ManualCheck,
+                make_version_info("v0.2023.05.15.08.04.stable_02", false),
+                "failed_id".to_string(),
+                Err(anyhow!("connection reset").context("Error downloading update")),
+                ctx,
+            );
+            assert!(autoupdate.last_check_finished_at().is_some());
+            assert_eq!(autoupdate.last_check_error(), Some("connection reset"));
+
+            ChannelState::set_app_version(Some("v0.2023.05.15.08.04.stable_01"));
+            autoupdate.on_update_check_complete(
+                RequestType::ManualCheck,
+                "ok_id".to_string(),
+                Ok(make_version_info("v0.2023.05.15.08.04.stable_01", false)),
+                false,
+                ctx,
+            );
+            assert_eq!(autoupdate.stage, AutoupdateStage::NoUpdateAvailable);
+            assert!(autoupdate.last_check_error().is_none());
+            assert_eq!(
+                autoupdate
+                    .latest_known_version()
+                    .map(|v| v.version.as_str()),
+                Some("v0.2023.05.15.08.04.stable_01")
+            );
+        });
+    });
+}
