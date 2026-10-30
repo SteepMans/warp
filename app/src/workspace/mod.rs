@@ -1660,6 +1660,14 @@ fn add_open_setting_pages_as_editable_binding(app: &mut AppContext) {
         .with_context_predicate(id!("Workspace"))
         .with_custom_action(CustomAction::ShowAboutWarp),
         EditableBinding::new(
+            "workspace:show_settings_updates_page",
+            BindingDescription::new("Open Settings: Updates"),
+            WorkspaceAction::ShowSettingsPage(SettingsSection::Updates),
+        )
+        .with_enabled(crate::features::is_fork_oss)
+        .with_group(bindings::BindingGroup::Settings.as_str())
+        .with_context_predicate(id!("Workspace")),
+        EditableBinding::new(
             "workspace:show_settings_teams_page",
             BindingDescription::new("Open Settings: Teams")
                 .with_custom_description(bindings::MAC_MENUS_CONTEXT, "Open Team Settings"),
