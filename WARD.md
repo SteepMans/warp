@@ -202,6 +202,8 @@ ANSI по оттенку и то, что жёлтый (агент ждёт вв�
 
 ## Обновления и журнал изменений
 
+- Скачанное обновление показывается кнопкой «Update Ward» в шапке: меню аватара Warp, где оно
+  обычно появляется, в Ward убрано.
 - Автообновление из своего манифеста
   `https://chimney.steep-man.ru/warp-fork/windows/stable/manifest.json` вместо серверов Warp
   (`app/src/autoupdate/fork_manifest.rs`).
