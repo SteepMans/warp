@@ -182,10 +182,12 @@ impl SettingsWidget for AboutPageWidget {
         let theme = appearance.theme();
         let ui_builder = appearance.ui_builder();
 
-        let image_path = if theme.inferred_color_scheme() == ColorScheme::LightOnDark {
-            "bundled/svg/warp-logo-with-light-title.svg"
-        } else {
-            "bundled/svg/warp-logo-with-dark-title.svg"
+        let light_on_dark = theme.inferred_color_scheme() == ColorScheme::LightOnDark;
+        let image_path = match (crate::features::is_fork_oss(), light_on_dark) {
+            (true, true) => "bundled/svg/ward-logo-with-light-title.svg",
+            (true, false) => "bundled/svg/ward-logo-with-dark-title.svg",
+            (false, true) => "bundled/svg/warp-logo-with-light-title.svg",
+            (false, false) => "bundled/svg/warp-logo-with-dark-title.svg",
         };
 
         let version = ChannelState::app_version().unwrap_or("v#.##.###");
