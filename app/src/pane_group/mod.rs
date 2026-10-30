@@ -498,6 +498,10 @@ pub enum Event {
     },
     ExecuteCommand(ExecuteCommandEvent),
     PaneTitleUpdated,
+    /// A pane changed its own title (for example a shell or a CLI agent set the terminal title,
+    /// which Claude Code does about once a second while it works). Unlike [`Self::PaneTitleUpdated`]
+    /// it is not caused by a user action, so the workspace may refresh background tabs lazily.
+    PaneContentTitleUpdated,
     SendNotification {
         notification: BlockNotification,
         pane_id: PaneId,
@@ -7892,15 +7896,18 @@ impl PaneGroup {
         pane.attach(self, focus_handle, ctx);
 
         // Title updates need to get propagated up to workspace (to update tab bar and window title).
-        ctx.subscribe_to_model(&pane.pane_configuration(), |_group, _, event, ctx| {
-            if matches!(
-                event,
-                PaneConfigurationEvent::TitleUpdated
-                    | PaneConfigurationEvent::VerticalTabsTitleUpdated
-            ) {
-                ctx.emit(Event::PaneTitleUpdated);
-            }
-        });
+        ctx.subscribe_to_model(
+            &pane.pane_configuration(),
+            |_group, _, event, ctx| match event {
+                PaneConfigurationEvent::TitleUpdated => {
+                    ctx.emit(Event::PaneContentTitleUpdated);
+                }
+                PaneConfigurationEvent::VerticalTabsTitleUpdated => {
+                    ctx.emit(Event::PaneTitleUpdated);
+                }
+                _ => {}
+            },
+        );
     }
 
     fn estimated_view_bounds(ctx: &mut ViewContext<Self>) -> RectF {

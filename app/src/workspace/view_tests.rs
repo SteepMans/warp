@@ -5824,3 +5824,62 @@ fn test_tab_group_rename_blur_does_not_commit_unfinished_name() {
         });
     });
 }
+
+#[test]
+fn test_background_tab_title_changes_do_not_redraw_the_window() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let window_id = app.read(|ctx| workspace.window_id(ctx));
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+            workspace.activate_tab(1, ctx);
+        });
+
+        let set_title = |app: &mut App, tab_index: usize, title: &str| {
+            let title = title.to_owned();
+            workspace.update(app, |workspace, ctx| {
+                let pane_group = workspace.tabs[tab_index].pane_group.clone();
+                pane_group.update(ctx, |pane_group, ctx| {
+                    let pane_id = pane_group.focused_pane_id(ctx);
+                    let pane = pane_group
+                        .pane_by_id(pane_id)
+                        .expect("tab has a focused pane");
+                    pane.pane_configuration().update(ctx, |configuration, ctx| {
+                        configuration.set_title(title, ctx)
+                    });
+                });
+            });
+        };
+        let presenter = app.presenter(window_id).expect("window has a presenter");
+        let frames = || presenter.borrow().frame_count();
+
+        // A CLI agent in the background tab animates its title.
+        let frames_before = frames();
+        for title in ["◐ Working", "◑ Working", "◒ Working"] {
+            set_title(&mut app, 0, title);
+        }
+        assert_eq!(
+            frames(),
+            frames_before,
+            "background title changes redrew the window"
+        );
+        assert!(workspace.read(&app, |workspace, _| {
+            workspace.background_tab_title_refresh_pending
+        }));
+
+        // The active tab still updates its title right away.
+        set_title(&mut app, 1, "◐ Working");
+        assert!(
+            frames() > frames_before,
+            "active tab title change did not redraw the window"
+        );
+
+        // Switching to the background tab shows its latest title.
+        workspace.update(&mut app, |workspace, ctx| workspace.activate_tab(0, ctx));
+        let title = workspace.read(&app, |workspace, ctx| {
+            workspace.tabs[0].pane_group.as_ref(ctx).display_title(ctx)
+        });
+        assert_eq!(title, "◒ Working");
+    });
+}

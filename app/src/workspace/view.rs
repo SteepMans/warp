@@ -565,6 +565,10 @@ pub const WORKSPACE_PADDING: f32 = 0.0;
 #[cfg(not(target_family = "wasm"))]
 pub const WORKSPACE_PADDING: f32 = 1.0;
 
+/// How long title changes of background tabs may wait before the workspace re-renders for them.
+/// Titles of the active tab are shown right away.
+const BACKGROUND_TAB_TITLE_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+
 /// The minimum font size at which terminal text will be rendered.
 const MIN_FONT_SIZE: f32 = 5.0;
 
@@ -1156,6 +1160,9 @@ pub struct Workspace {
     /// pinned to this tab for the rest of its lifetime so switching tabs does
     /// not re-show it elsewhere.
     feature_intro_tab_pane_group_id: Option<EntityId>,
+    /// Whether a re-render for title changes in background tabs is scheduled. See
+    /// [`BACKGROUND_TAB_TITLE_REFRESH_INTERVAL`].
+    background_tab_title_refresh_pending: bool,
     auto_handoff_sleep_modal: ViewHandle<AutoHandoffSleepModal>,
     chatgpt_plan_modal: ViewHandle<ChatGPTPlanModal>,
     enable_auto_reload_modal: ViewHandle<EnableAutoReloadModal>,
@@ -3576,6 +3583,7 @@ impl Workspace {
             agent_cli_launch_modal: agent_cli_launch_view,
             feature_intro_modal: feature_intro_view,
             feature_intro_tab_pane_group_id: None,
+            background_tab_title_refresh_pending: false,
             auto_handoff_sleep_modal: auto_handoff_sleep_view,
             chatgpt_plan_modal: chatgpt_plan_view,
             enable_auto_reload_modal,
@@ -5680,6 +5688,26 @@ impl Workspace {
         self.notify_terminal_focus_change(focused_terminal_view_id, ambient_agent_task_id, ctx);
 
         self.update_active_session(ctx);
+    }
+
+    /// Re-renders the workspace once [`BACKGROUND_TAB_TITLE_REFRESH_INTERVAL`] has passed, so the
+    /// tab bar and vertical tabs pick up the titles that background tabs set in the meantime.
+    /// Re-rendering on each of them would rebuild the visible window about once a second per
+    /// working CLI agent; any other re-render (such as a tab switch) shows them earlier.
+    fn schedule_background_tab_title_refresh(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.background_tab_title_refresh_pending {
+            return;
+        }
+        self.background_tab_title_refresh_pending = true;
+        ctx.spawn(
+            async {
+                warpui::r#async::Timer::after(BACKGROUND_TAB_TITLE_REFRESH_INTERVAL).await;
+            },
+            |workspace, _, ctx| {
+                workspace.background_tab_title_refresh_pending = false;
+                ctx.notify();
+            },
+        );
     }
 
     fn update_window_title(&self, ctx: &mut ViewContext<Self>) {
@@ -16413,6 +16441,14 @@ impl Workspace {
             pane_group::Event::PaneTitleUpdated => {
                 self.update_window_title(ctx);
                 ctx.notify();
+            }
+            pane_group::Event::PaneContentTitleUpdated => {
+                if pane_group.id() == self.active_tab_pane_group().id() {
+                    self.update_window_title(ctx);
+                    ctx.notify();
+                } else {
+                    self.schedule_background_tab_title_refresh(ctx);
+                }
             }
             pane_group::Event::ShowCommandSearch(options) => {
                 self.show_command_search(options.filter, &options.init_content, ctx);
