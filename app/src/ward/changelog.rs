@@ -122,6 +122,11 @@ impl NoteSection {
     }
 }
 
+/// Heading of the "What's new" section a note with this `section` goes to.
+pub fn section_title(section: &str) -> &'static str {
+    NoteSection::parse(section).title()
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 pub struct ChangelogGroup {
     #[serde(default)]
@@ -145,10 +150,20 @@ pub async fn fetch_current(client: &http_client::Client) -> Result<Changelog> {
     let Some(version) = ChannelState::app_version() else {
         bail!("This build has no version");
     };
+    let changelog = fetch_for_version(client, version).await?;
+    log::info!("Received Ward changelog for {version}");
+    Ok(to_warp_changelog(&changelog, version))
+}
+
+/// Fetches the changelog published for the given version as is.
+pub async fn fetch_for_version(
+    client: &http_client::Client,
+    version: &str,
+) -> Result<WardChangelog> {
     let Some(url) = changelog_url(version) else {
         bail!("No releases URL configured for this build");
     };
-    let changelog: WardChangelog = client
+    client
         .get(&url)
         .timeout(FETCH_TIMEOUT)
         .send()
@@ -156,9 +171,7 @@ pub async fn fetch_current(client: &http_client::Client) -> Result<Changelog> {
         .error_for_status()?
         .json()
         .await
-        .context("Failed to parse changelog.json")?;
-    log::info!("Received Ward changelog for {version}");
-    Ok(to_warp_changelog(&changelog, version))
+        .context("Failed to parse changelog.json")
 }
 
 /// Converts the published changelog into Warp's changelog shape.
