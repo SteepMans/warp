@@ -451,7 +451,10 @@ $env:AWS_SECRET_ACCESS_KEY = $env:WARP_FORK_S3_SECRET_KEY
 $env:AWS_DEFAULT_REGION = 'us-east-1'
 $env:AWS_EC2_METADATA_DISABLED = 'true'
 $env:AWS_CONFIG_FILE = Join-Path ([System.IO.Path]::GetTempPath()) 'warp-fork-aws-config'
-[System.IO.File]::WriteAllText($env:AWS_CONFIG_FILE, "[default]`ns3 =`n    addressing_style = path`n")
+# One part at a time: a runner with a slow uplink splits its bandwidth across concurrent parts,
+# and a part that takes over a minute is cut by the ingress in front of the bucket (error 499).
+$awsConfig = "[default]`ns3 =`n    addressing_style = path`n    max_concurrent_requests = 1`n    multipart_chunksize = 8MB`n"
+[System.IO.File]::WriteAllText($env:AWS_CONFIG_FILE, $awsConfig)
 
 try {
     $endpoint = $env:WARP_FORK_S3_ENDPOINT.TrimEnd('/')
