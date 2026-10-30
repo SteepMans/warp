@@ -22,8 +22,9 @@ use crate::util::bindings::keybinding_name_to_display_string;
 use crate::ward::agent_state::AgentState;
 use crate::ward::attention::AttentionCounts;
 use crate::ward::claude_usage::usage::{self as claude_usage_text, UsageLevel};
+use crate::ward::codex_usage::rollout as codex_usage_text;
 use crate::ward::project_groups::{self, TabObservation};
-use crate::ward::{agent_state, attention, chimney, claude_usage};
+use crate::ward::{agent_state, attention, chimney, claude_usage, codex_usage};
 use crate::workspace::WorkspaceRegistry;
 use crate::workspace::action::WorkspaceAction;
 use crate::workspace::tab_group::TabGroup;
@@ -108,6 +109,17 @@ impl Workspace {
         );
     }
 
+    /// Re-renders the header usage chip when the Codex rate limits were read again.
+    pub(super) fn ward_subscribe_to_codex_usage(ctx: &mut ViewContext<Self>) {
+        if !ctx.has_singleton_model::<codex_usage::model::CodexUsageModel>() {
+            return;
+        }
+        ctx.subscribe_to_model(
+            &codex_usage::model::CodexUsageModel::handle(ctx),
+            |_, _, _, ctx| ctx.notify(),
+        );
+    }
+
     fn ward_handle_chimney_event(
         &mut self,
         event: &chimney::model::ChimneyEvent,
@@ -180,6 +192,14 @@ impl Workspace {
         }
         if let Some(usage_chip) = render_claude_usage_chip(
             self.mouse_states.ward_claude_usage.clone(),
+            quiet,
+            appearance,
+            app,
+        ) {
+            strip.add_child(usage_chip);
+        }
+        if let Some(usage_chip) = render_codex_usage_chip(
+            self.mouse_states.ward_codex_usage.clone(),
             quiet,
             appearance,
             app,
@@ -421,9 +441,9 @@ impl Workspace {
     }
 }
 
-/// `5h 2% · 7d 60%`: Claude subscription usage, grey below 50%, then the warning and error
-/// colors of the attention pills. The tooltip has the reset times in local time. Hidden when
-/// turned off in the settings or without a fresh report (no credentials, 401).
+/// `Claude 5h 2% · 7d 60%`: Claude subscription usage, grey below 50%, then the warning and
+/// error colors of the attention pills. The tooltip has the reset times in local time. Hidden
+/// when turned off in the settings or without a fresh report (no credentials, 401).
 fn render_claude_usage_chip(
     mouse_state: MouseStateHandle,
     quiet: ColorU,
@@ -435,8 +455,61 @@ fn render_claude_usage_chip(
     }
     let usage = claude_usage::model::model(app)?.usage()?;
     let text = claude_usage_text::chip_text(usage)?;
+    let tooltip = format!(
+        "Claude subscription usage
+{}",
+        claude_usage_text::tooltip_text(usage, chrono::Utc::now(), &chrono::Local)
+    );
+    Some(render_usage_chip(
+        format!("Claude {text}"),
+        claude_usage_text::usage_level(usage),
+        tooltip,
+        mouse_state,
+        quiet,
+        appearance,
+    ))
+}
+
+/// `Codex 5h 10% · 7d 30%`: the Codex plan limits from the newest Codex rollout, colored like
+/// the Claude chip. Hidden when turned off in the settings, when no rollout has rate limits, or
+/// once every window has reset since Codex last reported.
+fn render_codex_usage_chip(
+    mouse_state: MouseStateHandle,
+    quiet: ColorU,
+    appearance: &Appearance,
+    app: &AppContext,
+) -> Option<Box<dyn Element>> {
+    if !codex_usage::is_enabled_by_user(app) {
+        return None;
+    }
+    let now = chrono::Utc::now();
+    let usage = codex_usage::model::model(app)?.usage(now)?;
+    let text = codex_usage_text::chip_text(&usage)?;
+    let tooltip = format!(
+        "Codex plan usage
+{}",
+        codex_usage_text::tooltip_text(&usage, now, &chrono::Local)
+    );
+    Some(render_usage_chip(
+        format!("Codex {text}"),
+        codex_usage_text::usage_level(&usage),
+        tooltip,
+        mouse_state,
+        quiet,
+        appearance,
+    ))
+}
+
+fn render_usage_chip(
+    text: String,
+    level: UsageLevel,
+    tooltip: String,
+    mouse_state: MouseStateHandle,
+    quiet: ColorU,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
     let theme = appearance.theme();
-    let (color, opacity) = match claude_usage_text::usage_level(usage) {
+    let (color, opacity) = match level {
         UsageLevel::Normal => (quiet, 10),
         UsageLevel::Warning => (AgentState::WaitingAnswer.color(theme), 13),
         UsageLevel::Critical => (AgentState::Error.color(theme), 13),
@@ -452,18 +525,14 @@ fn render_claude_usage_chip(
     .with_background(coloru_with_opacity(color, opacity))
     .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
     .finish();
-    let tooltip = format!(
-        "Claude subscription usage\n{}",
-        claude_usage_text::tooltip_text(usage, chrono::Utc::now(), &chrono::Local)
-    );
-    Some(appearance.ui_builder().tool_tip_on_element(
+    appearance.ui_builder().tool_tip_on_element(
         tooltip,
         mouse_state,
         chip,
         ParentAnchor::BottomMiddle,
         ChildAnchor::TopMiddle,
         vec2f(0., 4.),
-    ))
+    )
 }
 
 /// Header button that shows or hides the agent overview board.
