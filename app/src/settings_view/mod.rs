@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use about_page::AboutPageView;
+use updates_page::UpdatesPageView;
 use agent_profiles_page::{AgentProfilesPageAction, AgentProfilesPageEvent, AgentProfilesPageView};
 use appearance_page::{AppearancePageAction, AppearanceSettingsPageView};
 use billing_and_usage_dispatch::BillingAndUsageDispatchView;
@@ -121,6 +122,7 @@ mod teams_page;
 mod telemetry;
 mod transfer_ownership_confirmation_modal;
 pub mod update_environment_form;
+mod updates_page;
 mod warp_agent_page;
 mod warp_drive_page;
 mod warpify_page;
@@ -336,6 +338,9 @@ pub enum SettingsSection {
     // ── Cloud platform umbrella subpages ──
     CloudEnvironments,
     WarpCloudAgentAPIKeys,
+    // ── Ward ──
+    /// Ward's update status page; only shown in the OSS build.
+    Updates,
 }
 
 /// Pages for Warp's own AI, account and cloud features, hidden in the fork's OSS build.
@@ -430,6 +435,7 @@ impl SettingsSection {
             // Keeps the "Oz" spelling the slug was seeded from; only the
             // Display label above dropped it.
             Self::WarpCloudAgentAPIKeys => "Oz Cloud API Keys",
+            Self::Updates => "Updates",
         }
     }
 
@@ -468,6 +474,7 @@ impl SettingsSection {
             "Editor and Code Review" | "EditorAndCodeReview" => Self::EditorAndCodeReview,
             "Environments" | "CloudEnvironments" => Self::CloudEnvironments,
             "Oz Cloud API Keys" | "OzCloudAPIKeys" => Self::WarpCloudAgentAPIKeys,
+            "Updates" => Self::Updates,
             _ => return None,
         };
         Some(section)
@@ -1185,6 +1192,7 @@ macro_rules! update_page {
             SettingsPageViewHandle::CLIAgents(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::CloudEnvironments(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::About(handle) => $ctx.update_view(handle, $update),
+            SettingsPageViewHandle::Updates(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::CodeIndexing(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::EditorAndCodeReview(handle) => {
                 $ctx.update_view(handle, $update)
@@ -1265,6 +1273,9 @@ impl SettingsView {
 
         // About page
         let about_page_handle = ctx.add_typed_action_view(AboutPageView::new);
+
+        // Updates page (Ward only, see `should_render`)
+        let updates_page_handle = ctx.add_typed_action_view(UpdatesPageView::new);
 
         // Warp Agent page
         let warp_agent_page_handle = ctx.add_typed_action_view(WarpAgentPageView::new);
@@ -1427,6 +1438,7 @@ impl SettingsView {
             SettingsPage::new(environments_page_handle.clone()),
             SettingsPage::new(privacy_page_handle),
             SettingsPage::new(about_page_handle),
+            SettingsPage::new(updates_page_handle),
         ]);
 
         // Build sidebar nav items. Umbrellas group their subpages here and
@@ -1468,6 +1480,7 @@ impl SettingsView {
             SettingsNavItem::Page(SettingsSection::WarpDrive),
             SettingsNavItem::Page(SettingsSection::Privacy),
             SettingsNavItem::Page(SettingsSection::About),
+            SettingsNavItem::Page(SettingsSection::Updates),
         ];
 
         if crate::features::is_fork_oss() {
@@ -2164,6 +2177,7 @@ impl SettingsView {
             SettingsPageViewHandle::Appearance(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::BillingAndUsage(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::About(v) => v.as_ref(app).should_render(app),
+            SettingsPageViewHandle::Updates(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::WarpCloudAgentAPIKeys(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::Privacy(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::Warpify(v) => v.as_ref(app).should_render(app),
