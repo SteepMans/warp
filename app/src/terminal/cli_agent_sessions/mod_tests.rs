@@ -9,7 +9,8 @@ use super::event::{
 };
 use super::{
     BlockedSource, CLIAgentInputEntrypoint, CLIAgentInputState, CLIAgentSession,
-    CLIAgentSessionContext, CLIAgentSessionStatus, CLIAgentSessionsModel, turn_end_query,
+    CLIAgentSessionContext, CLIAgentSessionStatus, CLIAgentSessionsModel, session_start_status,
+    turn_end_query,
 };
 use crate::ai::blocklist::{InputConfig, InputType};
 use crate::terminal::CLIAgent;
@@ -1486,4 +1487,16 @@ fn second_ctrl_c_while_armed_reuses_the_existing_window() {
             );
         });
     });
+}
+
+#[test]
+fn ward_session_start_is_idle_until_a_prompt() {
+    assert!(matches!(
+        session_start_status(true),
+        CLIAgentSessionStatus::Cancelled
+    ));
+    assert!(matches!(
+        session_start_status(false),
+        CLIAgentSessionStatus::InProgress
+    ));
 }

@@ -195,6 +195,18 @@ fn turn_end_query(
     incoming
 }
 
+/// Status of a session when the plugin reports `session_start`. Upstream assumes a prompt follows
+/// and marks it in progress; Ward (`idle_until_prompt`) keeps it idle until the plugin reports a
+/// prompt, so a session restored with `--resume` that waits at its prompt is not counted as
+/// running. `Cancelled` reads as a finished turn without the "done, not seen yet" highlight.
+fn session_start_status(idle_until_prompt: bool) -> CLIAgentSessionStatus {
+    if idle_until_prompt {
+        CLIAgentSessionStatus::Cancelled
+    } else {
+        CLIAgentSessionStatus::InProgress
+    }
+}
+
 impl CLIAgentSession {
     pub fn is_remote(&self) -> bool {
         self.remote_host.is_some()
@@ -491,7 +503,7 @@ impl CLIAgentSessionsModel {
             .filter(|s| s.agent == agent)
         {
             // Upgrade existing session with plugin context.
-            session.status = CLIAgentSessionStatus::InProgress;
+            session.status = session_start_status(crate::features::is_fork_oss());
             crate::ward::agent_state::observe_status(terminal_view_id, &session.status);
             session.listener = Some(listener);
             session.plugin_version = plugin_version;
@@ -508,7 +520,7 @@ impl CLIAgentSessionsModel {
             terminal_view_id,
             CLIAgentSession {
                 agent,
-                status: CLIAgentSessionStatus::InProgress,
+                status: session_start_status(crate::features::is_fork_oss()),
                 session_context: CLIAgentSessionContext {
                     cwd,
                     project,
