@@ -9,6 +9,8 @@
 #   stable/<version>/WarpOssSetup.exe          the Inno Setup installer
 #   stable/<version>/changelog.json            what changed since the previous release
 #   stable/<version>/images/<name>             pictures of the release notes
+# Only the published version is kept: after the manifest is uploaded, the folders
+# of older versions are removed, so their installer links stop working.
 #
 # changelog.json holds the release notes written by people: the changes/*.md
 # fragments (format in changes/README.md) added or edited between the commit of
@@ -468,6 +470,10 @@ try {
     }
     aws --endpoint-url $endpoint s3 cp --only-show-errors $ManifestPath "$target/manifest.json" --content-type application/json --cache-control no-cache
     if ($LASTEXITCODE -ne 0) { throw 'Uploading the manifest failed' }
+    # The manifest now points at this version, so older version folders are no longer needed.
+    # A failed cleanup leaves extra files behind and does not fail the release.
+    aws --endpoint-url $endpoint s3 rm --only-show-errors "$target/" --recursive --exclude 'manifest.json' --exclude "$Version/*"
+    if ($LASTEXITCODE -ne 0) { Write-Warning 'Removing older versions failed' }
 } finally {
     foreach ($name in 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_CONFIG_FILE') {
         Remove-Item "Env:\$name" -ErrorAction SilentlyContinue
