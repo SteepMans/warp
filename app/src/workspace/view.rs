@@ -22399,8 +22399,11 @@ impl Workspace {
 
         let autoupdate_stage = autoupdate::get_update_state(app);
         // Render the prominent autoupdate pill if autoupdate is ready and the current version is behind a prominent update version.
+        // Ward has no avatar menu that carries the subtle update entry, so every ready update gets
+        // the pill.
         if autoupdate_stage.ready_for_update()
             && (!FeatureFlag::AutoupdateUIRevamp.is_enabled()
+                || crate::features::is_fork_oss()
                 || autoupdate_stage
                     .available_new_version()
                     .map(|version| {
