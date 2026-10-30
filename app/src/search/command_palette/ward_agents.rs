@@ -2,7 +2,7 @@
 //! question or tool line under the task name. Enter focuses the agent's tab.
 
 use ordered_float::OrderedFloat;
-use warpui::elements::{ConstrainedBox, Container, Flex, ParentElement, Text};
+use warpui::elements::{ConstrainedBox, Container, Flex, Highlight, ParentElement, Text};
 use warpui::fonts::{Properties, Weight};
 use warpui::text_layout::ClipConfig;
 use warpui::{AppContext, Element, Entity, SingletonEntity};
@@ -16,7 +16,9 @@ use crate::search::item::{IconLocation, SearchItem as SearchItemTrait};
 use crate::search::mixer::{DataSourceRunErrorWrapper, SyncDataSource};
 use crate::search::result_renderer::ItemHighlightState;
 use crate::ward::agent_state::format_in_state;
-use crate::ward::palette::{PaletteAgent, filter_and_sort, palette_agents, section_label};
+use crate::ward::palette::{
+    MatchedIndices, PaletteAgent, filter_and_sort, matched_indices, palette_agents, section_label,
+};
 
 #[derive(Default)]
 pub struct DataSource;
@@ -47,6 +49,7 @@ impl SyncDataSource for DataSource {
                 let starts_section = previous_section != Some(section);
                 previous_section = Some(section);
                 QueryResult::from(SearchItem {
+                    matched: matched_indices(&agent, &query.text),
                     agent,
                     rank,
                     section: starts_section.then_some(section),
@@ -58,6 +61,8 @@ impl SyncDataSource for DataSource {
 
 pub struct SearchItem {
     agent: PaletteAgent,
+    /// Where the query matched, highlighted like the other palette modes.
+    matched: MatchedIndices,
     rank: usize,
     /// Set on the first agent of an urgency group.
     section: Option<&'static str>,
@@ -97,20 +102,43 @@ impl SearchItemTrait for SearchItem {
         let appearance = Appearance::as_ref(app);
         let font = appearance.ui_font_family();
         let size = appearance.monospace_font_size();
+        let main_text = highlight_state.main_text_fill(appearance).into_solid();
         let sub_text = highlight_state.sub_text_fill(appearance).into_solid();
+        // As in the other modes: with a query the task dims and the matched characters stand
+        // out in the main text color, bold.
+        let highlight = Highlight::new()
+            .with_properties(Properties::default().weight(Weight::Bold))
+            .with_foreground_color(main_text);
+        let highlighted = |text: Text, indices: &[usize]| {
+            if indices.is_empty() {
+                text
+            } else {
+                text.with_single_highlight(highlight, indices.to_vec())
+            }
+        };
+        let task_color = if self.matched.task.is_empty() {
+            main_text
+        } else {
+            sub_text
+        };
 
         let mut title = Flex::row().with_spacing(8.).with_child(
-            Text::new_inline(self.agent.task.clone(), font, size)
-                .with_clip(ClipConfig::ellipsis())
-                .with_color(highlight_state.main_text_fill(appearance).into_solid())
-                .with_style(Properties::default().weight(Weight::Bold))
-                .finish(),
+            highlighted(
+                Text::new_inline(self.agent.task.clone(), font, size)
+                    .with_clip(ClipConfig::ellipsis())
+                    .with_color(task_color)
+                    .with_style(Properties::default().weight(Weight::Bold)),
+                &self.matched.task,
+            )
+            .finish(),
         );
         if let Some(project) = &self.agent.project {
             title.add_child(
-                Text::new_inline(project.clone(), font, size - 2.)
-                    .with_color(sub_text)
-                    .finish(),
+                highlighted(
+                    Text::new_inline(project.clone(), font, size - 2.).with_color(sub_text),
+                    &self.matched.project,
+                )
+                .finish(),
             );
         }
         title.add_child(
@@ -136,14 +164,23 @@ impl SearchItemTrait for SearchItem {
             .detail
             .clone()
             .unwrap_or_else(|| self.agent.state.label().to_owned());
+        // The state label shown without a detail did not take part in the match.
+        let detail_indices: &[usize] = if self.agent.detail.is_some() {
+            &self.matched.detail
+        } else {
+            &[]
+        };
         let contents = Flex::column()
             .with_child(title.finish())
             .with_child(
                 Container::new(
-                    Text::new_inline(detail, font, size - 2.)
-                        .with_clip(ClipConfig::ellipsis())
-                        .with_color(detail_color)
-                        .finish(),
+                    highlighted(
+                        Text::new_inline(detail, font, size - 2.)
+                            .with_clip(ClipConfig::ellipsis())
+                            .with_color(detail_color),
+                        detail_indices,
+                    )
+                    .finish(),
                 )
                 .with_padding_top(4.)
                 .finish(),

@@ -39,6 +39,33 @@ pub fn match_score(agent: &PaletteAgent, query: &str) -> Option<i64> {
     .max()
 }
 
+/// Char indices of the query's fuzzy match in each field, for highlighting like the other
+/// palette modes. Empty for an empty query and for fields that do not match.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MatchedIndices {
+    pub project: Vec<usize>,
+    pub task: Vec<usize>,
+    pub detail: Vec<usize>,
+}
+
+pub fn matched_indices(agent: &PaletteAgent, query: &str) -> MatchedIndices {
+    let query = query.trim();
+    let indices = |field: Option<&str>| {
+        if query.is_empty() {
+            return Vec::new();
+        }
+        field
+            .and_then(|field| match_indices_case_insensitive(field, query))
+            .map(|result| result.matched_indices)
+            .unwrap_or_default()
+    };
+    MatchedIndices {
+        project: indices(agent.project.as_deref()),
+        task: indices(Some(agent.task.as_str())),
+        detail: indices(agent.detail.as_deref()),
+    }
+}
+
 /// The agents matching `query`, most urgent first; equally urgent agents keep the order of their
 /// time in state (longest waiting first).
 pub fn filter_and_sort(agents: Vec<PaletteAgent>, query: &str) -> Vec<PaletteAgent> {
