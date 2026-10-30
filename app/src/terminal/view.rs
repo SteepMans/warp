@@ -2644,6 +2644,9 @@ pub struct TerminalView {
     /// [`Self::poll_claude_resume`]. It is persisted with the pane snapshot so that the session
     /// is resumed when the pane is restored.
     claude_resume: Option<ClaudeResumeInfo>,
+    /// Ward: ends the CLI agent session when its process leaves the shell's process tree, for
+    /// agents that never ran as a command block (started from a shell profile).
+    ward_agent_liveness: crate::ward::agent_liveness::AgentProcessLiveness,
     /// When true, enter agent view after pending setup commands complete
     /// (i.e. after `PendingCommandCompleted` is emitted). Set by
     /// `pane_tree_from_template_recursive` when a tab config has both
@@ -4429,6 +4432,7 @@ impl TerminalView {
             awaiting_pending_command_completion: false,
             pending_command_queue: Default::default(),
             claude_resume: None,
+            ward_agent_liveness: Default::default(),
             enter_agent_view_after_pending_commands: false,
             slow_bootstrap_banner,
             is_slow_bootstrap_banner_open: false,
@@ -10120,10 +10124,45 @@ impl TerminalView {
                     .or_else(|| codex_resume::detect(shell_pid, shell_type))
             },
             |me, info, ctx| {
+                if crate::features::is_fork_oss() {
+                    me.end_cli_agent_session_if_process_exited(
+                        info.as_ref().map(|info| info.session_id.as_str()),
+                        ctx,
+                    );
+                }
                 me.set_claude_resume(info, ctx);
                 me.schedule_claude_resume_poll(CLAUDE_RESUME_POLL_INTERVAL, ctx);
             },
         );
+    }
+
+    /// Ward: ends this pane's CLI agent session once the agent process it reported is gone.
+    /// Warp only ends a session when the agent's command block finishes, and an agent started
+    /// from a shell profile has no such block, so its session would otherwise stay running.
+    fn end_cli_agent_session_if_process_exited(
+        &mut self,
+        running_session_id: Option<&str>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(exited_session_ids) = self.ward_agent_liveness.observe(running_session_id) else {
+            return;
+        };
+        let has_exited = CLIAgentSessionsModel::as_ref(ctx)
+            .session(self.view_id)
+            .is_some_and(|session| {
+                crate::ward::agent_liveness::session_has_exited(
+                    session.session_context.session_id.as_deref(),
+                    &exited_session_ids,
+                )
+            });
+        if !has_exited {
+            return;
+        }
+        log::info!("CLI agent process exited outside a command block, ending its session");
+        self.close_cli_agent_rich_input(CLIAgentRichInputCloseReason::Other, ctx);
+        CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions_model, ctx| {
+            sessions_model.remove_session(self.view_id, ctx);
+        });
     }
 
     fn set_claude_resume(&mut self, info: Option<ClaudeResumeInfo>, ctx: &mut ViewContext<Self>) {
