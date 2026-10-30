@@ -5,6 +5,7 @@
 pub mod action;
 pub mod agent_liveness;
 pub mod agent_state;
+pub mod announcements;
 pub mod attention;
 pub mod changelog;
 pub mod chimney;
