@@ -18,6 +18,7 @@ use crate::ward::attention::{self, AgentStatusFilter, AttentionCounts};
 use crate::ward::project_groups::remote_control_session_name;
 use crate::workspace::Workspace;
 use crate::workspace::action::WorkspaceAction;
+use crate::workspace::tab_settings::VerticalTabsDisplayGranularity;
 
 const STATE_GLYPH_SIZE: f32 = 12.;
 const COUNTER_GLYPH_SIZE: f32 = 10.;
@@ -32,6 +33,21 @@ pub(super) fn row_highlight_color(
         .state
         .needs_attention()
         .then(|| snapshot.state.color(Appearance::as_ref(app).theme()).into())
+}
+
+/// Whether a tab's own title (a rename or the `title=` of a `new_tab` URI) is the primary text
+/// of its row in Panes view. Upstream drops it inside a tab group and shows it only as a header
+/// above the row of an ungrouped tab; Ward puts it on the row in both layouts, so a tab placed
+/// into a project group keeps its name. Only a single-pane tab: with several panes each row
+/// keeps its own title and the header stays.
+pub(super) fn tab_title_in_row(
+    is_fork_oss: bool,
+    display_granularity: VerticalTabsDisplayGranularity,
+    visible_pane_count: usize,
+) -> bool {
+    is_fork_oss
+        && matches!(display_granularity, VerticalTabsDisplayGranularity::Panes)
+        && visible_pane_count == 1
 }
 
 /// The agent line under a terminal row's title: state glyph, detail (question, tool and

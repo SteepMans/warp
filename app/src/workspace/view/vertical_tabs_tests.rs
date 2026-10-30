@@ -684,6 +684,34 @@ fn tab_group_header_hidden_for_single_pane_without_custom_title() {
 }
 
 #[test]
+fn ward_tab_title_is_the_row_text_of_a_single_pane_tab() {
+    // A `new_tab` URI title (or a rename) stays on the row, grouped or not.
+    assert!(super::ward::tab_title_in_row(
+        true,
+        VerticalTabsDisplayGranularity::Panes,
+        1
+    ));
+    // Several panes keep their own row titles under the tab header.
+    assert!(!super::ward::tab_title_in_row(
+        true,
+        VerticalTabsDisplayGranularity::Panes,
+        2
+    ));
+    // Tabs view already shows the tab title on its single row.
+    assert!(!super::ward::tab_title_in_row(
+        true,
+        VerticalTabsDisplayGranularity::Tabs,
+        1
+    ));
+    // Upstream behavior outside the OSS build.
+    assert!(!super::ward::tab_title_in_row(
+        false,
+        VerticalTabsDisplayGranularity::Panes,
+        1
+    ));
+}
+
+#[test]
 fn tab_group_header_distinguishes_two_auto_named_multi_pane_tabs() {
     // Models the screenshot in #9098: tab 1 has a custom title
     // ("Humanfigure"), tabs 2 and 3 are auto-named multi-pane groups

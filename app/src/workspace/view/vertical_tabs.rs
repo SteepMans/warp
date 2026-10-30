@@ -1226,9 +1226,14 @@ impl VerticalTabsPanelState {
                         )
                         .into_iter()
                         .any(|pane_id| {
-                            let title_override = (!uses_outer_group_container(display_granularity))
-                                .then(|| pane_group.custom_title(app))
-                                .flatten();
+                            let title_override = (!uses_outer_group_container(display_granularity)
+                                || ward::tab_title_in_row(
+                                    crate::features::is_fork_oss(),
+                                    display_granularity,
+                                    visible_pane_ids.len(),
+                                ))
+                            .then(|| pane_group.custom_title(app))
+                            .flatten();
                             let ms = MouseStateHandle::default();
                             PaneProps::new(
                                 pane_group,
@@ -1825,9 +1830,14 @@ fn render_groups(
                         .then_some((tab_index, None))
                     }
                     VerticalTabsResolvedMode::Panes | VerticalTabsResolvedMode::FocusedSession => {
-                        let title_override = (!uses_outer_group_container)
-                            .then(|| pane_group.custom_title(app))
-                            .flatten();
+                        let title_override = (!uses_outer_group_container
+                            || ward::tab_title_in_row(
+                                crate::features::is_fork_oss(),
+                                display_granularity,
+                                visible_pane_ids.len(),
+                            ))
+                        .then(|| pane_group.custom_title(app))
+                        .flatten();
                         let matching_ids: Vec<PaneId> = pane_ids_for_display_granularity(
                             &visible_pane_ids,
                             pane_group.focused_pane_id(app),
@@ -2183,14 +2193,20 @@ fn render_tab_group_internal(
     // an override here would shadow every pane's title with the same string.
     // In Tabs/Summary modes there is only one row per tab, so the tab-level
     // custom title is still the right thing to show.
-    let displayed_tab_title_override =
-        if in_tab_group && matches!(display_granularity, VerticalTabsDisplayGranularity::Panes) {
-            None
-        } else {
-            (!uses_outer_group_container)
-                .then(|| pane_group.custom_title(app))
-                .flatten()
-        };
+    let tab_title_in_row = ward::tab_title_in_row(
+        crate::features::is_fork_oss(),
+        display_granularity,
+        visible_pane_ids.len(),
+    );
+    let displayed_tab_title_override = if tab_title_in_row {
+        pane_group.custom_title(app)
+    } else if in_tab_group && matches!(display_granularity, VerticalTabsDisplayGranularity::Panes) {
+        None
+    } else {
+        (!uses_outer_group_container)
+            .then(|| pane_group.custom_title(app))
+            .flatten()
+    };
     let is_menu_open_for_tab = workspace
         .show_tab_right_click_menu
         .is_some_and(|(idx, _)| idx == tab_index);
@@ -2353,8 +2369,9 @@ fn render_tab_group_internal(
             rows.finish()
         };
 
+        // Ward shows the tab title on the row itself, so it needs no header above it.
         let show_header = should_show_tab_group_header(
-            has_custom_title,
+            has_custom_title && !tab_title_in_row,
             is_being_renamed,
             visible_pane_ids.len(),
         );
