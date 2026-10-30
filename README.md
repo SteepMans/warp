@@ -11,7 +11,78 @@ Warp account or Warp cloud features.
 - Building, publishing and migrating settings: [FORK.md](FORK.md).
 
 Ward installs next to the official Warp and does not touch its data. The original Warp README
-follows.
+follows the gallery.
+
+## Что умеет Ward
+
+Подробности по каждой доработке — в [WARD.md](WARD.md), что нового в очередной версии — в окне
+«Что нового» после обновления (заметки из [changes/](changes/README.md)).
+
+### Агенты во вкладках и восстановление сессий
+
+Вкладки с Claude Code и Codex показывают состояние агента и время в нём, ждущий ввода агент
+подсвечен жёлтым. После перезапуска Ward вкладки продолжают те же сессии агентов.
+
+![Агенты во вкладках](docs/ward/screenshots/agents-tabs.png)
+
+### Полоса внимания и переходы
+
+Счётчики агентов в заголовке окна и переход к ждущему: Ctrl+Shift+J — к следующему агенту,
+который ждёт ввода, Ctrl+Shift+H — назад.
+
+![Полоса внимания](docs/ward/screenshots/attention-bar.png)
+
+### Обзор агентов
+
+Ctrl+Alt+W или кнопка в заголовке: карточки всех агентов по срочности с хвостом вывода
+терминала.
+
+![Обзор агентов](docs/ward/screenshots/agents-overview.png)
+
+### Палитра `@`
+
+Список CLI-агентов по срочности с нечётким поиском, Enter — переход к вкладке агента.
+
+![Палитра @](docs/ward/screenshots/agent-palette.png)
+
+### Chimney
+
+Чип карточки канбана во вкладке и в футере агента, запуск агента по карточке (Ctrl+Alt+N).
+
+![Chimney](docs/ward/screenshots/chimney.png)
+
+### Лимиты подписок Claude и Codex
+
+Чипы в шапке показывают, сколько использовано из 5-часового и недельного лимита, и меняют цвет
+на 50% и 80%.
+
+![Лимиты Claude и Codex](docs/ward/screenshots/usage-limits.png)
+
+### Темы
+
+Восемь своих тем в Settings → Appearance: шесть тёмных и две светлые.
+
+![Темы Ward](docs/ward/screenshots/themes.png)
+
+### Вкладка с командой по URI
+
+Ссылка `warposs://action/new_tab?...` открывает вкладку в нужной папке и запускает в ней
+команду (только с токеном), с файлом подтверждения для скриптов.
+
+![Вкладка по URI](docs/ward/screenshots/uri-tab.png)
+
+### Автообновление и «Что нового»
+
+Ward обновляется из своего манифеста, а после обновления показывает, что изменилось, —
+описание каждой доработки с картинкой.
+
+![Что нового](docs/ward/screenshots/whats-new.png)
+
+### Иконка и установщик
+
+Своя синяя иконка и картинки установщика; Ward ставится рядом с Warp и не трогает его данные.
+
+![Иконка и установщик](docs/ward/screenshots/icon-installer.png)
 
 ---
 
