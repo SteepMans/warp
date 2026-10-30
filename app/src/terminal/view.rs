@@ -12626,10 +12626,13 @@ impl TerminalView {
                 ctx.notify();
             }
             ModelEvent::Title(title) => {
+                let title_changed = self.terminal_title != *title;
                 self.terminal_title = title.to_owned();
                 if self.ignore_next_set_title_event {
                     self.ignore_next_set_title_event = false;
-                } else {
+                } else if title_changed {
+                    // Shells and CLI agents re-send the same title often (every prompt, every
+                    // spinner tick); only a new title can change the pane header and tab titles.
                     self.update_pane_configuration(ctx);
                 }
             }

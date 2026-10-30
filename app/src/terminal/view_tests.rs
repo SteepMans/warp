@@ -11009,3 +11009,54 @@ fn visible_bootstrap_block_leaves_focus_on_tab_group_rename_editor() {
         }));
     });
 }
+
+#[test]
+fn repeated_terminal_title_does_not_refresh_pane_header() {
+    App::test((), |mut app| async move {
+        initialize_workspace_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let terminal = workspace.read(&app, |workspace, ctx| {
+            workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .active_session_view(ctx)
+                .expect("tab should contain a terminal")
+        });
+        let pane_configuration = terminal.read(&app, |view, _| view.pane_configuration.clone());
+        let header_refreshes = Rc::new(RefCell::new(0));
+        app.update({
+            let header_refreshes = header_refreshes.clone();
+            |ctx| {
+                ctx.subscribe_to_model(&pane_configuration, move |_, event, _| {
+                    if matches!(
+                        event,
+                        crate::pane_group::pane::PaneConfigurationEvent::HeaderContentChanged
+                    ) {
+                        *header_refreshes.borrow_mut() += 1;
+                    }
+                });
+            }
+        });
+        terminal.update(&mut app, |view, _| view.ignore_next_set_title_event = false);
+
+        let send_title = |app: &mut App, title: &str| {
+            let event = ModelEvent::Title(title.to_owned());
+            terminal.update(app, |view, ctx| view.handle_terminal_event(&event, ctx));
+        };
+        send_title(&mut app, "~/project");
+        let after_first = *header_refreshes.borrow();
+        assert!(after_first > 0, "a new title must refresh the pane header");
+
+        for _ in 0..5 {
+            send_title(&mut app, "~/project");
+        }
+        assert_eq!(*header_refreshes.borrow(), after_first);
+
+        send_title(&mut app, "claude");
+        assert!(*header_refreshes.borrow() > after_first);
+        assert_eq!(
+            pane_configuration.read(&app, |configuration, _| configuration.title().to_owned()),
+            "claude"
+        );
+    });
+}
