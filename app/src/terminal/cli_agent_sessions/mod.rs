@@ -180,6 +180,21 @@ pub struct CLIAgentSession {
     pub received_rich_notification: bool,
 }
 
+/// The prompt a session keeps after a `Stop` or `StopFailure` event. Upstream takes the
+/// event's query as is; Ward (`keep_last_prompt`) keeps the last known prompt when the event has
+/// none, so a finished or failed agent still shows its task instead of the agent name.
+fn turn_end_query(
+    previous: Option<String>,
+    incoming: Option<String>,
+    keep_last_prompt: bool,
+) -> Option<String> {
+    let has_text = |query: &String| !query.trim().is_empty();
+    if keep_last_prompt && !incoming.as_ref().is_some_and(has_text) {
+        return previous.or(incoming);
+    }
+    incoming
+}
+
 impl CLIAgentSession {
     pub fn is_remote(&self) -> bool {
         self.remote_host.is_some()
@@ -248,7 +263,11 @@ impl CLIAgentSession {
                 CLIAgentSessionStatus::InProgress
             }
             CLIAgentEventType::Stop => {
-                self.session_context.query = event.payload.query.clone();
+                self.session_context.query = turn_end_query(
+                    self.session_context.query.take(),
+                    event.payload.query.clone(),
+                    crate::features::is_fork_oss(),
+                );
                 self.session_context.response = event.payload.response.clone();
                 self.clear_permission_scoped_state();
                 // The agent will wake itself again once that work finishes, so this turn
@@ -259,7 +278,11 @@ impl CLIAgentSession {
                 CLIAgentSessionStatus::Success
             }
             CLIAgentEventType::StopFailure => {
-                self.session_context.query = event.payload.query.clone();
+                self.session_context.query = turn_end_query(
+                    self.session_context.query.take(),
+                    event.payload.query.clone(),
+                    crate::features::is_fork_oss(),
+                );
                 self.session_context.response = event.payload.response.clone();
                 self.clear_permission_scoped_state();
                 CLIAgentSessionStatus::Failed {
