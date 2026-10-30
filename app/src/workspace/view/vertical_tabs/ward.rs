@@ -4,6 +4,7 @@
 use warp_core::ui::color::coloru_with_opacity;
 use warp_core::ui::theme::Fill as WarpThemeFill;
 use warp_core::ui::theme::color::internal_colors;
+use warpui::color::ColorU;
 use warpui::elements::{
     ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, DispatchEventResult, Element,
     EventHandler, Flex, MainAxisSize, ParentElement, Radius, Shrinkable, Text,
@@ -23,16 +24,21 @@ use crate::workspace::tab_settings::VerticalTabsDisplayGranularity;
 const STATE_GLYPH_SIZE: f32 = 12.;
 const COUNTER_GLYPH_SIZE: f32 = 10.;
 
-/// Row tint for agents that need the user (waiting or failed). `None` keeps the default row.
-pub(super) fn row_highlight_color(
-    terminal_view_id: EntityId,
-    app: &AppContext,
-) -> Option<WarpThemeFill> {
+/// Accent of a row whose agent needs the user (waiting or failed): the state color, full for
+/// the row border and tinted for its background. `None` keeps the default row.
+pub(super) fn row_attention_color(terminal_view_id: EntityId, app: &AppContext) -> Option<ColorU> {
     let snapshot = agent_snapshot(terminal_view_id, app)?;
     snapshot
         .state
         .needs_attention()
-        .then(|| snapshot.state.color(Appearance::as_ref(app).theme()).into())
+        .then(|| snapshot.state.color(Appearance::as_ref(app).theme()))
+}
+
+/// Background of an attention row. A plain tab color tint (15%) mixes with the group color
+/// behind the row into grey on dark themes, so the state color is stronger here; the light
+/// themes use a dark amber, which stays readable under the main text at these strengths.
+pub(super) fn attention_row_background(color: ColorU, is_selected_or_hovered: bool) -> ColorU {
+    coloru_with_opacity(color, if is_selected_or_hovered { 40 } else { 26 })
 }
 
 /// Whether a tab's own title (a rename or the `title=` of a `new_tab` URI) is the primary text

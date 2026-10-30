@@ -404,6 +404,7 @@ fn render_pane_row_element(
         is_in_multi_selection,
         is_in_multi_tab_selection,
         pane_color,
+        attention_color,
         badge_mouse_states: _,
         detail_hover_state,
         display_granularity,
@@ -431,7 +432,12 @@ fn render_pane_row_element(
             .with_padding(padding)
             .with_corner_radius(corner_radius);
 
-        if let Some(background) = pane_row_background(
+        if let Some(attention_color) = attention_color {
+            container = container.with_background_color(ward::attention_row_background(
+                attention_color,
+                is_selected || state.is_hovered(),
+            ));
+        } else if let Some(background) = pane_row_background(
             pane_color,
             is_selected,
             is_in_multi_selection,
@@ -442,12 +448,13 @@ fn render_pane_row_element(
             container = container.with_background(background);
         }
 
+        let border_fill = match attention_color {
+            Some(attention_color) => ElementFill::Solid(attention_color),
+            None if is_selected => internal_colors::fg_overlay_3(theme).into(),
+            None => ElementFill::None,
+        };
         let pane: Box<dyn Element> = container
-            .with_border(Border::all(1.).with_border_fill(if is_selected {
-                internal_colors::fg_overlay_3(theme).into()
-            } else {
-                ElementFill::None
-            }))
+            .with_border(Border::all(1.).with_border_fill(border_fill))
             .finish();
 
         // Pin indicator anchored at the visible pane's top-right corner. Pin
@@ -847,6 +854,8 @@ struct PaneProps<'a> {
     /// otherwise the single-pane menu.
     is_in_multi_tab_selection: bool,
     pane_color: Option<ThemeFill>,
+    /// Ward: state color of an agent that needs the user, drawn over `pane_color`.
+    attention_color: Option<ColorU>,
     badge_mouse_states: PaneRowBadgeMouseStates,
     detail_hover_state: VerticalTabsDetailHoverState,
     display_granularity: VerticalTabsDisplayGranularity,
@@ -4021,13 +4030,14 @@ impl<'a> PaneProps<'a> {
             pane_configuration.title().trim(),
             pane_configuration.title_secondary().trim(),
         );
-        // Highlight rows whose CLI agent needs the user, unless the row has its own color.
-        let mut pane_color = pane_row_state.pane_color;
-        if pane_color.is_none()
-            && let TypedPane::Terminal(terminal_pane) = &typed
-        {
-            pane_color = ward::row_highlight_color(terminal_pane.terminal_view(app).id(), app);
-        }
+        let pane_color = pane_row_state.pane_color;
+        // Ward: rows whose CLI agent needs the user get the state color over any tab color.
+        let attention_color = match &typed {
+            TypedPane::Terminal(terminal_pane) => {
+                ward::row_attention_color(terminal_pane.terminal_view(app).id(), app)
+            }
+            _ => None,
+        };
 
         Some(Self {
             pane_id,
@@ -4052,6 +4062,7 @@ impl<'a> PaneProps<'a> {
             is_in_multi_selection,
             is_in_multi_tab_selection,
             pane_color,
+            attention_color,
             badge_mouse_states: pane_row_state.badge_mouse_states,
             detail_hover_state,
             display_granularity,
