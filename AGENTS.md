@@ -256,3 +256,9 @@ When adding/editing match statements, avoid using the wildcard _ when at all pos
 This fork builds Ward (the OSS channel, `crate::features::is_fork_oss()`). Every change that adds
 a Ward feature or changes behavior compared to upstream Warp must update [WARD.md](WARD.md) in
 the same PR. Build and release notes live in [FORK.md](FORK.md).
+
+Every user-visible Ward change also adds a release note fragment `changes/<slug>.md` in the same
+PR: section (`new`, `improved`, `fixed`), a short Russian title, one to three sentences for the
+user and a picture in `docs/ward/screenshots/`. They become the "What's new" window of the next
+release. Format and rules: [changes/README.md](changes/README.md). Documentation, CI, refactoring
+and test-only changes get no fragment.
