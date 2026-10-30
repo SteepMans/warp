@@ -2,6 +2,7 @@
 //! stays easy to merge.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use warp_core::ui::color::coloru_with_opacity;
 use warpui::color::ColorU;
@@ -16,6 +17,7 @@ use warpui::{AppContext, EntityId, SingletonEntity, ViewContext};
 use super::Workspace;
 use crate::appearance::Appearance;
 use crate::features::FeatureFlag;
+use crate::pane_group::PanesLayout;
 use crate::tab::{SelectedTabColor, TabData};
 use crate::terminal::cli_agent_sessions::{CLIAgentSessionsModel, CLIAgentSessionsModelEvent};
 use crate::util::bindings::keybinding_name_to_display_string;
@@ -24,6 +26,7 @@ use crate::ward::attention::AttentionCounts;
 use crate::ward::claude_usage::usage::{self as claude_usage_text, UsageLevel};
 use crate::ward::codex_usage::rollout as codex_usage_text;
 use crate::ward::project_groups::{self, TabObservation};
+use crate::ward::uri_launch::{self, OpenedUriTab, UriTab};
 use crate::ward::{agent_state, attention, chimney, claude_usage, codex_usage};
 use crate::workspace::WorkspaceRegistry;
 use crate::workspace::action::WorkspaceAction;
@@ -87,6 +90,62 @@ pub(crate) fn ward_sync_chimney_bindings_in_all_windows(ctx: &mut AppContext) {
 }
 
 impl Workspace {
+    /// Opens the tab of a Ward `new_tab` URI and queues its command, which runs once the shell
+    /// has bootstrapped. With `add_tab` false the window was just created for this session and
+    /// its active tab is used.
+    pub(crate) fn ward_open_uri_tab(
+        &mut self,
+        tab: UriTab,
+        add_tab: bool,
+        ctx: &mut ViewContext<Self>,
+    ) -> Option<OpenedUriTab> {
+        let UriTab {
+            options,
+            title,
+            command,
+            ack,
+        } = tab;
+        if add_tab {
+            self.add_tab_with_pane_layout(
+                PanesLayout::SingleTerminal(Box::new(options)),
+                Arc::new(HashMap::new()),
+                title,
+                ctx,
+            );
+        } else if let Some(title) = title {
+            self.active_tab_pane_group()
+                .update(ctx, |pane_group, ctx| pane_group.set_title(&title, ctx));
+        }
+        let terminal_view = self.active_session_view(ctx)?;
+        let terminal_view_id = terminal_view.id();
+        let pane_uuid = self
+            .active_tab_pane_group()
+            .as_ref(ctx)
+            .terminal_pane_session_uuid(terminal_view_id, ctx)
+            .map(|uuid| chimney::bindings::uuid_hex(&uuid));
+        if let Some(command) = command {
+            if let Some(ack) = ack {
+                uri_launch::expect_command_sent(
+                    terminal_view_id,
+                    ack,
+                    pane_uuid.clone(),
+                    ctx.window_id(),
+                );
+                ctx.spawn(
+                    async {
+                        warpui::r#async::Timer::after(uri_launch::ACK_TIMEOUT).await;
+                    },
+                    move |_, _, _| uri_launch::expire_pending_ack(terminal_view_id),
+                );
+            }
+            terminal_view.update(ctx, |view, ctx| {
+                view.set_pending_command_queue(vec![command], ctx);
+            });
+        }
+        ctx.notify();
+        Some(OpenedUriTab { pane_uuid })
+    }
+
     /// Re-renders (tab row card chips) when a Chimney board was fetched.
     pub(super) fn ward_subscribe_to_chimney(ctx: &mut ViewContext<Self>) {
         if !ctx.has_singleton_model::<chimney::model::ChimneyModel>() {

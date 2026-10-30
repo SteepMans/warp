@@ -1887,6 +1887,7 @@ pub(crate) fn initialize_app(
         ward::chimney::model::init(ctx);
         ward::claude_usage::model::init(ctx);
         ward::codex_usage::model::init(ctx);
+        ward::uri_launch::init();
     }
 
     ctx.set_fallback_font_source_provider(|url| ::asset_cache::url_source(url));
