@@ -16,6 +16,8 @@ use warp_core::ui::theme::AnsiColorIdentifier;
 use warp_core::user_preferences::GetUserPreferences as _;
 use warpui::{AppContext, EntityId};
 
+use crate::app_state::{LeafContents, PaneNodeSnapshot};
+use crate::pane_group::PanesLayout;
 use crate::workspace::tab_group::TabGroupId;
 
 /// Private user preferences key holding the JSON-encoded [`ProjectGroupMap`].
@@ -23,6 +25,25 @@ const PREFERENCES_KEY: &str = "WardProjectGroups";
 
 /// Prefix of keys derived from a remote-control session name, so they never collide with paths.
 const REMOTE_CONTROL_KEY_PREFIX: &str = "rc:";
+
+/// Whether a new tab with this layout may join the group of the active tab: only tabs with a
+/// terminal. Settings and other non-terminal tabs stay outside groups so they neither sit
+/// between a project's agent tabs nor count in its header.
+pub fn layout_joins_tab_group(layout: &PanesLayout) -> bool {
+    fn has_terminal(node: &PaneNodeSnapshot) -> bool {
+        match node {
+            PaneNodeSnapshot::Leaf(leaf) => matches!(leaf.contents, LeafContents::Terminal(_)),
+            PaneNodeSnapshot::Branch(branch) => {
+                branch.children.iter().any(|(_, child)| has_terminal(child))
+            }
+        }
+    }
+    match layout {
+        PanesLayout::SingleTerminal(_) | PanesLayout::Template(_) => true,
+        PanesLayout::Snapshot(node) => has_terminal(node),
+        PanesLayout::AmbientAgent => false,
+    }
+}
 
 /// Normalizes a directory into a project key: forward slashes, no trailing slash, lowercase
 /// (Windows paths are case-insensitive).
