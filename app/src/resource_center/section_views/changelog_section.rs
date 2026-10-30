@@ -107,69 +107,6 @@ impl ChangelogSectionView {
         ctx.notify();
     }
 
-    /// Generate the changelog items for the 'New Features' section and add them to the content
-    ///
-    /// This is distinct from the additional sections because the 'New Features' section has
-    /// custom logic around displaying the header differently and displaying an image (if
-    /// available)
-    fn generate_new_features_section(
-        &self,
-        content: &mut Flex,
-        model: &ChangelogModel,
-        appearance: &Appearance,
-    ) {
-        let title = ChangelogHeader::NewFeatures.to_string();
-        let icon = icons::Icon::Gift;
-        let Some(markdown) = model.parsed_changelog.get(&title) else {
-            return;
-        };
-
-        // Section Title
-        if self.show_special_new_features_header {
-            content.add_child(render_special_changelog_header(
-                &title,
-                render_icon(icon, appearance.theme().terminal_colors().normal.red.into()),
-                appearance,
-            ));
-        } else {
-            content.add_child(render_basic_changelog_header(
-                &title,
-                render_icon(
-                    icon,
-                    appearance
-                        .theme()
-                        .sub_text_color(appearance.theme().surface_2()),
-                ),
-                appearance,
-            ));
-        }
-
-        // Image (if available)
-        if let Some(image_source) = &model.image {
-            content.add_child(
-                Container::new(
-                    ConstrainedBox::new(
-                        Image::new(image_source.clone(), CacheOption::BySize)
-                            .enable_animation_with_start_time(Instant::now())
-                            .finish(),
-                    )
-                    .with_max_height(200.)
-                    .with_max_width(350.)
-                    .finish(),
-                )
-                .with_margin_top(4.)
-                .finish(),
-            );
-        }
-
-        // Content
-        content.add_child(render_changelog_body(
-            markdown.clone(),
-            self.new_features_highlighted_link.clone(),
-            appearance,
-        ));
-    }
-
     /// Generate all of the supported changelog sections and add them to the content
     ///
     /// The supported sections are, in order:
@@ -177,15 +114,21 @@ impl ChangelogSectionView {
     /// * New features
     /// * Improvements
     /// * Bug fixes
+    ///
+    /// The first section present gets the special header after an update and the image (if
+    /// available), so a release without new features still shows both.
     fn generate_changelog_sections(
         &self,
         content: &mut Flex,
         model: &ChangelogModel,
         appearance: &Appearance,
     ) {
-        self.generate_new_features_section(content, model, appearance);
-
-        let additional_sections = [
+        let sections = [
+            (
+                ChangelogHeader::NewFeatures,
+                icons::Icon::Gift,
+                self.new_features_highlighted_link.clone(),
+            ),
             (
                 ChangelogHeader::Improvements,
                 icons::Icon::Tool,
@@ -198,23 +141,51 @@ impl ChangelogSectionView {
             ),
         ];
 
-        for (section, icon, link) in additional_sections {
+        let mut is_first = true;
+        for (section, icon, link) in sections {
             let title = section.to_string();
             let Some(markdown) = model.parsed_changelog.get(&title) else {
                 continue;
             };
 
             // Title
-            content.add_child(render_basic_changelog_header(
-                &title,
-                render_icon(
-                    icon,
-                    appearance
-                        .theme()
-                        .sub_text_color(appearance.theme().surface_2()),
-                ),
-                appearance,
-            ));
+            if is_first && self.show_special_new_features_header {
+                content.add_child(render_special_changelog_header(
+                    &title,
+                    render_icon(icon, appearance.theme().terminal_colors().normal.red.into()),
+                    appearance,
+                ));
+            } else {
+                content.add_child(render_basic_changelog_header(
+                    &title,
+                    render_icon(
+                        icon,
+                        appearance
+                            .theme()
+                            .sub_text_color(appearance.theme().surface_2()),
+                    ),
+                    appearance,
+                ));
+            }
+
+            // Image (if available)
+            if is_first && let Some(image_source) = &model.image {
+                content.add_child(
+                    Container::new(
+                        ConstrainedBox::new(
+                            Image::new(image_source.clone(), CacheOption::BySize)
+                                .enable_animation_with_start_time(Instant::now())
+                                .finish(),
+                        )
+                        .with_max_height(200.)
+                        .with_max_width(350.)
+                        .finish(),
+                    )
+                    .with_margin_top(4.)
+                    .finish(),
+                );
+            }
+            is_first = false;
 
             // Content
             content.add_child(render_changelog_body(markdown.clone(), link, appearance));
@@ -241,7 +212,7 @@ fn render_special_changelog_header(
                     Container::new(
                         appearance
                             .ui_builder()
-                            .span(title.to_ascii_uppercase())
+                            .span(title.to_uppercase())
                             .with_style(UiComponentStyles {
                                 font_color: Some(appearance.theme().failed_block_color().into()),
                                 font_weight: Some(Weight::Bold),

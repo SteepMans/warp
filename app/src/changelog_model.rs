@@ -208,6 +208,17 @@ pub enum ChangelogHeader {
 
 impl fmt::Display for ChangelogHeader {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // Ward titles its sections in Russian; the changelog model keys sections by title.
+        if crate::features::is_fork_oss() {
+            use crate::ward::changelog::{
+                FIXED_SECTION_TITLE, IMPROVED_SECTION_TITLE, NEW_SECTION_TITLE,
+            };
+            return f.write_str(match self {
+                ChangelogHeader::NewFeatures => NEW_SECTION_TITLE,
+                ChangelogHeader::Improvements => IMPROVED_SECTION_TITLE,
+                ChangelogHeader::BugFixes => FIXED_SECTION_TITLE,
+            });
+        }
         match self {
             ChangelogHeader::NewFeatures => write!(f, "New features"),
             ChangelogHeader::Improvements => write!(f, "Improvements"),
