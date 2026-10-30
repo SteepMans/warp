@@ -250,3 +250,9 @@ if FeatureFlag::YourNewFeature.is_enabled() {
 ### Exhaustive Matching
 
 When adding/editing match statements, avoid using the wildcard _ when at all possible. Exhaustive matching is helpful for ensuring that all variants are handled, especially when adding new variants to enums in the future.
+
+## Ward fork
+
+This fork builds Ward (the OSS channel, `crate::features::is_fork_oss()`). Every change that adds
+a Ward feature or changes behavior compared to upstream Warp must update [WARD.md](WARD.md) in
+the same PR. Build and release notes live in [FORK.md](FORK.md).
