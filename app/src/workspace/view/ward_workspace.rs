@@ -6,10 +6,11 @@ use std::collections::{HashMap, HashSet};
 use warp_core::ui::color::coloru_with_opacity;
 use warpui::color::ColorU;
 use warpui::elements::{
-    Container, CornerRadius, CrossAxisAlignment, DispatchEventResult, Element, EventHandler, Flex,
-    MainAxisSize, ParentElement, Radius, Text,
+    ChildAnchor, Container, CornerRadius, CrossAxisAlignment, DispatchEventResult, Element,
+    EventHandler, Flex, MainAxisSize, MouseStateHandle, ParentAnchor, ParentElement, Radius, Text,
 };
 use warpui::fonts::{Properties, Weight};
+use warpui::geometry::vector::vec2f;
 use warpui::{AppContext, EntityId, SingletonEntity, ViewContext};
 
 use super::Workspace;
@@ -20,8 +21,9 @@ use crate::terminal::cli_agent_sessions::{CLIAgentSessionsModel, CLIAgentSession
 use crate::util::bindings::keybinding_name_to_display_string;
 use crate::ward::agent_state::AgentState;
 use crate::ward::attention::AttentionCounts;
+use crate::ward::claude_usage::usage::{self as claude_usage_text, UsageLevel};
 use crate::ward::project_groups::{self, TabObservation};
-use crate::ward::{agent_state, attention, chimney};
+use crate::ward::{agent_state, attention, chimney, claude_usage};
 use crate::workspace::WorkspaceRegistry;
 use crate::workspace::action::WorkspaceAction;
 use crate::workspace::tab_group::TabGroup;
@@ -95,6 +97,17 @@ impl Workspace {
         );
     }
 
+    /// Re-renders the header usage chip when a Claude usage poll finished.
+    pub(super) fn ward_subscribe_to_claude_usage(ctx: &mut ViewContext<Self>) {
+        if !ctx.has_singleton_model::<claude_usage::model::ClaudeUsageModel>() {
+            return;
+        }
+        ctx.subscribe_to_model(
+            &claude_usage::model::ClaudeUsageModel::handle(ctx),
+            |_, _, _, ctx| ctx.notify(),
+        );
+    }
+
     fn ward_handle_chimney_event(
         &mut self,
         event: &chimney::model::ChimneyEvent,
@@ -108,8 +121,8 @@ impl Workspace {
     }
 
     /// Header pills with agent counts across all windows: "2 waiting · 1 error · 3 running ·
-    /// 1 done", followed by the agent overview button. Only waiting and error are colored;
-    /// clicking them jumps to the waiting agent.
+    /// 1 done", then the Claude subscription usage chip and the agent overview button. Only
+    /// waiting and error are colored; clicking them jumps to the waiting agent.
     pub(super) fn ward_render_attention_strip(
         &self,
         appearance: &Appearance,
@@ -164,6 +177,14 @@ impl Workspace {
                 shortcut.as_deref(),
                 appearance,
             ));
+        }
+        if let Some(usage_chip) = render_claude_usage_chip(
+            self.mouse_states.ward_claude_usage.clone(),
+            quiet,
+            appearance,
+            app,
+        ) {
+            strip.add_child(usage_chip);
         }
         strip.add_child(render_overview_button(
             crate::ward::overview::is_open(self.window_id),
@@ -398,6 +419,51 @@ impl Workspace {
         ctx.dispatch_global_action("workspace:save_app", ());
         ctx.notify();
     }
+}
+
+/// `5h 2% · 7d 60%`: Claude subscription usage, grey below 50%, then the warning and error
+/// colors of the attention pills. The tooltip has the reset times in local time. Hidden when
+/// turned off in the settings or without a fresh report (no credentials, 401).
+fn render_claude_usage_chip(
+    mouse_state: MouseStateHandle,
+    quiet: ColorU,
+    appearance: &Appearance,
+    app: &AppContext,
+) -> Option<Box<dyn Element>> {
+    if !claude_usage::is_enabled_by_user(app) {
+        return None;
+    }
+    let usage = claude_usage::model::model(app)?.usage()?;
+    let text = claude_usage_text::chip_text(usage)?;
+    let theme = appearance.theme();
+    let (color, opacity) = match claude_usage_text::usage_level(usage) {
+        UsageLevel::Normal => (quiet, 10),
+        UsageLevel::Warning => (AgentState::WaitingAnswer.color(theme), 13),
+        UsageLevel::Critical => (AgentState::Error.color(theme), 13),
+    };
+    let chip = Container::new(
+        Text::new_inline(text, appearance.ui_font_family(), 12.)
+            .with_color(color)
+            .with_style(Properties::default().weight(Weight::Semibold))
+            .finish(),
+    )
+    .with_horizontal_padding(8.)
+    .with_vertical_padding(3.)
+    .with_background(coloru_with_opacity(color, opacity))
+    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
+    .finish();
+    let tooltip = format!(
+        "Claude subscription usage\n{}",
+        claude_usage_text::tooltip_text(usage, chrono::Utc::now(), &chrono::Local)
+    );
+    Some(appearance.ui_builder().tool_tip_on_element(
+        tooltip,
+        mouse_state,
+        chip,
+        ParentAnchor::BottomMiddle,
+        ChildAnchor::TopMiddle,
+        vec2f(0., 4.),
+    ))
 }
 
 /// Header button that shows or hides the agent overview board.
