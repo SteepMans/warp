@@ -7,6 +7,8 @@ pub mod agent_state;
 pub mod attention;
 pub mod changelog;
 pub mod chimney;
+pub mod claude_launch;
+pub mod claude_usage;
 pub mod labels;
 pub mod metrics;
 pub mod overview;
