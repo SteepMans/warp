@@ -3230,6 +3230,7 @@ impl Workspace {
             me.handle_cli_agent_sessions_event(event, ctx);
         });
         Self::ward_subscribe_to_chimney(ctx);
+        Self::ward_subscribe_to_claude_usage(ctx);
 
         ctx.subscribe_to_model(
             &AgentNotificationsModel::handle(ctx),
@@ -4955,14 +4956,19 @@ impl Workspace {
 
     /// Adds a new terminal tab and runs `command` once its shell has bootstrapped, like a
     /// launch config command.
+    /// Ward: a Claude Code command gets its extra environment (`CLAUDE_CODE_NO_FLICKER`) in the
+    /// new pane's shell.
     fn add_terminal_tab_with_command(&mut self, command: String, ctx: &mut ViewContext<Self>) {
-        self.add_new_session_tab_internal_with_default_session_mode_behavior(
-            NewSessionSource::Tab,
-            Some(ctx.window_id()),
-            None,
-            None,
-            false,
-            DefaultSessionModeBehavior::Ignore,
+        let startup_directory =
+            self.get_new_tab_startup_directory(NewSessionSource::Tab, Some(ctx.window_id()), None, ctx);
+        self.add_tab_with_pane_layout(
+            PanesLayout::SingleTerminal(Box::new(NewTerminalOptions {
+                initial_directory: startup_directory,
+                env_vars: crate::ward::claude_launch::env_vars_for_command(&command, ctx),
+                ..Default::default()
+            })),
+            Arc::new(HashMap::new()),
+            None, /*custom_tab_title*/
             ctx,
         );
         if let Some(terminal_view) = self.active_session_view(ctx) {

@@ -1693,9 +1693,15 @@ impl PaneGroup {
                             },
                         )
                 };
+                // Ward: a resumed Claude Code session gets the same environment as a new one.
+                let env_vars = terminal_snapshot
+                    .cli_agent_resume_command
+                    .as_deref()
+                    .map(|command| crate::ward::claude_launch::env_vars_for_command(command, ctx))
+                    .unwrap_or_default();
                 let (terminal_view, terminal_manager) = PaneGroup::create_session(
                     startup_directory,
-                    HashMap::new(),
+                    env_vars,
                     uuid.0.as_slice(),
                     IsSharedSessionCreator::No,
                     resources,
