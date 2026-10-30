@@ -12,7 +12,8 @@ use warpui::elements::{
 };
 use warpui::fonts::{Properties, Weight};
 use warpui::geometry::vector::vec2f;
-use warpui::{AppContext, EntityId, SingletonEntity, ViewContext};
+use warpui::notification::UserNotification;
+use warpui::{AppContext, EntityId, SingletonEntity, ViewContext, WindowId};
 
 use super::Workspace;
 use crate::appearance::Appearance;
@@ -20,8 +21,12 @@ use crate::features::FeatureFlag;
 use crate::pane_group::PanesLayout;
 use crate::tab::{SelectedTabColor, TabData};
 use crate::terminal::cli_agent_sessions::{CLIAgentSessionsModel, CLIAgentSessionsModelEvent};
+use crate::terminal::session_settings::{NotificationsMode, SessionSettings};
 use crate::util::bindings::keybinding_name_to_display_string;
+use crate::view_components::{DismissibleToast, ToastFlavor, ToastLink};
 use crate::ward::agent_state::AgentState;
+use crate::ward::announcements::feed::{Announcement, Level};
+use crate::ward::announcements::{AnnouncementsEvent, AnnouncementsModel};
 use crate::ward::attention::AttentionCounts;
 use crate::ward::claude_usage::usage::{self as claude_usage_text, UsageLevel};
 use crate::ward::codex_usage::rollout as codex_usage_text;
@@ -177,6 +182,59 @@ impl Workspace {
             &codex_usage::model::CodexUsageModel::handle(ctx),
             |_, _, _, ctx| ctx.notify(),
         );
+    }
+
+    /// Shows new Ward announcements when a poll found some.
+    pub(super) fn ward_subscribe_to_announcements(ctx: &mut ViewContext<Self>) {
+        if !ctx.has_singleton_model::<AnnouncementsModel>() {
+            return;
+        }
+        ctx.subscribe_to_model(&AnnouncementsModel::handle(ctx), |me, _, event, ctx| {
+            let AnnouncementsEvent::Pending = event;
+            me.ward_show_pending_announcements(ctx);
+        });
+    }
+
+    /// Shows each pending announcement as a toast that stays until dismissed, plus a desktop
+    /// notification when Ward is in the background, and marks them as shown. Only the window
+    /// the user is in (or, with Ward in the background, the first window) shows them.
+    fn ward_show_pending_announcements(&mut self, ctx: &mut ViewContext<Self>) {
+        if !is_announcement_window(ctx.window_id(), ctx) {
+            return;
+        }
+        let pending = AnnouncementsModel::as_ref(ctx).pending().to_vec();
+        if pending.is_empty() {
+            return;
+        }
+        let notifications = &SessionSettings::as_ref(ctx).notifications;
+        let play_sound = notifications.play_notification_sound;
+        let send_desktop_notification = !ctx.windows().app_is_active()
+            && matches!(notifications.mode, NotificationsMode::Enabled);
+        for announcement in &pending {
+            let toast = announcement_toast(announcement);
+            self.toast_stack.update(ctx, |toast_stack, ctx| {
+                toast_stack.add_persistent_toast(toast, ctx);
+            });
+            if send_desktop_notification {
+                ctx.send_desktop_notification(
+                    UserNotification::new_with_sound(
+                        announcement.title.clone(),
+                        announcement.body.clone(),
+                        None,
+                        play_sound,
+                    ),
+                    |_, err, _| log::info!("Ward announcement notification failed: {err:?}"),
+                );
+            }
+            if announcement.level == Level::Critical {
+                ctx.request_user_attention();
+            }
+        }
+        let ids: Vec<_> = pending
+            .into_iter()
+            .map(|announcement| announcement.id)
+            .collect();
+        AnnouncementsModel::handle(ctx).update(ctx, |model, ctx| model.mark_shown(&ids, ctx));
     }
 
     fn ward_handle_chimney_event(
@@ -684,4 +742,40 @@ fn render_attention_pill(
             DispatchEventResult::StopPropagation
         })
         .finish()
+}
+
+/// The window that shows announcements: the active window, or the first window when Ward is in
+/// the background, so several windows do not show the same announcement.
+fn is_announcement_window(window_id: WindowId, app: &AppContext) -> bool {
+    let windows: Vec<_> = WorkspaceRegistry::as_ref(app)
+        .all_workspaces(app)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    match app
+        .windows()
+        .active_window()
+        .filter(|active| windows.contains(active))
+    {
+        Some(active) => active == window_id,
+        None => windows.iter().min() == Some(&window_id),
+    }
+}
+
+fn announcement_toast(announcement: &Announcement) -> DismissibleToast<WorkspaceAction> {
+    let text = if announcement.body.is_empty() {
+        announcement.title.clone()
+    } else {
+        format!("{}\n{}", announcement.title, announcement.body)
+    };
+    let flavor = match announcement.level {
+        Level::Critical => ToastFlavor::Error,
+        Level::Info | Level::Warning => ToastFlavor::Default,
+    };
+    let toast = DismissibleToast::new(text, flavor)
+        .with_object_id(format!("ward-announcement-{}", announcement.id));
+    match &announcement.url {
+        Some(url) => toast.with_link(ToastLink::new("Open".to_owned()).with_href(url.clone())),
+        None => toast,
+    }
 }
