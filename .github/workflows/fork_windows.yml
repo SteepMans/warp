@@ -59,7 +59,13 @@ jobs:
       - name: Install protoc
         shell: pwsh
         run: |
-          choco install protoc --no-progress -y
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'protoc.zip'
+          $dir = Join-Path $env:RUNNER_TEMP 'protoc'
+          Invoke-WebRequest -Uri 'https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-win64.zip' -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $dir
+          "PROTOC=$dir\bin\protoc.exe" >> $env:GITHUB_ENV
+          & "$dir\bin\protoc.exe" --version
           "${env:ProgramFiles(x86)}\Inno Setup 6" >> $env:GITHUB_PATH
 
       - name: Pick version
