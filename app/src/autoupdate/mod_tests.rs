@@ -427,7 +427,11 @@ fn test_failed_download_preserves_previous_successful_download() {
                 .expect("downloaded_update should still reference the v2 download");
             assert_eq!(download.version.version, v2);
             assert_eq!(download.update_id, "id_v2");
-            assert_eq!(autoupdate.stage, AutoupdateStage::NoUpdateAvailable);
+            // The v2 download stays ready to install.
+            assert!(matches!(
+                &autoupdate.stage,
+                AutoupdateStage::UpdateReady { update_id, .. } if update_id == "id_v2"
+            ));
 
             // Re-checking for v2 should return Yes (already downloaded).
             let result =
@@ -624,6 +628,40 @@ fn test_last_check_result_is_recorded() {
                     .map(|v| v.version.as_str()),
                 Some("v0.2023.05.15.08.04.stable_01")
             );
+        });
+    });
+}
+
+/// A failed check after a successful download keeps the update ready to install, so the update
+/// button does not disappear until the next successful check.
+#[test]
+fn test_failed_check_keeps_downloaded_update_ready() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|ctx| AppExecutionMode::new(ExecutionMode::App, false, ctx));
+        let autoupdate_state = initialize_app(&mut app);
+
+        app.update_model(&autoupdate_state, |autoupdate, ctx| {
+            ChannelState::set_app_version(Some("v0.2023.05.15.08.04.stable_01"));
+            autoupdate.on_download_update_complete(
+                RequestType::Poll,
+                make_version_info("v0.2023.05.15.08.04.stable_02", false),
+                "id_v2".to_string(),
+                Ok(DownloadReady::Yes),
+                ctx,
+            );
+
+            autoupdate.on_update_check_complete(
+                RequestType::Poll,
+                "check_id".to_string(),
+                Err(anyhow!("simulated network failure")),
+                false,
+                ctx,
+            );
+
+            assert!(matches!(
+                &autoupdate.stage,
+                AutoupdateStage::UpdateReady { update_id, .. } if update_id == "id_v2"
+            ));
         });
     });
 }
