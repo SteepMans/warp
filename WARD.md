@@ -17,6 +17,14 @@ Claude Code и Codex. Здесь перечислено всё, чем Ward от
   в описании exe, в установщике, ярлыках и контекстном меню. Внутренние идентификаторы остаются
   `WarpOss` (`dev.warp.WarpOss`, `%LOCALAPPDATA%\warp\WarpOss`, `warposs://`, AppId
   `warp-terminal-oss`), поэтому Ward ставится рядом с официальным Warp и не трогает его данные.
+- Своя иконка: буква W цвета тёмных углей (оранжевый `#FF7A3D` и свечение `#FFB547` на угольном
+  `#1A1412`, как в теме Ward Ember) поверх сетки старой иконки OSS. Лежит на месте иконки канала
+  OSS (`app/channels/oss/icon/no-padding/icon.ico` с размерами 16–256 и `512x512.png`), поэтому
+  попадает в exe, окно, панель задач, ярлыки, контекстное меню и установщик.
+- Установщик OSS показывает свои картинки `script/windows/installer-images/ward-banner.bmp`
+  (202×385) и `ward-logo.bmp` (58×58), адрес поддержки — репозиторий форка. Выбор идёт по
+  `ReleaseChannel == "oss"` в `windows-installer.iss`, остальные каналы берут картинки Warp.
+- На странице About вместо логотипа Warp логотип Ward (`bundled/svg/ward-logo-with-*-title.svg`).
 - About показывает сведения о форке: репозиторий, адрес манифеста обновлений, «Check for
   updates» и ссылку What's new.
 
