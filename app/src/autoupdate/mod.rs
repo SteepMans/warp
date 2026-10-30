@@ -425,6 +425,18 @@ impl AutoupdateState {
         Ok(current_version > new_version)
     }
 
+    /// The stage after a failed check or download: an update downloaded earlier stays ready to
+    /// install, so a flaky network does not take the update button away.
+    fn stage_after_failed_request(&self) -> AutoupdateStage {
+        match &self.downloaded_update {
+            Some(download) => AutoupdateStage::UpdateReady {
+                new_version: download.version.clone(),
+                update_id: download.update_id.clone(),
+            },
+            None => AutoupdateStage::NoUpdateAvailable,
+        }
+    }
+
     fn on_update_check_complete(
         &mut self,
         request_type: RequestType,
@@ -499,7 +511,7 @@ impl AutoupdateState {
                 // We commonly get errors as the autoupdate code runs when a laptop wakes up
                 // briefly while asleep, but the network call to check for updates gets cancelled
                 // when returning to sleep. So we fail silently and wait for the next update poll.
-                self.stage = AutoupdateStage::NoUpdateAvailable;
+                self.stage = self.stage_after_failed_request();
                 log::warn!("Error checking for update {e:#}");
             }
         };
@@ -588,7 +600,7 @@ impl AutoupdateState {
                 // We commonly get errors as the autoupdate code runs when a laptop wakes up
                 // briefly while asleep, but the network call to download gets cancelled when
                 // returning to sleep. So we fail silently and wait for the next update poll.
-                self.stage = AutoupdateStage::NoUpdateAvailable;
+                self.stage = self.stage_after_failed_request();
                 Err(e)
             }
         };
