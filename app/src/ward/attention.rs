@@ -3,12 +3,13 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::Duration;
 
 use instant::Instant;
-use warpui::{AppContext, EntityId, SingletonEntity, ViewHandle};
+use warpui::{AppContext, EntityId, SingletonEntity, ViewHandle, WeakViewHandle};
 
-use super::agent_state::{AgentSnapshot, AgentState, agent_snapshot};
+use super::agent_state::{self, AgentSnapshot, AgentState, agent_snapshot};
 use super::labels::{AgentLabels, agent_labels};
 use crate::terminal::TerminalView;
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
@@ -60,25 +61,6 @@ pub fn all_agent_entries(app: &AppContext) -> Vec<AgentEntry> {
         }
     }
     entries
-}
-
-/// The entry of one agent, found in any window; `None` when the terminal has no agent.
-pub fn agent_entry_by_id(terminal_view_id: EntityId, app: &AppContext) -> Option<AgentEntry> {
-    if !crate::features::is_fork_oss() {
-        return None;
-    }
-    WorkspaceRegistry::as_ref(app)
-        .all_workspaces(app)
-        .iter()
-        .flat_map(|(_, workspace)| {
-            workspace
-                .as_ref(app)
-                .tab_views()
-                .flat_map(|pane_group| pane_group.as_ref(app).terminal_views(app))
-                .collect::<Vec<_>>()
-        })
-        .find(|terminal_view| terminal_view.id() == terminal_view_id)
-        .and_then(|terminal_view| agent_entry(&terminal_view, app))
 }
 
 fn agent_entry(terminal_view: &ViewHandle<TerminalView>, app: &AppContext) -> Option<AgentEntry> {
@@ -158,8 +140,102 @@ pub fn next_jump_target(order: &[EntityId], current: Option<EntityId>) -> Option
 }
 
 /// The most urgent agent other than `current`: what the footer of `current` offers as "Next".
-pub fn next_other_target(order: &[EntityId], current: EntityId) -> Option<EntityId> {
-    order.iter().copied().find(|id| *id != current)
+pub fn next_other_target(
+    order: impl IntoIterator<Item = EntityId>,
+    current: EntityId,
+) -> Option<EntityId> {
+    order.into_iter().find(|id| *id != current)
+}
+
+/// Longest time a cached jump order is used without a status change. Closing a tab does not
+/// change any status, so a closed agent may be offered for at most this long.
+const JUMP_ORDER_MAX_AGE: Duration = Duration::from_secs(1);
+
+/// A value derived from all agents, kept until [`agent_state::generation`] changes or it gets
+/// older than [`JUMP_ORDER_MAX_AGE`].
+struct GenerationCache<T> {
+    entry: Option<(u64, Instant, Rc<[T]>)>,
+}
+
+impl<T> GenerationCache<T> {
+    const fn new() -> Self {
+        Self { entry: None }
+    }
+
+    fn get_or_build(
+        &mut self,
+        generation: u64,
+        now: Instant,
+        build: impl FnOnce() -> Vec<T>,
+    ) -> Rc<[T]> {
+        if let Some((built_generation, built_at, value)) = &self.entry
+            && *built_generation == generation
+            && now.saturating_duration_since(*built_at) < JUMP_ORDER_MAX_AGE
+        {
+            return value.clone();
+        }
+        let value: Rc<[T]> = build().into();
+        self.entry = Some((generation, now, value.clone()));
+        value
+    }
+
+    fn clear(&mut self) {
+        self.entry = None;
+    }
+}
+
+/// The jump order with the terminals it points at, so the footer does not have to look them up
+/// through every window again.
+fn cached_jump_targets(app: &AppContext) -> Rc<[(EntityId, WeakViewHandle<TerminalView>)]> {
+    JUMP_ORDER.with(|cache| {
+        cache
+            .borrow_mut()
+            .get_or_build(agent_state::generation(), Instant::now(), || {
+                build_jump_targets(app)
+            })
+    })
+}
+
+fn build_jump_targets(app: &AppContext) -> Vec<(EntityId, WeakViewHandle<TerminalView>)> {
+    let mut snapshots = Vec::new();
+    let mut views = HashMap::new();
+    for (_, workspace) in WorkspaceRegistry::as_ref(app).all_workspaces(app) {
+        for pane_group in workspace.as_ref(app).tab_views() {
+            for terminal_view in pane_group.as_ref(app).terminal_views(app) {
+                if let Some(snapshot) = agent_snapshot(terminal_view.id(), app) {
+                    snapshots.push((snapshot.terminal_view_id, snapshot.state, snapshot.in_state));
+                    views.insert(terminal_view.id(), terminal_view.downgrade());
+                }
+            }
+        }
+    }
+    jump_order(&snapshots)
+        .into_iter()
+        .filter_map(|id| views.remove(&id).map(|view| (id, view)))
+        .collect()
+}
+
+/// The entry of the most urgent agent other than `current`, for the "Next" chip of the footer.
+/// The footer renders on every output of its terminal, so this reuses the jump order until an
+/// agent status changes instead of walking all terminals of all windows each time.
+pub fn next_other_waiting_entry(current: EntityId, app: &AppContext) -> Option<AgentEntry> {
+    if !crate::features::is_fork_oss() {
+        return None;
+    }
+    for attempt in 0..2 {
+        let targets = cached_jump_targets(app);
+        let target = next_other_target(targets.iter().map(|(id, _)| *id), current)?;
+        let view = targets
+            .iter()
+            .find_map(|(id, view)| (*id == target).then_some(view))?;
+        match view.upgrade(app) {
+            Some(view) => return agent_entry(&view, app),
+            // The terminal is gone; rebuild the order once without it.
+            None if attempt == 0 => JUMP_ORDER.with(|cache| cache.borrow_mut().clear()),
+            None => return None,
+        }
+    }
+    None
 }
 
 /// Status filter of the vertical tabs panel.
@@ -206,6 +282,8 @@ struct JumpState {
 }
 
 thread_local! {
+    static JUMP_ORDER: RefCell<GenerationCache<(EntityId, WeakViewHandle<TerminalView>)>> =
+        const { RefCell::new(GenerationCache::new()) };
     static STATUS_FILTER: RefCell<AgentStatusFilter> = RefCell::new(AgentStatusFilter::All);
     static JUMP: RefCell<JumpState> = RefCell::new(JumpState::default());
     static LAST_NOTIFIED: RefCell<HashMap<EntityId, Instant>> = RefCell::new(HashMap::new());
