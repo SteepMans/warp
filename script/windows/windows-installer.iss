@@ -3,21 +3,31 @@
 #include "environment.iss"
 
 #define MyAppPublisher "Denver Technologies, Inc."
-#define MyAppURL "https://www.warp.dev/"
+#ifndef ReleaseChannel
+  #define ReleaseChannel "dev"
+#endif
+#if ReleaseChannel == "oss"
+  #define MyAppURL "https://github.com/SteepMans/warp"
+  #define WizardImagePrefix "ward"
+#else
+  #define MyAppURL "https://www.warp.dev/"
+  #define WizardImagePrefix "warp"
+#endif
 #ifndef MyAppName
   #define MyAppName "WarpDev"
 #endif
 #ifndef MyAppDisplayName
-  #define MyAppDisplayName MyAppName
+  #if ReleaseChannel == "oss"
+    #define MyAppDisplayName "Ward"
+  #else
+    #define MyAppDisplayName MyAppName
+  #endif
 #endif
 #ifndef MyAppVersion
   #define MyAppVersion "0.1.0"
 #endif
 #ifndef MyAppExeName
   #define MyAppExeName "dev.exe"
-#endif
-#ifndef ReleaseChannel
-  #define ReleaseChannel "dev"
 #endif
 #ifndef TargetProfileDir
   #define TargetProfileDir "target\release-lto-debug_assertions"
@@ -62,8 +72,9 @@ OutputBaseFilename={#OutputName}
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
-WizardSmallImageFile="installer-images\warp-logo.bmp"
-WizardImageFile="installer-images\warp-banner.bmp"
+; The OSS channel (Ward) ships its own wizard images; other channels keep the Warp ones.
+WizardSmallImageFile="installer-images\{#WizardImagePrefix}-logo.bmp"
+WizardImageFile="installer-images\{#WizardImagePrefix}-banner.bmp"
 SetupIconFile="..\..\app\channels\{#ReleaseChannel}\icon\no-padding\icon.ico"
 UninstallDisplayIcon="{app}\icon.ico"
 ; Force close previous Warp if it hasn't shut down yet.
