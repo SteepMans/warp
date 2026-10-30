@@ -26,7 +26,7 @@ Claude Code и Codex. Здесь перечислено всё, чем Ward от
   `ReleaseChannel == "oss"` в `windows-installer.iss`, остальные каналы берут картинки Warp.
 - На странице About вместо логотипа Warp логотип Ward (`bundled/svg/ward-logo-with-*-title.svg`).
 - About показывает сведения о форке: репозиторий, адрес манифеста обновлений, «Check for
-  updates» и ссылку What's new.
+  updates» (открывает страницу Updates и запускает проверку) и ссылку What's new.
 
 ## Что убрано из Warp
 
@@ -204,6 +204,22 @@ ANSI по оттенку и то, что жёлтый (агент ждёт вв�
 
 - Скачанное обновление показывается кнопкой «Update Ward» в шапке: меню аватара Warp, где оно
   обычно появляется, в Ward убрано.
+- **Страница Settings → Updates** (после About, только в OSS; команда палитры «Open Settings:
+  Updates»). Показывает установленную версию с копированием, канал и адрес манифеста, последнюю
+  версию из манифеста, её дату и коммит и до пяти заметок из её `changelog.json`, ссылки на
+  полное «Что нового» установленной версии и на все изменения. Статус обновления берётся из
+  `AutoupdateState` и перерисовывается при каждом его изменении: «Checking for updates…»,
+  «Downloading <версия>…», «Ready to install: <версия>» с кнопкой «Install and restart»,
+  «Up to date», «Error: <причина>» с «Retry», «<версия> is installed, restart Ward to use it» с
+  «Restart»; ниже «Last checked N min ago». Причина ошибки и время последней проверки хранятся в
+  `AutoupdateState` только для показа, расписание проверок Warp не меняется.
+- **«Check now» всегда отвечает.** Раньше ручная проверка, пока шла другая проверка или
+  загрузка, молча выбрасывалась очередью. Теперь, если проверка или загрузка идёт, страница
+  показывает её статус и пишет «Already in progress»; проверка, закончившаяся меньше 5 секунд
+  назад, не повторяется («Checked a few seconds ago»); иначе запускается ручная проверка.
+  Команда палитры «Check for updates» и ссылка на About в Ward открывают эту страницу и делают
+  то же самое. Логика — `app/src/ward/updates.rs`, страница —
+  `app/src/settings_view/updates_page.rs`.
 - Автообновление из своего манифеста
   `https://chimney.steep-man.ru/warp-fork/windows/stable/manifest.json` вместо серверов Warp
   (`app/src/autoupdate/fork_manifest.rs`).
