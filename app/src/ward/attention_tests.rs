@@ -1,4 +1,5 @@
 use super::*;
+use crate::terminal::cli_agent_sessions::CLIAgentSessionStatus;
 
 const MINUTE: Duration = Duration::from_secs(60);
 
@@ -110,8 +111,55 @@ fn claim_notification_throttles_per_agent() {
 fn next_other_target_skips_the_current_agent() {
     let a = EntityId::from_usize(1);
     let b = EntityId::from_usize(2);
-    assert_eq!(next_other_target(&[a, b], a), Some(b));
-    assert_eq!(next_other_target(&[a, b], b), Some(a));
-    assert_eq!(next_other_target(&[a], a), None);
-    assert_eq!(next_other_target(&[], a), None);
+    assert_eq!(next_other_target([a, b], a), Some(b));
+    assert_eq!(next_other_target([a, b], b), Some(a));
+    assert_eq!(next_other_target([a], a), None);
+    assert_eq!(next_other_target([], a), None);
+}
+
+#[test]
+fn generation_cache_rebuilds_only_on_generation_change_or_age() {
+    let mut cache = GenerationCache::new();
+    let builds = std::cell::Cell::new(0);
+    let build = || {
+        builds.set(builds.get() + 1);
+        vec![builds.get()]
+    };
+    let start = Instant::now();
+
+    assert_eq!(&*cache.get_or_build(1, start, build), &[1]);
+    // Footer renders between status changes reuse the order.
+    for _ in 0..100 {
+        assert_eq!(&*cache.get_or_build(1, start, build), &[1]);
+    }
+    assert_eq!(builds.get(), 1);
+
+    // A status change rebuilds it right away.
+    assert_eq!(&*cache.get_or_build(2, start, build), &[2]);
+    // So does age, for changes that are not status changes (a closed tab).
+    assert_eq!(
+        &*cache.get_or_build(2, start + JUMP_ORDER_MAX_AGE, build),
+        &[3]
+    );
+    cache.clear();
+    assert_eq!(
+        &*cache.get_or_build(2, start + JUMP_ORDER_MAX_AGE, build),
+        &[4]
+    );
+    assert_eq!(builds.get(), 4);
+}
+
+#[test]
+fn agent_status_changes_bump_the_generation() {
+    let terminal_view_id = EntityId::new();
+    let before = agent_state::generation();
+    agent_state::observe_status(terminal_view_id, &CLIAgentSessionStatus::InProgress);
+    let after_start = agent_state::generation();
+    if !crate::features::is_fork_oss() {
+        assert_eq!(after_start, before);
+        return;
+    }
+    assert_ne!(after_start, before);
+    agent_state::forget(terminal_view_id);
+    assert_ne!(agent_state::generation(), after_start);
 }

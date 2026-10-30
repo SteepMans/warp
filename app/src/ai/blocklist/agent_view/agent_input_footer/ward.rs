@@ -11,7 +11,7 @@ use warpui::{AppContext, EntityId, SingletonEntity, View, ViewContext};
 
 use crate::appearance::Appearance;
 use crate::util::bindings::keybinding_name_to_display_string;
-use crate::ward::attention::{self, jump_order, next_other_target};
+use crate::ward::attention;
 use crate::ward::chimney::model::ChimneyModel;
 use crate::ward::labels::clip_chars;
 use crate::workspace::WorkspaceAction;
@@ -36,15 +36,7 @@ pub(super) fn render_next_waiting_chip(
     if !crate::features::is_fork_oss() {
         return None;
     }
-    // The order only needs states; labels are built for the one agent the chip shows.
-    let order = jump_order(
-        &attention::all_agents(app)
-            .iter()
-            .map(|agent| (agent.terminal_view_id, agent.state, agent.in_state))
-            .collect::<Vec<_>>(),
-    );
-    let target = next_other_target(&order, terminal_view_id)?;
-    let entry = attention::agent_entry_by_id(target, app)?;
+    let entry = attention::next_other_waiting_entry(terminal_view_id, app)?;
     let theme = appearance.theme();
     let color = entry.snapshot.state.color(theme);
     let font = appearance.ui_font_family();

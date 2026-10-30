@@ -2,7 +2,7 @@
 //! client-side facts the plugin protocol does not carry: when the status last changed, the last
 //! tool the agent finished and whether the user has seen a completed run.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -247,6 +247,7 @@ impl TrackedAgent {
         if self.kind == kind {
             return;
         }
+        bump_generation();
         self.kind = kind;
         self.touch();
         self.changed_at = now;
@@ -257,6 +258,18 @@ impl TrackedAgent {
 thread_local! {
     // UI state lives on the main thread; tests get their own copy per test thread.
     static TRACKED: RefCell<HashMap<EntityId, TrackedAgent>> = RefCell::new(HashMap::new());
+    static GENERATION: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Changes whenever an agent session is started, updated or forgotten, or the coarse status of
+/// a tracked agent changes. Caches derived from all agents (such as the jump order) are valid
+/// while it stays the same.
+pub fn generation() -> u64 {
+    GENERATION.with(Cell::get)
+}
+
+fn bump_generation() {
+    GENERATION.with(|generation| generation.set(generation.get().wrapping_add(1)));
 }
 
 fn with_tracked<R>(
@@ -266,9 +279,10 @@ fn with_tracked<R>(
 ) -> R {
     TRACKED.with(|tracked| {
         let mut tracked = tracked.borrow_mut();
-        let entry = tracked
-            .entry(terminal_view_id)
-            .or_insert_with(|| TrackedAgent::new(kind, Instant::now()));
+        let entry = tracked.entry(terminal_view_id).or_insert_with(|| {
+            bump_generation();
+            TrackedAgent::new(kind, Instant::now())
+        });
         f(entry)
     })
 }
@@ -279,6 +293,7 @@ pub fn observe_status(terminal_view_id: EntityId, status: &CLIAgentSessionStatus
         return;
     }
     let kind = StatusKind::of(status);
+    bump_generation();
     with_tracked(terminal_view_id, kind, |agent| {
         agent.touch();
         agent.observe(kind, Instant::now())
@@ -295,6 +310,7 @@ pub fn observe_event(
         return;
     }
     let kind = StatusKind::of(status);
+    bump_generation();
     with_tracked(terminal_view_id, kind, |agent| {
         match &event.event {
             // A new turn starts without tools.
@@ -322,6 +338,7 @@ pub fn observe_event(
 
 /// Forgets a session that ended.
 pub fn forget(terminal_view_id: EntityId) {
+    bump_generation();
     TRACKED.with(|tracked| tracked.borrow_mut().remove(&terminal_view_id));
 }
 
