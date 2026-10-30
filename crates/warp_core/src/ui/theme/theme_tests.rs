@@ -342,3 +342,22 @@ fn infer_from_foreground_color_test() {
         ColorScheme::DarkOnLight
     );
 }
+
+#[test]
+fn ansi_color_identifier_ignores_case() {
+    for raw in ["cyan", "Cyan", "CYAN"] {
+        assert_eq!(
+            serde_yaml::from_str::<AnsiColorIdentifier>(raw).unwrap(),
+            AnsiColorIdentifier::Cyan
+        );
+    }
+    assert_eq!(
+        serde_json::from_str::<AnsiColorIdentifier>("\"Magenta\"").unwrap(),
+        AnsiColorIdentifier::Magenta
+    );
+    assert_eq!(
+        serde_yaml::to_string(&AnsiColorIdentifier::Cyan).unwrap().trim(),
+        "cyan"
+    );
+    assert!(serde_yaml::from_str::<AnsiColorIdentifier>("teal").is_err());
+}

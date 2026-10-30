@@ -536,14 +536,23 @@ impl AnsiColors {
 )]
 #[serde(rename_all = "lowercase")]
 #[strum(ascii_case_insensitive)]
+// Written lowercase; the aliases accept hand-written configs with `color: Cyan` or `CYAN`.
 pub enum AnsiColorIdentifier {
+    #[serde(alias = "Black", alias = "BLACK")]
     Black,
+    #[serde(alias = "Red", alias = "RED")]
     Red,
+    #[serde(alias = "Green", alias = "GREEN")]
     Green,
+    #[serde(alias = "Yellow", alias = "YELLOW")]
     Yellow,
+    #[serde(alias = "Blue", alias = "BLUE")]
     Blue,
+    #[serde(alias = "Magenta", alias = "MAGENTA")]
     Magenta,
+    #[serde(alias = "Cyan", alias = "CYAN")]
     Cyan,
+    #[serde(alias = "White", alias = "WHITE")]
     White,
 }
 
