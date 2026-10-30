@@ -50,6 +50,8 @@ use crate::util::bindings;
 use crate::view_components::dropdown::DropdownAction;
 use crate::view_components::{Dropdown, SubmittableTextInput, SubmittableTextInputEvent};
 use crate::ward::chimney as ward_chimney;
+use crate::ward::claude_launch as ward_claude_launch;
+use crate::ward::claude_usage as ward_claude_usage;
 use crate::{TelemetryEvent, send_telemetry_from_ctx};
 
 const PAGE_TITLE: &str = "Third party CLI agents";
@@ -257,6 +259,8 @@ impl CLIAgentsPageView {
             Box::new(CLIAgentSubmitRichInputWidget::default()),
             Box::new(CLIAgentCommandsWidget),
             Box::new(CLIAgentToolbarLayoutWidget),
+            Box::new(ClaudeUsageChipWidget::default()),
+            Box::new(ClaudeNoFlickerWidget::default()),
             Box::new(ChimneyWidget::default()),
         ];
         PageType::new_uncategorized(widgets, Some(PageTitle::new(PAGE_TITLE)))
@@ -372,6 +376,10 @@ pub enum CLIAgentsPageAction {
     RemoveChimneyToken,
     /// Ward: removes the Chimney service account email and password from the secure storage.
     RemoveChimneyAccount,
+    /// Ward: shows or hides the Claude subscription usage chip in the header.
+    ToggleClaudeUsageChip,
+    /// Ward: starts Claude Code tabs with `CLAUDE_CODE_NO_FLICKER=1`.
+    ToggleClaudeNoFlicker,
 }
 
 impl TypedActionView for CLIAgentsPageView {
@@ -449,6 +457,19 @@ impl TypedActionView for CLIAgentsPageView {
                 ward_chimney::set_email("", ctx);
                 ward_chimney::set_password("", ctx);
                 Self::chimney_credentials_changed(ctx);
+            }
+            CLIAgentsPageAction::ToggleClaudeUsageChip => {
+                let enabled = ward_claude_usage::is_enabled_by_user(ctx);
+                ward_claude_usage::set_enabled_by_user(!enabled, ctx);
+                // Turning the chip on fetches now instead of at the next poll; turning it off
+                // re-renders the headers without it.
+                ward_claude_usage::model::refresh(ctx);
+                ctx.notify();
+            }
+            CLIAgentsPageAction::ToggleClaudeNoFlicker => {
+                let enabled = ward_claude_launch::is_no_flicker_enabled(ctx);
+                ward_claude_launch::set_no_flicker_enabled(!enabled, ctx);
+                ctx.notify();
             }
         }
     }
@@ -951,6 +972,131 @@ impl SettingsWidget for CLIAgentToolbarLayoutWidget {
         }
 
         render_toolbar_layout_editor(&view.cli_agent_toolbar_inline_editor, appearance)
+    }
+}
+
+/// Ward (OSS build): a toggle with a description underneath, for the Ward settings stored in the
+/// private user preferences.
+fn render_ward_toggle(
+    label: &str,
+    description: &str,
+    is_enabled: bool,
+    switch_state: SwitchStateHandle,
+    action: CLIAgentsPageAction,
+    appearance: &Appearance,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    Flex::column()
+        .with_child(build_toggle_element(
+            render_body_item_label::<CLIAgentsPageAction>(
+                label.to_owned(),
+                Some(styles::header_font_color(true, app)),
+                None,
+                LocalOnlyIconState::Hidden,
+                ToggleState::Enabled,
+                appearance,
+            ),
+            render_ai_feature_switch(switch_state, is_enabled, true, action, app),
+            appearance,
+            None,
+        ))
+        .with_child(
+            appearance
+                .ui_builder()
+                .paragraph(description.to_owned())
+                .with_style(UiComponentStyles {
+                    font_size: Some(appearance.ui_font_size()),
+                    font_color: Some(styles::description_font_color(true, app).into()),
+                    margin: Some(
+                        Coords::default()
+                            .top(styles::DESCRIPTION_NEGATIVE_MARGIN_OFFSET)
+                            .bottom(styles::DESCRIPTION_MARGIN_BOTTOM)
+                            .right(styles::TOGGLE_WIDTH_MARGIN),
+                    ),
+                    ..Default::default()
+                })
+                .build()
+                .finish(),
+        )
+        .finish()
+}
+
+/// Ward (OSS build): the Claude subscription usage chip in the header.
+#[derive(Default)]
+struct ClaudeUsageChipWidget {
+    toggle: SwitchStateHandle,
+}
+
+impl SettingsWidget for ClaudeUsageChipWidget {
+    type View = CLIAgentsPageView;
+
+    fn search_terms(&self) -> &str {
+        "claude code subscription usage limit quota 5h 7d weekly chip header ward"
+    }
+
+    fn should_render(&self, _app: &AppContext) -> bool {
+        crate::features::is_fork_oss()
+    }
+
+    fn render(
+        &self,
+        _view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        if !self.should_render(app) {
+            return Empty::new().finish();
+        }
+        render_ward_toggle(
+            "Show Claude subscription usage",
+            "Shows the 5-hour and 7-day Claude limits in the header, e.g. 5h 2% \u{b7} 7d 60%. \
+             Ward reads the Claude Code sign-in from ~/.claude/.credentials.json every 5 minutes \
+             and only sends it to api.anthropic.com. Hidden when Claude Code is not signed in.",
+            ward_claude_usage::is_enabled_by_user(app),
+            self.toggle.clone(),
+            CLIAgentsPageAction::ToggleClaudeUsageChip,
+            appearance,
+            app,
+        )
+    }
+}
+
+/// Ward (OSS build): Claude Code's fullscreen renderer in the Claude Code tabs Ward starts.
+#[derive(Default)]
+struct ClaudeNoFlickerWidget {
+    toggle: SwitchStateHandle,
+}
+
+impl SettingsWidget for ClaudeNoFlickerWidget {
+    type View = CLIAgentsPageView;
+
+    fn search_terms(&self) -> &str {
+        "claude code fullscreen renderer no flicker flickering CLAUDE_CODE_NO_FLICKER ward"
+    }
+
+    fn should_render(&self, _app: &AppContext) -> bool {
+        crate::features::is_fork_oss()
+    }
+
+    fn render(
+        &self,
+        _view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        if !self.should_render(app) {
+            return Empty::new().finish();
+        }
+        render_ward_toggle(
+            "Claude Code fullscreen renderer (no flicker)",
+            "Starts Claude Code tabs opened from the + menu, from Chimney cards and restored \
+             sessions with CLAUDE_CODE_NO_FLICKER=1. Applies to tabs opened after the change.",
+            ward_claude_launch::is_no_flicker_enabled(app),
+            self.toggle.clone(),
+            CLIAgentsPageAction::ToggleClaudeNoFlicker,
+            appearance,
+            app,
+        )
     }
 }
 
