@@ -88,6 +88,22 @@ pub enum ThemeKind {
     PinkCity,
     #[schemars(description = "Marble")]
     Marble,
+    #[schemars(description = "Ward Ember")]
+    WardEmber,
+    #[schemars(description = "Ward Abyss")]
+    WardAbyss,
+    #[schemars(description = "Ward Aurora")]
+    WardAurora,
+    #[schemars(description = "Ward Synthwave")]
+    WardSynthwave,
+    #[schemars(description = "Ward Moss")]
+    WardMoss,
+    #[schemars(description = "Ward Mono")]
+    WardMono,
+    #[schemars(description = "Ward Paper")]
+    WardPaper,
+    #[schemars(description = "Ward Latte")]
+    WardLatte,
     #[schemars(description = "A user-provided custom theme loaded from a file.")]
     Custom(CustomTheme),
     /// Base16 themes are a special case of custom themes with their own semantics for ANSI colors that override "bright" color variants.
@@ -131,6 +147,14 @@ impl std::fmt::Display for ThemeKind {
             ThemeKind::Phenomenon => "Phenomenon",
             ThemeKind::SolarFlare => "Solar Flare",
             ThemeKind::Adeberry => "Adeberry",
+            ThemeKind::WardEmber => "Ward Ember",
+            ThemeKind::WardAbyss => "Ward Abyss",
+            ThemeKind::WardAurora => "Ward Aurora",
+            ThemeKind::WardSynthwave => "Ward Synthwave",
+            ThemeKind::WardMoss => "Ward Moss",
+            ThemeKind::WardMono => "Ward Mono",
+            ThemeKind::WardPaper => "Ward Paper",
+            ThemeKind::WardLatte => "Ward Latte",
             ThemeKind::SentReferralReward => "Warp Referral",
             ThemeKind::ReceivedReferralReward => "Referred to Warp",
             ThemeKind::Custom(custom_theme) => custom_theme.name.as_str(),
@@ -465,7 +489,7 @@ pub struct WarpThemeConfig {
 impl WarpThemeConfig {
     pub fn new() -> Self {
         // preload with built-in themes
-        let theme_map: HashMap<ThemeKind, WarpTheme> = HashMap::from_iter([
+        let mut theme_map: HashMap<ThemeKind, WarpTheme> = HashMap::from_iter([
             (ThemeKind::SentReferralReward, sent_referral_reward()),
             (
                 ThemeKind::ReceivedReferralReward,
@@ -493,6 +517,9 @@ impl WarpThemeConfig {
             (ThemeKind::SolarFlare, solar_flare()),
             (ThemeKind::Adeberry, adeberry()),
         ]);
+        if crate::features::is_fork_oss() {
+            theme_map.extend(super::ward_themes::ward_themes());
+        }
         WarpThemeConfig { theme_map }
     }
 
