@@ -70,17 +70,85 @@ Settings → Third party CLI agents: адрес, доска, email и парол
   вкладка с Claude Code и задачей.
 - Открытие карточки в браузере из меню вкладки и с карточки обзора.
 
-## Лимиты подписки Claude
+## Лимиты подписок Claude и Codex
 
-- Чип в шапке, вида `5h 2% · 7d 60%`, из `api.anthropic.com/api/oauth/usage`. Токен читается из
-  `~/.claude/.credentials.json` при каждом опросе и нигде не выводится. Опрос раз в 5 минут,
-  при ошибках реже. Цвет меняется на 50% и 80%, в тултипе время сброса. Без учётных данных или
-  при отказе в доступе чип скрыт.
+- Чип Claude в шапке, вида `Claude 5h 2% · 7d 60%`, из `api.anthropic.com/api/oauth/usage`. Токен
+  читается из `~/.claude/.credentials.json` при каждом опросе и нигде не выводится. Опрос раз в
+  5 минут, при ошибках реже. Без учётных данных или при отказе в доступе чип скрыт.
+- Чип Codex, вида `Codex 5h 10% · 7d 30%`, из сессий Codex CLI: последнее событие `token_count`
+  с `rate_limits` в самом свежем `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` (или
+  `$CODEX_HOME/sessions`). Без сети и без учётных данных. Подписи окон берутся из
+  `window_minutes` (`300` → `5h`, `10080` → `7d`). Данные свежие на момент последнего хода
+  Codex: в тултипе время обновления, окно после своего сброса скрывается. Файл перечитывается
+  раз в минуту, только если изменился. Нет сессий с лимитами (Codex не запускали или вход по
+  API-ключу) или все окна уже сброшены — чип скрыт.
+- У обоих чипов цвет меняется на 50% и 80%, в тултипе время сброса. Есть данные у одного агента —
+  виден один чип, у обоих — два.
 - Настройка «Claude Code fullscreen renderer (no flicker)», по умолчанию выключена: вкладки
-  Claude Code, которые открывает Ward («+», восстановление, запуск по карточке), получают
+  Claude Code, которые открывает Ward («+», восстановление, запуск по карточке, URI), получают
   `CLAUDE_CODE_NO_FLICKER=1`.
 
-Обе настройки — на странице Settings → Third party CLI agents.
+Переключатели обоих чипов (по умолчанию включены) и рендерера — на странице Settings → Third
+party CLI agents.
+
+## Вкладка с командой по URI
+
+```
+warposs://action/new_tab?path=<папка>&command=<команда>&title=<заголовок>&shell=<шелл>&token=<токен>&ack=<id>
+```
+
+Значения кодируются как в URL (`%20`, `%26` и т. д.). Без `command`, `title`, `shell`, `token` и
+`ack` ссылка работает как в Warp.
+
+| Параметр | Обязателен | Что делает |
+| --- | --- | --- |
+| `path` | да | Папка новой вкладки, `~` раскрывается. Не папка — вкладка не открывается. |
+| `command` | нет | Выполняется в новой вкладке после загрузки шелла. Только с верным `token`. |
+| `title` | нет | Заголовок вкладки, до 200 символов. |
+| `shell` | нет | Шелл по имени: `pwsh`, `PowerShell`, `bash`, `cmd`, дистрибутив WSL или `wsl:<имя>`. Неизвестный — шелл по умолчанию. |
+| `token` | для `command` | Содержимое файла токена. |
+| `ack` | нет | Id подтверждения, `[A-Za-z0-9_-]{1,64}`. Неверный id — файл подтверждения не пишется. |
+
+- **Токен.** Ссылку на свою схему может открыть любая веб-страница, поэтому команда выполняется
+  только с токеном. Ward при запуске один раз создаёт `%LOCALAPPDATA%\warp\WarpOss\data\uri_token`:
+  32 случайных байта в hex, файл в профиле пользователя (на Unix права `0600`). Токен
+  сравнивается за постоянное время. Без токена или с неверным вкладка открывается в `path`, но
+  команда не выполняется, в лог пишется предупреждение. Токен и текст команды в лог не пишутся,
+  только длина команды.
+- **Подтверждение.** С `ack=<id>` Ward пишет `%LOCALAPPDATA%\warp\WarpOss\data\uri_acks\<id>.json`
+  после отправки команды в шелл (без команды — сразу после открытия вкладки):
+  `{"ok":true,"pane_uuid":"…","window_id":1,"ts":"2026-10-30T10:00:00+00:00"}`. При ошибке
+  `{"ok":false,"reason":"…",…}`, причины: `missing token`, `invalid token`,
+  `no uri_token file`, `missing path`, `path is not a directory`, `could not open the tab`,
+  `command was not sent to the shell in time` (шелл не загрузился за 120 секунд). Файл пишется через временный и переименование, его можно читать сразу, как он
+  появился.
+- Если окна Ward нет, открывается новое окно с этой вкладкой.
+- Команда Claude Code получает переменные Ward, как вкладки из меню «+»
+  (`CLAUDE_CODE_NO_FLICKER`).
+
+Пример на PowerShell:
+
+```powershell
+$data  = Join-Path $env:LOCALAPPDATA 'warp\WarpOss\data'
+$token = (Get-Content -Raw (Join-Path $data 'uri_token')).Trim()
+$ack   = 'task-' + [guid]::NewGuid().ToString('N')
+$enc   = { param($v) [uri]::EscapeDataString($v) }
+$uri   = 'warposs://action/new_tab?path=' + (& $enc 'C:\work\proj') +
+         '&command=' + (& $enc 'claude "fix the build"') +
+         '&title=' + (& $enc 'Build fix') +
+         "&token=$token&ack=$ack"
+Start-Process $uri
+
+$ackFile  = Join-Path $data "uri_acks\$ack.json"
+$deadline = (Get-Date).AddSeconds(150)
+while (-not (Test-Path $ackFile) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+if (-not (Test-Path $ackFile)) { throw 'Ward did not confirm the tab' }
+$result = Get-Content -Raw $ackFile | ConvertFrom-Json
+if (-not $result.ok) { throw "Ward: $($result.reason)" }
+```
+
+Цвета вкладок в launch configs (`warposs://launch/<имя>`) читаются без учёта регистра:
+`color: Cyan` и `CYAN` работают так же, как `cyan`.
 
 ## Обновления и журнал изменений
 
