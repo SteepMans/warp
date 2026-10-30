@@ -9,7 +9,7 @@ use super::event::{
 };
 use super::{
     BlockedSource, CLIAgentInputEntrypoint, CLIAgentInputState, CLIAgentSession,
-    CLIAgentSessionContext, CLIAgentSessionStatus, CLIAgentSessionsModel,
+    CLIAgentSessionContext, CLIAgentSessionStatus, CLIAgentSessionsModel, turn_end_query,
 };
 use crate::ai::blocklist::{InputConfig, InputType};
 use crate::terminal::CLIAgent;
@@ -571,6 +571,37 @@ fn stop_clears_permission_scoped_state() {
         Some("Memory is safe"),
     );
     assert!(matches!(session.status, CLIAgentSessionStatus::Success));
+}
+
+#[test]
+fn ward_turn_end_keeps_the_last_prompt_when_the_event_has_none() {
+    let previous = || Some("write a haiku".to_owned());
+    assert_eq!(
+        turn_end_query(previous(), None, true).as_deref(),
+        Some("write a haiku")
+    );
+    assert_eq!(
+        turn_end_query(previous(), Some("  ".to_owned()), true).as_deref(),
+        Some("write a haiku")
+    );
+    // A query on the event still wins.
+    assert_eq!(
+        turn_end_query(previous(), Some("fix the bug".to_owned()), true).as_deref(),
+        Some("fix the bug")
+    );
+    assert_eq!(turn_end_query(None, None, true), None);
+}
+
+#[test]
+fn upstream_turn_end_takes_the_event_query() {
+    assert_eq!(
+        turn_end_query(Some("write a haiku".to_owned()), None, false),
+        None
+    );
+    assert_eq!(
+        turn_end_query(None, Some("fix".to_owned()), false).as_deref(),
+        Some("fix")
+    );
 }
 
 #[test]
