@@ -3232,6 +3232,7 @@ impl Workspace {
         Self::ward_subscribe_to_chimney(ctx);
         Self::ward_subscribe_to_claude_usage(ctx);
         Self::ward_subscribe_to_codex_usage(ctx);
+        Self::ward_subscribe_to_announcements(ctx);
 
         ctx.subscribe_to_model(
             &AgentNotificationsModel::handle(ctx),
