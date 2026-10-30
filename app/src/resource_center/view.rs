@@ -42,8 +42,20 @@ pub enum ResourceCenterFooterItem {
     Feedback,
 }
 
+/// Ward's repository and issue tracker, which replace Warp's docs, Slack and feedback form in
+/// the footer of the OSS build.
+const WARD_REPO_URL: &str = "https://github.com/SteepMans/warp";
+const WARD_ISSUES_URL: &str = "https://github.com/SteepMans/warp/issues";
+
 impl ResourceCenterFooterItem {
     pub fn ui_label(&self) -> &'static str {
+        if crate::features::is_fork_oss() {
+            return match self {
+                ResourceCenterFooterItem::Docs => "Ward on GitHub",
+                ResourceCenterFooterItem::Slack => "",
+                ResourceCenterFooterItem::Feedback => "Report an issue",
+            };
+        }
         match self {
             ResourceCenterFooterItem::Docs => "Docs",
             ResourceCenterFooterItem::Slack => "Join our Slack community",
@@ -252,6 +264,14 @@ impl ResourceCenterView {
         item: &ResourceCenterFooterItem,
         ctx: &mut ViewContext<Self>,
     ) {
+        if crate::features::is_fork_oss() {
+            match item {
+                ResourceCenterFooterItem::Docs => ctx.open_url(WARD_REPO_URL),
+                ResourceCenterFooterItem::Slack => {}
+                ResourceCenterFooterItem::Feedback => ctx.open_url(WARD_ISSUES_URL),
+            }
+            return;
+        }
         match item {
             ResourceCenterFooterItem::Docs => ctx.open_url(links::USER_DOCS_URL),
             ResourceCenterFooterItem::Slack => ctx.open_url(links::SLACK_URL),
@@ -452,9 +472,12 @@ impl ResourceCenterView {
         let feedback_button =
             self.render_footer_button(ResourceCenterFooterItem::Feedback, appearance);
 
-        let footer = Flex::row()
-            .with_child(docs_button)
-            .with_child(slack_button)
+        let mut footer = Flex::row().with_child(docs_button);
+        // Ward has no Slack community.
+        if !crate::features::is_fork_oss() {
+            footer.add_child(slack_button);
+        }
+        let footer = footer
             .with_child(feedback_button)
             .with_main_axis_size(MainAxisSize::Max)
             .with_main_axis_alignment(MainAxisAlignment::SpaceEvenly)
