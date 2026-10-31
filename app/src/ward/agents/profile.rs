@@ -280,19 +280,15 @@ pub fn apply(profile: &ProfileBody, target: &Target, machine: &dyn Machine) -> O
     };
 
     let dns = part::<DnsProxy>(profile, PART_DNS_PROXY);
+    let present = dns.is_some();
     let dns_part = dns.as_ref().and_then(|part| part.as_ref().ok()).cloned();
     let result = match dns {
-        None => None,
-        Some(Err(err)) => Some(Err(err)),
-        Some(Ok(part)) => Some(apply_dns_proxy(
-            &part,
-            &previous,
-            target,
-            machine,
-            &mut managed,
-        )),
+        Some(Err(err)) => Err(err),
+        Some(Ok(part)) => apply_dns_proxy(Some(&part), &previous, target, machine, &mut managed),
+        // The part left the profile: Ward's own block in `hosts` goes with it.
+        None => apply_dns_proxy(None, &previous, target, machine, &mut managed),
     };
-    report(&mut outcome, PART_DNS_PROXY, result);
+    report(&mut outcome, PART_DNS_PROXY, present.then_some(result));
     if let Some(dns) = &dns_part {
         outcome.proxy_required = dns.enabled && dns.mode.trim() != MODE_OFF;
         outcome.check_url = non_empty(&dns.check_url)
@@ -412,12 +408,18 @@ fn part<T: serde::de::DeserializeOwned>(
 }
 
 fn apply_dns_proxy(
-    part: &DnsProxy,
+    part: Option<&DnsProxy>,
     previous: &Managed,
     target: &Target,
     machine: &dyn Machine,
     managed: &mut Managed,
 ) -> Result<String, String> {
+    let Some(part) = part else {
+        if previous.hosts {
+            write_hosts(target, machine, None)?;
+        }
+        return Ok("части dnsProxy в профиле нет".to_owned());
+    };
     let mode = part.mode.trim();
     if !part.enabled || mode == MODE_OFF {
         if previous.hosts {
