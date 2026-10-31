@@ -1,5 +1,6 @@
-use command::blocking::Command;
 use std::path::Path;
+
+use command::blocking::Command;
 
 use super::*;
 

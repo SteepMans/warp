@@ -2,8 +2,9 @@
 //! thread). Git never prompts: a repository that needs credentials Ward does not have fails
 //! instead of hanging.
 
-use command::blocking::Command;
 use std::path::{Path, PathBuf};
+
+use command::blocking::Command;
 
 use super::launch::{self, RepoId};
 

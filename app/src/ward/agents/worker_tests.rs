@@ -5,7 +5,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use command::blocking::Command as Process;
-
 use mockito::{Matcher, Server, ServerGuard};
 
 use super::*;
