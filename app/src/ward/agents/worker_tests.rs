@@ -432,7 +432,8 @@ fn full_cycle_against_a_fake_service() {
     let runner = worker.clone();
     std::thread::spawn(move || futures::executor::block_on(runner.run()));
 
-    // Acks: the good assignment is taken, the empty prompt refused.
+    // Acks: the good assignment is taken; the one without a prompt needs the preparation
+    // phase, and this machine has no vault for it.
     wait_for("both acks", || {
         log.lock()
             .iter()
@@ -454,7 +455,10 @@ fn full_cycle_against_a_fake_service() {
     };
     assert_eq!(ack_of("s-good")["accepted"], true);
     assert_eq!(ack_of("s-empty")["accepted"], false);
-    assert_eq!(ack_of("s-empty")["reason"], "empty prompt");
+    assert_eq!(
+        ack_of("s-empty")["reason"],
+        "no vault on this worker for the preparation phase"
+    );
 
     // The worktree, the prompt file and the tab.
     wait_for("running", || {
