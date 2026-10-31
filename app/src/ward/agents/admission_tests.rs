@@ -61,14 +61,14 @@ fn slot_checks() {
         agents: &agents,
         usage: &[],
     };
-    assert_eq!(check_slot(&state, &repo()), Ok(()));
+    assert_eq!(check_slot(&state, Some(&repo())), Ok(()));
 
     let full = MachineState {
         active_sessions: 2,
         ..state.clone()
     };
     assert_eq!(
-        check_slot(&full, &repo()),
+        check_slot(&full, Some(&repo())),
         Err("no free slot (2/2)".to_owned())
     );
 
@@ -77,7 +77,7 @@ fn slot_checks() {
         ..state.clone()
     };
     assert_eq!(
-        check_slot(&paused, &repo()),
+        check_slot(&paused, Some(&repo())),
         Err("worker is paused".to_owned())
     );
     let server_paused_limits = Limits {
@@ -88,7 +88,7 @@ fn slot_checks() {
         limits: &server_paused_limits,
         ..state.clone()
     };
-    assert!(check_slot(&server_paused, &repo()).is_err());
+    assert!(check_slot(&server_paused, Some(&repo())).is_err());
 
     let low = Resources {
         ram_free_bytes: 2 * GB,
@@ -99,7 +99,7 @@ fn slot_checks() {
         ..state.clone()
     };
     assert!(
-        check_slot(&low_ram, &repo())
+        check_slot(&low_ram, Some(&repo()))
             .unwrap_err()
             .contains("memory")
     );
@@ -112,7 +112,11 @@ fn slot_checks() {
         resources: &small,
         ..state.clone()
     };
-    assert!(check_slot(&low_disk, &repo()).unwrap_err().contains("disk"));
+    assert!(
+        check_slot(&low_disk, Some(&repo()))
+            .unwrap_err()
+            .contains("disk")
+    );
 
     let busy = Resources {
         cpu_percent: 95.0,
@@ -122,7 +126,11 @@ fn slot_checks() {
         resources: &busy,
         ..state.clone()
     };
-    assert!(check_slot(&busy_cpu, &repo()).unwrap_err().contains("CPU"));
+    assert!(
+        check_slot(&busy_cpu, Some(&repo()))
+            .unwrap_err()
+            .contains("CPU")
+    );
 
     let only_other = Limits {
         allowed_repos: "SteepMans/chimney".to_owned(),
@@ -133,7 +141,7 @@ fn slot_checks() {
         ..state
     };
     assert!(
-        check_slot(&not_allowed, &repo())
+        check_slot(&not_allowed, Some(&repo()))
             .unwrap_err()
             .contains("not allowed")
     );
@@ -243,4 +251,30 @@ fn auto_picks_the_least_used_then_by_preference() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn an_assignment_without_a_repository_still_passes_the_slot_check() {
+    let limits = Limits {
+        allowed_repos: "SteepMans/warp".to_owned(),
+        ..Default::default()
+    };
+    let resources = resources();
+    let agents = agents(&[]);
+    let state = MachineState {
+        limits: &limits,
+        paused: false,
+        active_sessions: 0,
+        resources: &resources,
+        agents: &agents,
+        usage: &[],
+    };
+    // The orchestrator of the preparation phase picks the repository, and the plan is checked
+    // against `allowedRepos` once it names one.
+    assert_eq!(check_slot(&state, None), Ok(()));
+    let other = RepoId {
+        owner: "SteepMans".to_owned(),
+        name: "chimney".to_owned(),
+    };
+    assert!(check_slot(&state, Some(&other)).is_err());
 }
