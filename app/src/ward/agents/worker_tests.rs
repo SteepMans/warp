@@ -647,34 +647,46 @@ fn the_preparation_phase_runs_before_the_executor() {
         "planApproval": true,
         "prepareMaxDurationMin": 30,
     });
-    let inbox_calls = Arc::new(AtomicUsize::new(0));
     {
-        let inbox_calls = inbox_calls.clone();
         let first = serde_json::json!({"assignments": [assignment]}).to_string();
         let approve = serde_json::json!({"commands": [{"type": "approve", "sessionId": "s-prep"}]})
             .to_string();
         let approved = Arc::new(Mutex::new(false));
-        let log_for_plan = log.clone();
+        let seen = log.clone();
         record(
             &mut server,
             "GET",
             &format!("{base}/inbox"),
             &log,
             move |_| {
-                if inbox_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                let (profile_applied, accepted, plan_sent) = {
+                    let log = seen.lock();
+                    (
+                        log.iter()
+                            .any(|(path, _)| path.contains("/profile/applied")),
+                        log.iter().any(|(path, body)| {
+                            path.contains("/assignments/s-prep/ack")
+                                && body.contains("\"accepted\":true")
+                        }),
+                        log.iter().any(|(path, _)| path.contains("/s-prep/plan")),
+                    )
+                };
+                // The task waits for the machine profile: the vault of the preparation phase comes
+                // with it. A body that is not JSON means "nothing yet", and the worker backs off
+                // instead of polling in a tight loop.
+                if !profile_applied {
+                    return b"-".to_vec();
+                }
+                if !accepted {
                     return first.clone().into_bytes();
                 }
                 // The owner approves once the plan reached the service.
-                let plan_sent = log_for_plan
-                    .lock()
-                    .iter()
-                    .any(|(path, _)| path.contains("/s-prep/plan"));
                 let mut approved = approved.lock();
                 if plan_sent && !*approved {
                     *approved = true;
                     return approve.clone().into_bytes();
                 }
-                b"{}".to_vec()
+                b"-".to_vec()
             },
         );
     }
@@ -988,9 +1000,7 @@ fn a_preparation_without_a_plan_fails_with_its_own_reason() {
         &log,
         |_| Vec::new(),
     );
-    let inbox_calls = Arc::new(AtomicUsize::new(0));
     {
-        let inbox_calls = inbox_calls.clone();
         let first = serde_json::json!({"assignments": [{
             "sessionId": "s-noplan",
             "taskRef": {"boardId": 5, "taskId": 5024, "taskNumber": 4639},
@@ -1000,17 +1010,28 @@ fn a_preparation_without_a_plan_fails_with_its_own_reason() {
             "prepareMaxDurationMin": 0,
         }]})
         .to_string();
+        let seen = log.clone();
         record(
             &mut server,
             "GET",
             &format!("{base}/inbox"),
             &log,
             move |_| {
-                if inbox_calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                    first.clone().into_bytes()
-                } else {
-                    b"{}".to_vec()
+                let (profile_applied, accepted) = {
+                    let log = seen.lock();
+                    (
+                        log.iter()
+                            .any(|(path, _)| path.contains("/profile/applied")),
+                        log.iter().any(|(path, body)| {
+                            path.contains("/assignments/s-noplan/ack")
+                                && body.contains("\"accepted\":true")
+                        }),
+                    )
+                };
+                if !profile_applied || accepted {
+                    return b"-".to_vec();
                 }
+                first.clone().into_bytes()
             },
         );
     }
