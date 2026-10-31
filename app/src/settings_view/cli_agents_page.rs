@@ -303,10 +303,7 @@ impl CLIAgentsPageView {
     /// secure storage; the password input is masked.
     fn create_chimney_account_editors(
         ctx: &mut ViewContext<Self>,
-    ) -> (
-        ViewHandle<SubmittableTextInput>,
-        ViewHandle<SubmittableTextInput>,
-    ) {
+    ) -> (ViewHandle<SubmittableTextInput>, ViewHandle<SubmittableTextInput>) {
         let email_editor = ctx.add_typed_action_view(|ctx| {
             let mut input = SubmittableTextInput::new(ctx);
             input.set_placeholder_text("service account email", ctx);
@@ -1315,13 +1312,10 @@ impl SettingsWidget for ChimneyWidget {
                 "Ward signs in with these, like chimney-mcp, and renews the session itself. \
                  CHIMNEY_EMAIL and CHIMNEY_PASSWORD work as fallbacks."
             }
-            (
-                ward_chimney::TokenSource::SecureStorage,
-                ward_chimney::TokenSource::SecureStorage,
-            ) => "The email and password are saved in the secure storage.",
-            _ => {
-                "Using CHIMNEY_EMAIL / CHIMNEY_PASSWORD from the environment where not saved here."
+            (ward_chimney::TokenSource::SecureStorage, ward_chimney::TokenSource::SecureStorage) => {
+                "The email and password are saved in the secure storage."
             }
+            _ => "Using CHIMNEY_EMAIL / CHIMNEY_PASSWORD from the environment where not saved here.",
         };
         let token_status = match token_source {
             ward_chimney::TokenSource::SecureStorage => {
@@ -1363,28 +1357,27 @@ impl SettingsWidget for ChimneyWidget {
                 })
                 .map(|err| format!("Last request: {}.", err.message()))
                 .or_else(|| {
-                    model
-                        .board(board_id)
-                        .map(|board| format!("Connected to board \u{201c}{}\u{201d}.", board.title))
+                    model.board(board_id).map(|board| {
+                        format!("Connected to board \u{201c}{}\u{201d}.", board.title)
+                    })
                 })
         });
-        let remove_row =
-            |text: &str, mouse_state: MouseStateHandle, action: CLIAgentsPageAction| {
-                let button = appearance
-                    .ui_builder()
-                    .close_button(16., mouse_state)
-                    .build()
-                    .on_click(move |ctx, _, _| {
-                        ctx.dispatch_typed_action(action.clone());
-                    })
-                    .finish();
-                Flex::row()
-                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                    .with_spacing(6.)
-                    .with_child(label(text.to_owned()))
-                    .with_child(button)
-                    .finish()
-            };
+        let remove_row = |text: &str, mouse_state: MouseStateHandle, action: CLIAgentsPageAction| {
+            let button = appearance
+                .ui_builder()
+                .close_button(16., mouse_state)
+                .build()
+                .on_click(move |ctx, _, _| {
+                    ctx.dispatch_typed_action(action.clone());
+                })
+                .finish();
+            Flex::row()
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_spacing(6.)
+                .with_child(label(text.to_owned()))
+                .with_child(button)
+                .finish()
+        };
 
         let mut column = Flex::column()
             .with_child(label("Chimney".to_owned()))
