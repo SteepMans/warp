@@ -109,6 +109,8 @@ pub struct Limits {
     /// Allowed providers, most preferred first, comma separated.
     pub providers: String,
     pub usage_max_percent: f64,
+    /// No assignments until the profile is applied and the proxy check passes.
+    pub require_proxy: bool,
     pub paused: bool,
 }
 
@@ -124,6 +126,7 @@ impl Default for Limits {
             allowed_repos: String::new(),
             providers: "claude,codex".to_owned(),
             usage_max_percent: 90.0,
+            require_proxy: true,
             paused: false,
         }
     }
@@ -146,6 +149,12 @@ pub struct RegisterResponse {
     pub limits: Limits,
     #[serde(default = "default_heartbeat_secs")]
     pub heartbeat_sec: u64,
+    /// The profile version the service has now.
+    #[serde(default)]
+    pub profile_version: u32,
+    /// The profile itself, so the first assignment needs no extra request.
+    #[serde(default)]
+    pub profile: Option<ProfileBody>,
 }
 
 impl std::fmt::Debug for RegisterResponse {
@@ -155,8 +164,69 @@ impl std::fmt::Debug for RegisterResponse {
             .field("token", &"<redacted>")
             .field("limits", &self.limits)
             .field("heartbeat_sec", &self.heartbeat_sec)
+            .field("profile_version", &self.profile_version)
+            // The parts carry the secrets the service substituted for this machine.
+            .field("profile", &self.profile.as_ref().map(|_| "<redacted>"))
             .finish()
     }
+}
+
+/// `GET /profile` and the `profile` of `POST /register`: the machine profile with the secrets
+/// of this worker already substituted. The service keeps the contents as they are; Ward parses
+/// them in [`super::profile`]. The body is never logged.
+#[derive(Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProfileBody {
+    pub version: u32,
+    /// Part contents by name (`dnsProxy`, `mcp`, `claudeSettings`, `skills`, `vault`).
+    pub parts: BTreeMap<String, serde_json::Value>,
+}
+
+impl std::fmt::Debug for ProfileBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProfileBody")
+            .field("version", &self.version)
+            .field("parts", &self.parts.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+/// Result of the proxy check by `dnsProxy.checkUrl`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProxyCheck {
+    pub ok: bool,
+    pub message: String,
+}
+
+/// One part in the report of `POST /profile/applied`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PartReport {
+    pub name: String,
+    pub ok: bool,
+    pub message: String,
+}
+
+/// `POST /profile/applied`: the version Ward applied, not the one the service has now, so a
+/// machine left behind stays visible on the Agents screen.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppliedRequest {
+    pub version: u32,
+    pub ok: bool,
+    pub message: String,
+    pub parts: Vec<PartReport>,
+    pub proxy_check: ProxyCheck,
+}
+
+/// The `profile` block of a heartbeat: the freshest proxy check for the scheduler.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileBeat {
+    pub version: u32,
+    pub ok: bool,
+    pub proxy_check: ProxyCheck,
 }
 
 /// Status of a session as the contract names it.
@@ -165,6 +235,11 @@ impl std::fmt::Debug for RegisterResponse {
 pub enum SessionStatus {
     Queued,
     Assigned,
+    /// The orchestrator session collects the dossier and writes the plan.
+    Preparing,
+    /// The plan is ready and waits for the owner's `approve`.
+    #[serde(rename = "plan-review")]
+    PlanReview,
     Running,
     Blocked,
     Review,
@@ -179,6 +254,8 @@ impl SessionStatus {
         match self {
             Self::Queued => "queued",
             Self::Assigned => "assigned",
+            Self::Preparing => "preparing",
+            Self::PlanReview => "plan-review",
             Self::Running => "running",
             Self::Blocked => "blocked",
             Self::Review => "review",
@@ -204,6 +281,8 @@ pub struct HeartbeatRequest {
     pub resources: Resources,
     pub usage: Vec<UsageReport>,
     pub sessions: Vec<SessionBeat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ProfileBeat>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
@@ -213,25 +292,48 @@ pub struct HeartbeatResponse {
     pub paused: bool,
     #[serde(deserialize_with = "lenient_list")]
     pub commands: Vec<Command>,
+    /// The version of the machine profile the service has now; `None` from a service that
+    /// knows no profile yet.
+    pub profile_version: Option<u32>,
 }
 
-/// One task for this machine.
+/// One task for this machine. `repo`, `baseBranch`, `branch` and `prompt` are optional: what
+/// the service does not say, the orchestrator of the preparation phase decides (see
+/// [`super::prepare`]), and the service sends them as `null`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Assignment {
     pub session_id: String,
     pub task_ref: TaskRef,
     pub attempt: u32,
+    #[serde(deserialize_with = "string_or_empty")]
     pub title: String,
+    #[serde(deserialize_with = "string_or_empty")]
     pub repo: String,
+    #[serde(deserialize_with = "string_or_empty")]
     pub base_branch: String,
+    #[serde(deserialize_with = "string_or_empty")]
     pub branch: String,
+    #[serde(deserialize_with = "string_or_empty")]
     pub prompt: String,
     /// `claude`, `codex` or `auto`; empty in assignments from before providers existed.
+    #[serde(deserialize_with = "string_or_empty")]
     pub provider: String,
     /// `None`: the agent's default model, no model flag.
     pub model: Option<String>,
     pub max_duration_min: u64,
+    /// Wait for the owner's `approve` of the plan before the executor starts.
+    pub plan_approval: bool,
+    /// `None`: [`super::prepare::DEFAULT_MAX_DURATION_MIN`].
+    pub prepare_max_duration_min: Option<u64>,
+}
+
+/// A field the service may send as `null`: an empty string then.
+fn string_or_empty<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 /// An instruction for a running session.
@@ -248,6 +350,29 @@ pub enum Command {
         #[serde(default)]
         text: String,
     },
+    /// The owner accepted the plan of the preparation phase: the executor starts.
+    Approve {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+    },
+    /// The owner refused the plan: the session ends.
+    Reject {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(default)]
+        reason: String,
+    },
+}
+
+impl Command {
+    pub fn session_id(&self) -> &str {
+        match self {
+            Self::Stop { session_id }
+            | Self::Message { session_id, .. }
+            | Self::Approve { session_id }
+            | Self::Reject { session_id, .. } => session_id,
+        }
+    }
 }
 
 /// `200` body of `GET /inbox`.
@@ -302,6 +427,12 @@ impl AckRequest {
 /// `reason` of a `blocked` status after the agent hit its subscription limit.
 pub const REASON_USAGE_LIMIT: &str = "usage_limit";
 
+/// `reason` of a `failed` status when the preparation phase left no usable plan.
+pub const REASON_PREPARE_FAILED: &str = "prepare_failed";
+
+/// `reason` of a `failed` status after the owner refused the plan.
+pub const REASON_PLAN_REJECTED: &str = "plan_rejected";
+
 /// `POST /sessions/{sessionId}/status`. Every field is sent, unknown ones as `null`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -355,6 +486,13 @@ pub fn parse_heartbeat(json: &str) -> Result<HeartbeatResponse, serde_json::Erro
 pub fn parse_inbox(json: &str) -> Result<Inbox, serde_json::Error> {
     if json.trim().is_empty() {
         return Ok(Inbox::default());
+    }
+    serde_json::from_str(json)
+}
+
+pub fn parse_profile(json: &str) -> Result<ProfileBody, serde_json::Error> {
+    if json.trim().is_empty() {
+        return Ok(ProfileBody::default());
     }
     serde_json::from_str(json)
 }
