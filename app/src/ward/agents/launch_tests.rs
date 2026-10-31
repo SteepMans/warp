@@ -65,6 +65,13 @@ fn session_paths() {
     );
     assert_eq!(worktree_dir(&clone, "../../etc"), None);
     assert_eq!(worktree_dir(&clone, ""), None);
+    // The preparation phase keeps its files under the root: the orchestrator works in the
+    // vault, and the repository may still be unknown.
+    assert_eq!(
+        prepare_dir(root, "5f0e8a5b-0c3e-4d2f-9a64-3b1e4f6d7a20"),
+        Some(root.join(".agents").join("5f0e8a5b"))
+    );
+    assert_eq!(prepare_dir(root, "../../etc"), None);
 }
 
 #[test]
@@ -109,7 +116,12 @@ fn pwsh_runner_clears_env_and_writes_the_exit_code() {
     let command = provider::by_id("claude")
         .unwrap()
         .command("4623 O'Neil", Some("claude-opus-5-5"));
-    let script = runner_script(RunnerKind::Pwsh, Path::new("C:/w/t"), &command);
+    let script = runner_script(
+        RunnerKind::Pwsh,
+        Path::new("C:/w/t/.agents"),
+        Path::new("C:/w/t"),
+        &command,
+    );
     let expected = [
         "Set-Content -LiteralPath 'C:/w/t/.agents/runner.pid' -Value $PID -NoNewline",
         "$_.Name.StartsWith('CLAUDE', [StringComparison]::OrdinalIgnoreCase)",
@@ -133,7 +145,12 @@ fn pwsh_runner_clears_env_and_writes_the_exit_code() {
 #[test]
 fn sh_runner_for_codex() {
     let command = provider::by_id("codex").unwrap().command("1 x", None);
-    let script = runner_script(RunnerKind::Sh, Path::new("/w/t"), &command);
+    let script = runner_script(
+        RunnerKind::Sh,
+        Path::new("/w/t/.agents"),
+        Path::new("/w/t"),
+        &command,
+    );
     assert!(script.starts_with("#!/bin/sh\n"));
     assert!(script.contains("echo $$ > '/w/t/.agents/runner.pid'"));
     assert!(
@@ -203,7 +220,11 @@ fn pwsh_runner_end_to_end() {
         )],
     };
     let runner = agents.join(RunnerKind::Pwsh.file_name());
-    std::fs::write(&runner, runner_script(RunnerKind::Pwsh, worktree, &command)).unwrap();
+    std::fs::write(
+        &runner,
+        runner_script(RunnerKind::Pwsh, &agents, worktree, &command),
+    )
+    .unwrap();
     let status = command::blocking::Command::new("pwsh")
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
         .arg(&runner)
