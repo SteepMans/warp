@@ -88,6 +88,22 @@ impl Journal {
         true
     }
 
+    /// Starts the part of the journal that belongs to another transcript: `marker` goes out as
+    /// a line of its own and the next read starts at the beginning of the new file. The `seq`
+    /// numbering goes on, so both sessions of one assignment share one journal, each part
+    /// marked with its role.
+    pub fn start_part(&mut self, marker: &str) {
+        let mut bytes = marker.trim_end_matches('\n').as_bytes().to_vec();
+        bytes.push(b'\n');
+        self.pending.push_back(Chunk {
+            seq: self.next_seq,
+            bytes,
+        });
+        self.next_seq += 1;
+        self.offset = 0;
+        self.tail.clear();
+    }
+
     /// Reads what was appended to `path` since the last call. Returns whether new chunks were
     /// added.
     pub fn read_from(&mut self, path: &Path) -> std::io::Result<bool> {

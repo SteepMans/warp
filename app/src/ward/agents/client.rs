@@ -5,9 +5,10 @@
 use std::time::Duration;
 
 use super::contract::{
-    self, AckRequest, HeartbeatRequest, HeartbeatResponse, Inbox, RegisterRequest,
-    RegisterResponse, StatusRequest,
+    self, AckRequest, AppliedRequest, HeartbeatRequest, HeartbeatResponse, Inbox, ProfileBody,
+    RegisterRequest, RegisterResponse, StatusRequest,
 };
+use super::plan::Plan;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -29,6 +30,13 @@ pub enum ApiError {
 }
 
 impl ApiError {
+    /// The service refused the request itself (`4xx` other than `401`): a service that does
+    /// not know this status, this plan or this field yet. Repeating it forever would hold back
+    /// everything queued behind it, so the caller drops such a request.
+    pub fn is_refused(&self) -> bool {
+        matches!(self, Self::Forbidden | Self::Status(400..=499))
+    }
+
     pub fn message(&self) -> String {
         match self {
             Self::Unauthorized => "the service rejected the credentials (HTTP 401)".to_owned(),
@@ -131,6 +139,40 @@ impl Api<'_> {
             return Ok(Inbox::default());
         }
         contract::parse_inbox(&text).map_err(|_| ApiError::Parse)
+    }
+
+    /// The machine profile with the secrets of this worker substituted. The body is never
+    /// logged.
+    pub async fn profile(&self, token: &str) -> Result<ProfileBody, ApiError> {
+        let request = self
+            .client
+            .get(self.url("/profile"))
+            .header("Accept", "application/json")
+            .bearer_auth(token)
+            .timeout(REQUEST_TIMEOUT);
+        let (_, text) = self.send(request).await?;
+        contract::parse_profile(&text).map_err(|_| ApiError::Parse)
+    }
+
+    /// The report of applying the profile; a repeat of the same version is idempotent.
+    pub async fn profile_applied(
+        &self,
+        token: &str,
+        report: &AppliedRequest,
+    ) -> Result<(), ApiError> {
+        let body = serde_json::to_string(report).map_err(|_| ApiError::Parse)?;
+        self.send(self.post_json("/profile/applied", Some(token), body))
+            .await
+            .map(|_| ())
+    }
+
+    /// The plan of the preparation phase; a repeat of the same plan is idempotent.
+    pub async fn plan(&self, token: &str, session_id: &str, plan: &Plan) -> Result<(), ApiError> {
+        let body = serde_json::to_string(plan).map_err(|_| ApiError::Parse)?;
+        let path = format!("/sessions/{}/plan", path_segment(session_id));
+        self.send(self.post_json(&path, Some(token), body))
+            .await
+            .map(|_| ())
     }
 
     pub async fn ack(

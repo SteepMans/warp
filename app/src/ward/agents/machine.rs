@@ -32,6 +32,10 @@ pub trait Machine: Send + Sync {
     fn stop(&self, pids: &[u32]);
     /// Which runner the tabs use, with Git Bash's `bash.exe` for sh on Windows.
     fn runner(&self) -> Option<(RunnerKind, Option<PathBuf>)>;
+    /// Writes a file that needs administrator rights (the system `hosts` of the machine
+    /// profile): one elevation request, and the write is verified afterwards. Called only
+    /// after a plain write was refused.
+    fn write_elevated(&self, path: &Path, contents: &str) -> Result<(), String>;
 }
 
 /// `owner/repo` of the git clones at `<root>/<owner>/<repo>`.
@@ -224,6 +228,70 @@ impl Machine for RealMachine {
                 log::warn!("Ward agents: could not stop process {pid}: {err}");
             }
         }
+    }
+
+    /// Windows: copies the text over with one UAC request and checks the result; nothing of
+    /// the profile is run, only a copy of a file Ward wrote itself. Elsewhere Ward does not
+    /// ask for rights at all.
+    fn write_elevated(&self, path: &Path, contents: &str) -> Result<(), String> {
+        if !cfg!(windows) {
+            return Err("повышение прав поддерживается только на Windows".to_owned());
+        }
+        let program = which("powershell")
+            .or_else(|| which("pwsh"))
+            .ok_or_else(|| "не найден powershell для запроса прав".to_owned())?;
+        let stamp = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or_default()
+        );
+        let temp = std::env::temp_dir().join(format!("ward-agents-{stamp}.txt"));
+        let script = std::env::temp_dir().join(format!("ward-agents-{stamp}.ps1"));
+        std::fs::write(&temp, contents).map_err(|err| format!("{}: {err}", temp.display()))?;
+        let quote = |path: &Path| super::launch::pwsh_quote(&path.to_string_lossy());
+        let body = format!(
+            "Copy-Item -LiteralPath {} -Destination {} -Force\n",
+            quote(&temp),
+            quote(path)
+        );
+        let write_script = std::fs::write(&script, body);
+        let result = write_script
+            .map_err(|err| format!("{}: {err}", script.display()))
+            .and_then(|()| {
+                let command = format!(
+                    "Start-Process -FilePath {} -Verb RunAs -Wait -WindowStyle Hidden \
+                     -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',{})",
+                    super::launch::pwsh_quote(&program.to_string_lossy()),
+                    quote(&script)
+                );
+                hidden_command(&program)
+                    .args([
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command",
+                        &command,
+                    ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .map_err(|err| format!("не удалось запросить права: {err}"))
+            })
+            .and_then(|_| {
+                // A refused UAC request is not an error of the process, so the file is checked.
+                let written = std::fs::read_to_string(path).unwrap_or_default();
+                if written == contents {
+                    Ok(())
+                } else {
+                    Err("файл не изменился: в правах администратора отказано".to_owned())
+                }
+            });
+        let _ = std::fs::remove_file(&temp);
+        let _ = std::fs::remove_file(&script);
+        result
     }
 
     fn runner(&self) -> Option<(RunnerKind, Option<PathBuf>)> {

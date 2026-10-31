@@ -22,9 +22,10 @@ pub struct MachineState<'a> {
     pub usage: &'a [UsageReport],
 }
 
-/// Checks the machine limits for one more session in `repo`. The error is the `reason` of the
-/// refusal.
-pub fn check_slot(state: &MachineState<'_>, repo: &RepoId) -> Result<(), String> {
+/// Checks the machine limits for one more session in `repo`; `None` for an assignment whose
+/// repository the orchestrator of the preparation phase still has to pick, which is checked
+/// again once the plan names one. The error is the `reason` of the refusal.
+pub fn check_slot(state: &MachineState<'_>, repo: Option<&RepoId>) -> Result<(), String> {
     let limits = state.limits;
     if state.paused || limits.paused {
         return Err("worker is paused".to_owned());
@@ -58,7 +59,9 @@ pub fn check_slot(state: &MachineState<'_>, repo: &RepoId) -> Result<(), String>
             state.resources.cpu_percent, limits.cpu_percent
         ));
     }
-    if !launch::is_repo_allowed(repo, &limits.allowed_repos) {
+    if let Some(repo) = repo
+        && !launch::is_repo_allowed(repo, &limits.allowed_repos)
+    {
         return Err(format!("repository {repo} is not allowed on this worker"));
     }
     Ok(())

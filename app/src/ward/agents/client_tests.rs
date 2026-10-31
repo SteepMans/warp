@@ -129,6 +129,7 @@ async fn worker_calls_carry_the_token() {
         resources: Default::default(),
         usage: Vec::new(),
         sessions: Vec::new(),
+        profile: None,
     };
     assert_eq!(
         api.heartbeat("agw_old", &heartbeat).await.unwrap_err(),
@@ -150,4 +151,83 @@ async fn unreachable_service_is_a_network_error() {
 fn path_segments_are_encoded() {
     assert_eq!(path_segment("5f0e8a5b-0c3e"), "5f0e8a5b-0c3e");
     assert_eq!(path_segment("a/b c"), "a%2Fb%20c");
+}
+
+#[tokio::test]
+async fn profile_and_plan_calls() {
+    let mut server = Server::new_async().await;
+    let client = http_client::Client::new_for_test();
+    let base_url = server.url();
+    let api = Api {
+        client: &client,
+        base_url: &base_url,
+    };
+    let profile = server
+        .mock("GET", "/api/v1/worker/profile")
+        .match_header("authorization", "Bearer agw_t")
+        .with_body(r#"{"version":3,"parts":{"vault":{"path":"C:/vault"}}}"#)
+        .create_async()
+        .await;
+    let body = api.profile("agw_t").await.unwrap();
+    assert_eq!(body.version, 3);
+    assert_eq!(body.parts["vault"]["path"], "C:/vault");
+    profile.assert_async().await;
+
+    let applied = server
+        .mock("POST", "/api/v1/worker/profile/applied")
+        .match_header("authorization", "Bearer agw_t")
+        .match_body(Matcher::Json(serde_json::json!({
+            "version": 3,
+            "ok": true,
+            "message": "применён",
+            "parts": [{"name": "vault", "ok": true, "message": "волт на месте"}],
+            "proxyCheck": {"ok": true, "message": "HTTP 200"}
+        })))
+        .with_status(204)
+        .create_async()
+        .await;
+    let report = crate::ward::agents::contract::AppliedRequest {
+        version: 3,
+        ok: true,
+        message: "применён".to_owned(),
+        parts: vec![crate::ward::agents::contract::PartReport {
+            name: "vault".to_owned(),
+            ok: true,
+            message: "волт на месте".to_owned(),
+        }],
+        proxy_check: crate::ward::agents::contract::ProxyCheck {
+            ok: true,
+            message: "HTTP 200".to_owned(),
+        },
+    };
+    api.profile_applied("agw_t", &report).await.unwrap();
+    applied.assert_async().await;
+
+    let plan_call = server
+        .mock("POST", "/api/v1/worker/sessions/s1/plan")
+        .match_header("authorization", "Bearer agw_t")
+        .match_body(Matcher::PartialJson(serde_json::json!({
+            "repo": "https://github.com/SteepMans/warp.git",
+            "branch": "feature/4639-x"
+        })))
+        .with_status(204)
+        .create_async()
+        .await;
+    let plan = Plan {
+        repo: "https://github.com/SteepMans/warp.git".to_owned(),
+        branch: "feature/4639-x".to_owned(),
+        ..Default::default()
+    };
+    api.plan("agw_t", "s1", &plan).await.unwrap();
+    plan_call.assert_async().await;
+}
+
+#[test]
+fn a_refused_request_is_told_apart_from_a_broken_service() {
+    assert!(ApiError::Status(400).is_refused());
+    assert!(ApiError::Status(404).is_refused());
+    assert!(ApiError::Forbidden.is_refused());
+    assert!(!ApiError::Unauthorized.is_refused());
+    assert!(!ApiError::Status(503).is_refused());
+    assert!(!ApiError::Network("down".to_owned()).is_refused());
 }

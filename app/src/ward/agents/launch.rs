@@ -84,11 +84,28 @@ pub fn clone_dir(root: &Path, repo: &RepoId) -> PathBuf {
     root.join(&repo.owner).join(&repo.name)
 }
 
-/// `None` for a session id too odd to be a directory name.
-pub fn worktree_dir(clone: &Path, session_id: &str) -> Option<PathBuf> {
+/// The first characters of a session id, when they make a directory name; `None` for a
+/// session id too odd for one.
+pub fn short_session_id(session_id: &str) -> Option<String> {
     let short: String = session_id.chars().take(WORKTREE_ID_CHARS).collect();
     (!short.is_empty() && short.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
-        .then(|| clone.join(WORKTREES_DIR).join(short))
+        .then_some(short)
+}
+
+/// `None` for a session id too odd to be a directory name.
+pub fn worktree_dir(clone: &Path, session_id: &str) -> Option<PathBuf> {
+    Some(
+        clone
+            .join(WORKTREES_DIR)
+            .join(short_session_id(session_id)?),
+    )
+}
+
+/// Where the files of the preparation phase live, before the worktree exists and while the
+/// repository may still be unknown: `<root>/.agents/<first 8 characters of sessionId>`. The
+/// orchestrator works in the vault, so nothing of Ward is ever written inside it.
+pub fn prepare_dir(root: &Path, session_id: &str) -> Option<PathBuf> {
+    Some(root.join(AGENTS_DIR).join(short_session_id(session_id)?))
 }
 
 pub fn agents_dir(worktree: &Path) -> PathBuf {
@@ -162,11 +179,13 @@ fn forward_slashes(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-/// The runner script of a session in `worktree`.
-pub fn runner_script(kind: RunnerKind, worktree: &Path, command: &AgentCommand) -> String {
-    let agents = agents_dir(worktree);
-    let file = |name: &str| forward_slashes(&agents.join(name));
-    let worktree = forward_slashes(worktree);
+/// The runner script of one agent: `files` holds the prompt, the runner's pid and the exit
+/// code, `cwd` is the directory the agent starts in. For an executor both are the worktree and
+/// its `.agents`; for the orchestrator of the preparation phase the files are under the
+/// repository root and the directory is the vault, so nothing of Ward is written inside it.
+pub fn runner_script(kind: RunnerKind, files: &Path, cwd: &Path, command: &AgentCommand) -> String {
+    let file = |name: &str| forward_slashes(&files.join(name));
+    let worktree = forward_slashes(cwd);
     match kind {
         RunnerKind::Pwsh => {
             let q = |value: &str| pwsh_quote(value);

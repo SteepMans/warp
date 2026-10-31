@@ -85,9 +85,15 @@ impl Machine for FakeMachine {
     fn runner(&self) -> Option<(RunnerKind, Option<PathBuf>)> {
         Some((RunnerKind::Pwsh, None))
     }
+
+    fn write_elevated(&self, path: &Path, contents: &str) -> Result<(), String> {
+        std::fs::write(path, contents).map_err(|err| err.to_string())
+    }
 }
 
-/// Plays the UI and the agent: opening the tab "starts" a Claude session in the worktree.
+/// Plays the UI and the agent: opening the tab "starts" a Claude session in its directory.
+/// Every tab gets its own pid and session id, so the orchestrator of the preparation phase and
+/// the executor after it are told apart the way the real agent files tell them apart.
 struct FakeHost {
     config: WorkerConfig,
     homes: Homes,
@@ -95,6 +101,31 @@ struct FakeHost {
     tabs: Mutex<Vec<TabSpec>>,
     typed: Mutex<Vec<(String, String)>>,
     snapshot: Mutex<Snapshot>,
+    /// What the orchestrator "writes" as its plan when its tab opens.
+    plan: Mutex<Option<(PathBuf, String)>>,
+}
+
+impl FakeHost {
+    fn new(config: WorkerConfig, homes: Homes) -> Self {
+        Self {
+            config,
+            homes,
+            registration: Mutex::new(None),
+            tabs: Mutex::new(Vec::new()),
+            typed: Mutex::new(Vec::new()),
+            snapshot: Mutex::new(Snapshot::default()),
+            plan: Mutex::new(None),
+        }
+    }
+
+    /// The agent session id of the tab opened as number `index`.
+    fn agent_session_id(index: usize) -> String {
+        if index == 0 {
+            AGENT_SESSION_ID.to_owned()
+        } else {
+            format!("{}{index}", &AGENT_SESSION_ID[..AGENT_SESSION_ID.len() - 1])
+        }
+    }
 }
 
 #[async_trait]
@@ -116,16 +147,27 @@ impl Host for FakeHost {
     }
 
     async fn open_tab(&self, tab: TabSpec) -> Result<Option<String>, String> {
+        let index = {
+            let mut tabs = self.tabs.lock();
+            tabs.push(tab.clone());
+            tabs.len() - 1
+        };
+        let session_id = Self::agent_session_id(index);
+        let pid = 4242 + index as u32;
         let sessions = self.homes.claude_dir.join("sessions");
         std::fs::create_dir_all(&sessions).unwrap();
         let session_file = serde_json::json!({
-            "pid": 4242,
-            "sessionId": AGENT_SESSION_ID,
+            "pid": pid,
+            "sessionId": session_id,
             "cwd": tab.cwd.to_string_lossy(),
             "startedAt": now_ms(),
             "bridgeSessionId": BRIDGE_ID,
         });
-        std::fs::write(sessions.join("4242.json"), session_file.to_string()).unwrap();
+        std::fs::write(
+            sessions.join(format!("{pid}.json")),
+            session_file.to_string(),
+        )
+        .unwrap();
         let project = self
             .homes
             .claude_dir
@@ -133,12 +175,18 @@ impl Host for FakeHost {
             .join(provider::claude::project_slug(&tab.cwd));
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(
-            project.join(format!("{AGENT_SESSION_ID}.jsonl")),
-            "{\"type\":\"user\",\"n\":1}\n{\"type\":\"assistant\",\"n\":2}\n",
+            project.join(format!("{session_id}.jsonl")),
+            format!("{{\"type\":\"user\",\"n\":1,\"tab\":{index}}}\n{{\"type\":\"assistant\",\"n\":2}}\n"),
         )
         .unwrap();
-        self.tabs.lock().push(tab);
-        Ok(Some("pane-1".to_owned()))
+        // The orchestrator leaves its plan behind, as the prompt tells it to.
+        if let Some((path, text)) = self.plan.lock().take() {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, text).unwrap();
+        }
+        Ok(Some(format!("pane-{}", index + 1)))
     }
 
     async fn send_text(&self, pane_uuid: &str, text: &str) -> Result<(), String> {
@@ -214,6 +262,15 @@ fn remote(dir: &Path) -> String {
         .unwrap();
     assert!(output.status.success());
     bare.to_string_lossy().into_owned()
+}
+
+/// The machine profile is applied to temp files, never to the real home or `hosts` file.
+fn profile_target(dir: &Path, homes: &Homes) -> profile::Target {
+    profile::Target {
+        claude_dir: homes.claude_dir.clone(),
+        claude_json: homes.claude_json.clone(),
+        hosts: dir.join("system").join("hosts"),
+    }
 }
 
 fn wait_for(what: &str, condition: impl Fn() -> bool) {
@@ -339,20 +396,16 @@ fn full_cycle_against_a_fake_service() {
         |_| Vec::new(),
     );
 
-    let host = Arc::new(FakeHost {
-        config: WorkerConfig {
+    let host = Arc::new(FakeHost::new(
+        WorkerConfig {
             base_url: format!("{}/agents", server.url()),
             key: "agk_test".to_owned(),
             name: "test-pc".to_owned(),
             root: root.clone(),
             paused: false,
         },
-        homes: homes.clone(),
-        registration: Mutex::new(None),
-        tabs: Mutex::new(Vec::new()),
-        typed: Mutex::new(Vec::new()),
-        snapshot: Mutex::new(Snapshot::default()),
-    });
+        homes.clone(),
+    ));
     let timing = Timing {
         tick: Duration::from_millis(100),
         journal_every: Duration::from_millis(100),
@@ -362,6 +415,8 @@ fn full_cycle_against_a_fake_service() {
         exit_grace: Duration::from_secs(30),
         stop_grace: Duration::from_secs(30),
         usage_every: Duration::from_secs(60),
+        profile_every: Duration::from_millis(100),
+        proxy_every: Duration::from_secs(60),
         min_backoff: Duration::from_millis(100),
         max_backoff: Duration::from_secs(1),
     };
@@ -370,13 +425,15 @@ fn full_cycle_against_a_fake_service() {
         Arc::new(FakeMachine),
         http_client::Client::new_for_test(),
         homes.clone(),
+        profile_target(dir.path(), &homes),
         timing,
         "test".to_owned(),
     );
     let runner = worker.clone();
     std::thread::spawn(move || futures::executor::block_on(runner.run()));
 
-    // Acks: the good assignment is taken, the empty prompt refused.
+    // Acks: the good assignment is taken; the one without a prompt needs the preparation
+    // phase, and this machine has no vault for it.
     wait_for("both acks", || {
         log.lock()
             .iter()
@@ -398,7 +455,10 @@ fn full_cycle_against_a_fake_service() {
     };
     assert_eq!(ack_of("s-good")["accepted"], true);
     assert_eq!(ack_of("s-empty")["accepted"], false);
-    assert_eq!(ack_of("s-empty")["reason"], "empty prompt");
+    assert_eq!(
+        ack_of("s-empty")["reason"],
+        "no vault on this worker for the preparation phase"
+    );
 
     // The worktree, the prompt file and the tab.
     wait_for("running", || {
@@ -446,22 +506,31 @@ fn full_cycle_against_a_fake_service() {
         ("pane-1".to_owned(), "Also add tests".to_owned())
     );
 
-    // The transcript goes out as whole lines with seq 1.
+    // The journal opens with the line that marks the role and then the transcript, in whole
+    // lines, `seq` from 1.
     wait_for("the journal", || {
         log.lock()
             .iter()
-            .any(|(path, _)| path.contains("/s-good/journal"))
+            .filter(|(path, _)| path.contains("/s-good/journal"))
+            .count()
+            >= 2
     });
-    let (journal_path, journal_body) = log
+    let chunks: Vec<(String, String)> = log
         .lock()
         .iter()
-        .find(|(path, _)| path.contains("/s-good/journal"))
+        .filter(|(path, _)| path.contains("/s-good/journal"))
         .cloned()
-        .unwrap();
-    assert!(journal_path.ends_with("?seq=1"), "{journal_path}");
+        .collect();
+    assert!(chunks[0].0.ends_with("?seq=1"), "{}", chunks[0].0);
+    assert!(
+        chunks[0].1.contains("\"role\":\"executor\""),
+        "{}",
+        chunks[0].1
+    );
+    assert!(chunks[1].0.ends_with("?seq=2"), "{}", chunks[1].0);
     assert_eq!(
-        journal_body,
-        "{\"type\":\"user\",\"n\":1}\n{\"type\":\"assistant\",\"n\":2}\n"
+        chunks[1].1,
+        "{\"type\":\"user\",\"n\":1,\"tab\":0}\n{\"type\":\"assistant\",\"n\":2}\n"
     );
 
     // The heartbeat lists the session.
@@ -501,4 +570,556 @@ fn full_cycle_against_a_fake_service() {
                 .iter()
                 .any(|session| session.status == SessionStatus::Review)
     });
+}
+
+/// An assignment without a prompt, a repository or a branch: the orchestrator session in the
+/// vault, the plan, the owner's approval and only then the executor, plus the machine profile
+/// of the same registration.
+#[test]
+fn the_preparation_phase_runs_before_the_executor() {
+    if machine::which("git").is_none() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo_url = remote(dir.path());
+    let root = dir.path().join("agents-work");
+    let vault = dir.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+    let homes = Homes {
+        claude_dir: dir.path().join("home").join(".claude"),
+        claude_json: dir.path().join("home").join(".claude.json"),
+        codex_dir: dir.path().join("home").join(".codex"),
+    };
+    std::fs::create_dir_all(dir.path().join("home")).unwrap();
+    std::fs::write(
+        &homes.claude_json,
+        r#"{"oauthAccount":{"accountUuid":"u-1"},"mcpServers":{"grafana":{"url":"own"}}}"#,
+    )
+    .unwrap();
+
+    let mut server = Server::new();
+    let log: Log = Arc::default();
+    let profile = serde_json::json!({
+        "version": 2,
+        "parts": {
+            "dnsProxy": {"enabled": false, "mode": "off", "checkUrl": ""},
+            "mcp": {"servers": {"chimney": {"url": "https://chimney.steep-man.ru/mcp"}}},
+            "vault": {"enabled": true, "path": vault.to_string_lossy(), "update": "none"}
+        }
+    });
+    {
+        let body = serde_json::json!({
+            "workerId": "w-1",
+            "token": "agw_token",
+            "heartbeatSec": 1,
+            "profileVersion": 2,
+            "profile": profile,
+        })
+        .to_string();
+        server
+            .mock("POST", "/agents/api/v1/worker/register")
+            .with_body_from_request(move |_| body.clone().into_bytes())
+            .create();
+    }
+    let base = "/agents/api/v1/worker";
+    record(
+        &mut server,
+        "POST",
+        &format!("{base}/heartbeat"),
+        &log,
+        |_| br#"{"profileVersion":2}"#.to_vec(),
+    );
+    record(
+        &mut server,
+        "POST",
+        &format!("{base}/profile/applied"),
+        &log,
+        |_| Vec::new(),
+    );
+    let assignment = serde_json::json!({
+        "sessionId": "s-prep",
+        "taskRef": {"boardId": 5, "taskId": 5024, "taskNumber": 4639},
+        "attempt": 1,
+        "title": "Подготовка задания",
+        "repo": null,
+        "baseBranch": null,
+        "branch": null,
+        "prompt": null,
+        "provider": "claude",
+        "model": null,
+        "maxDurationMin": 0,
+        "planApproval": true,
+        "prepareMaxDurationMin": 30,
+    });
+    {
+        let first = serde_json::json!({"assignments": [assignment]}).to_string();
+        let approve = serde_json::json!({"commands": [{"type": "approve", "sessionId": "s-prep"}]})
+            .to_string();
+        let approved = Arc::new(Mutex::new(false));
+        let seen = log.clone();
+        record(
+            &mut server,
+            "GET",
+            &format!("{base}/inbox"),
+            &log,
+            move |_| {
+                let (profile_applied, accepted, plan_sent) = {
+                    let log = seen.lock();
+                    (
+                        log.iter()
+                            .any(|(path, _)| path.contains("/profile/applied")),
+                        log.iter().any(|(path, body)| {
+                            path.contains("/assignments/s-prep/ack")
+                                && body.contains("\"accepted\":true")
+                        }),
+                        log.iter().any(|(path, _)| path.contains("/s-prep/plan")),
+                    )
+                };
+                // The task waits for the machine profile: the vault of the preparation phase comes
+                // with it. A body that is not JSON means "nothing yet", and the worker backs off
+                // instead of polling in a tight loop.
+                if !profile_applied {
+                    return b"-".to_vec();
+                }
+                if !accepted {
+                    return first.clone().into_bytes();
+                }
+                // The owner approves once the plan reached the service.
+                let mut approved = approved.lock();
+                if plan_sent && !*approved {
+                    *approved = true;
+                    return approve.clone().into_bytes();
+                }
+                b"-".to_vec()
+            },
+        );
+    }
+    record(
+        &mut server,
+        "POST",
+        &format!("{base}/assignments/"),
+        &log,
+        |_| Vec::new(),
+    );
+    record(
+        &mut server,
+        "POST",
+        &format!("{base}/sessions/"),
+        &log,
+        |_| Vec::new(),
+    );
+
+    let host = Arc::new(FakeHost::new(
+        WorkerConfig {
+            base_url: format!("{}/agents", server.url()),
+            key: "agk_test".to_owned(),
+            name: "test-pc".to_owned(),
+            root: root.clone(),
+            paused: false,
+        },
+        homes.clone(),
+    ));
+    let plan = serde_json::json!({
+        "repo": repo_url,
+        "baseBranch": "main",
+        "branch": "feature/4639-demo",
+        "prompt": "Промпт из плана",
+        "dossierPath": "11-Задачи/Активные/Steep-Brain/sb. Подготовка.md",
+        "runId": "run-20261031-001",
+        "provider": "claude",
+        "model": null,
+        "summary": "Досье собрано, ветка выбрана",
+        "grouped": [4639],
+    })
+    .to_string();
+    let prepare_dir = root.join(".agents").join("s-prep");
+    *host.plan.lock() = Some((prepare_dir.join("plan.json"), plan));
+
+    let timing = Timing {
+        tick: Duration::from_millis(100),
+        journal_every: Duration::from_millis(100),
+        config_every: Duration::from_millis(100),
+        inbox_wait_secs: 0,
+        session_lookup_grace: Duration::from_secs(30),
+        exit_grace: Duration::from_secs(30),
+        stop_grace: Duration::from_secs(30),
+        usage_every: Duration::from_secs(60),
+        profile_every: Duration::from_millis(100),
+        proxy_every: Duration::from_secs(60),
+        min_backoff: Duration::from_millis(100),
+        max_backoff: Duration::from_secs(1),
+    };
+    let worker = Worker::new(
+        host.clone(),
+        Arc::new(FakeMachine),
+        http_client::Client::new_for_test(),
+        homes.clone(),
+        profile_target(dir.path(), &homes),
+        timing,
+        "test".to_owned(),
+    );
+    let runner = worker.clone();
+    std::thread::spawn(move || futures::executor::block_on(runner.run()));
+
+    let statuses = |log: &Log| -> Vec<serde_json::Value> {
+        log.lock()
+            .iter()
+            .filter(|(path, _)| path.contains("/s-prep/status"))
+            .map(|(_, body)| serde_json::from_str(body).unwrap())
+            .collect()
+    };
+
+    // The profile of the registration is applied before any task: the MCP server of the
+    // profile is in place and the owner's own one is untouched.
+    wait_for("the profile report", || {
+        log.lock()
+            .iter()
+            .any(|(path, _)| path.contains("/profile/applied"))
+    });
+    let (_, report) = log
+        .lock()
+        .iter()
+        .find(|(path, _)| path.contains("/profile/applied"))
+        .cloned()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_str(&report).unwrap();
+    assert_eq!(report["version"], 2);
+    assert_eq!(report["ok"], true, "{report}");
+    let claude_json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&homes.claude_json).unwrap()).unwrap();
+    assert_eq!(
+        claude_json["mcpServers"]["chimney"]["url"],
+        "https://chimney.steep-man.ru/mcp"
+    );
+    assert_eq!(claude_json["mcpServers"]["grafana"]["url"], "own");
+
+    // The assignment without a prompt is taken and the orchestrator opens in the vault.
+    wait_for("the orchestrator tab", || !host.tabs.lock().is_empty());
+    {
+        let tabs = host.tabs.lock();
+        assert!(
+            provider::same_path(&tabs[0].cwd.to_string_lossy(), &vault),
+            "{:?}",
+            tabs[0].cwd
+        );
+    }
+    let prompt = std::fs::read_to_string(prepare_dir.join("prompt.md")).unwrap();
+    assert!(prompt.contains("#4639"), "{prompt}");
+    assert!(prompt.contains("kanban:5/5024"));
+    assert!(prompt.contains("brain-manager.md"));
+    let plan_in_prompt = prepare_dir
+        .join("plan.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+    assert!(prompt.contains(&plan_in_prompt), "{prompt}");
+    wait_for("preparing", || {
+        statuses(&log)
+            .iter()
+            .any(|status| status["status"] == "preparing")
+    });
+
+    // The plan reaches the service and the session waits for the owner.
+    wait_for("the plan", || {
+        log.lock()
+            .iter()
+            .any(|(path, _)| path.contains("/s-prep/plan"))
+    });
+    let (_, plan_body) = log
+        .lock()
+        .iter()
+        .find(|(path, _)| path.contains("/s-prep/plan"))
+        .cloned()
+        .unwrap();
+    let plan_body: serde_json::Value = serde_json::from_str(&plan_body).unwrap();
+    assert_eq!(plan_body["branch"], "feature/4639-demo");
+    assert_eq!(plan_body["prompt"], "Промпт из плана");
+    assert_eq!(plan_body["runId"], "run-20261031-001");
+    assert_eq!(plan_body["grouped"][0], 4639);
+    wait_for("plan-review", || {
+        statuses(&log)
+            .iter()
+            .any(|status| status["status"] == "plan-review")
+    });
+
+    // After `approve` the worktree of the plan is made and the executor starts with its prompt.
+    wait_for("the executor tab", || host.tabs.lock().len() >= 2);
+    let worktree = root
+        .join("SteepMans")
+        .join("demo")
+        .join(".worktrees")
+        .join("s-prep");
+    wait_for("the prompt of the executor", || {
+        worktree.join(".agents").join("prompt.md").is_file()
+    });
+    assert_eq!(
+        std::fs::read_to_string(worktree.join(".agents").join("prompt.md")).unwrap(),
+        "Промпт из плана"
+    );
+    wait_for("running", || {
+        statuses(&log)
+            .iter()
+            .any(|status| status["status"] == "running")
+    });
+    let running = statuses(&log)
+        .into_iter()
+        .find(|status| status["status"] == "running")
+        .unwrap();
+    assert_eq!(running["branch"], "feature/4639-demo");
+    assert_eq!(running["agentSessionId"], FakeHost::agent_session_id(1));
+
+    // Both parts of the journal are marked with their role, in one numbering.
+    wait_for("both roles in the journal", || {
+        let log = log.lock();
+        log.iter()
+            .any(|(path, body)| path.contains("/s-prep/journal") && body.contains("orchestrator"))
+            && log
+                .iter()
+                .any(|(path, body)| path.contains("/s-prep/journal") && body.contains("executor"))
+    });
+    let roles: Vec<String> = log
+        .lock()
+        .iter()
+        .filter(|(path, _)| path.contains("/s-prep/journal"))
+        .filter_map(|(_, body)| {
+            serde_json::from_str::<serde_json::Value>(body.lines().next().unwrap_or_default())
+                .ok()
+                .and_then(|line| line["role"].as_str().map(str::to_owned))
+        })
+        .collect();
+    assert_eq!(roles, ["orchestrator", "executor"]);
+
+    // The heartbeat carries the state of the profile for the scheduler.
+    wait_for("a heartbeat with the profile", || {
+        log.lock()
+            .iter()
+            .any(|(path, body)| path.ends_with("/heartbeat") && body.contains("\"profile\""))
+    });
+    let (_, beat) = log
+        .lock()
+        .iter()
+        .find(|(path, body)| path.ends_with("/heartbeat") && body.contains("\"profile\""))
+        .cloned()
+        .unwrap();
+    let beat: serde_json::Value = serde_json::from_str(&beat).unwrap();
+    assert_eq!(beat["profile"]["version"], 2);
+    assert_eq!(beat["profile"]["ok"], true);
+
+    // The executor finishes: the session ends as any other.
+    std::fs::write(worktree.join(".agents").join("exit-code"), "0\n").unwrap();
+    wait_for("review", || {
+        statuses(&log)
+            .iter()
+            .any(|status| status["status"] == "review")
+    });
+    let order: Vec<String> = statuses(&log)
+        .iter()
+        .map(|status| status["status"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(order.first().map(String::as_str), Some("preparing"));
+    assert!(order.contains(&"plan-review".to_owned()), "{order:?}");
+    assert_eq!(order.last().map(String::as_str), Some("review"));
+
+    // The panel shows the profile and the plan of the session.
+    wait_for("the panel", || {
+        let snapshot = host.snapshot.lock();
+        snapshot
+            .profile
+            .as_ref()
+            .is_some_and(|profile| profile.version == 2 && profile.ok)
+            && snapshot
+                .sessions
+                .iter()
+                .any(|session| session.plan.is_some())
+    });
+    let snapshot = host.snapshot.lock();
+    assert_eq!(snapshot.profile_version, 2);
+    assert!(snapshot.vault.is_some());
+    let session = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.session_id == "s-prep")
+        .unwrap();
+    assert!(
+        session
+            .plan
+            .as_deref()
+            .is_some_and(|plan| plan.contains("Досье собрано")),
+        "{:?}",
+        session.plan
+    );
+}
+
+/// The orchestrator left no plan: the session fails with `prepare_failed`, and no executor and
+/// no worktree follow.
+#[test]
+fn a_preparation_without_a_plan_fails_with_its_own_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("agents-work");
+    let vault = dir.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+    let homes = Homes {
+        claude_dir: dir.path().join("home").join(".claude"),
+        claude_json: dir.path().join("home").join(".claude.json"),
+        codex_dir: dir.path().join("home").join(".codex"),
+    };
+    std::fs::create_dir_all(dir.path().join("home")).unwrap();
+    std::fs::write(
+        &homes.claude_json,
+        r#"{"oauthAccount":{"accountUuid":"u-1"}}"#,
+    )
+    .unwrap();
+
+    let mut server = Server::new();
+    let log: Log = Arc::default();
+    {
+        let body = serde_json::json!({
+            "workerId": "w-1",
+            "token": "agw_token",
+            "heartbeatSec": 1,
+            "profileVersion": 1,
+            "profile": {
+                "version": 1,
+                "parts": {"vault": {"enabled": true, "path": vault.to_string_lossy(),
+                                    "update": "none"}}
+            },
+        })
+        .to_string();
+        server
+            .mock("POST", "/agents/api/v1/worker/register")
+            .with_body_from_request(move |_| body.clone().into_bytes())
+            .create();
+    }
+    let base = "/agents/api/v1/worker";
+    record(
+        &mut server,
+        "POST",
+        &format!("{base}/heartbeat"),
+        &log,
+        |_| br#"{"profileVersion":1}"#.to_vec(),
+    );
+    record(
+        &mut server,
+        "POST",
+        &format!("{base}/profile/applied"),
+        &log,
+        |_| Vec::new(),
+    );
+    {
+        let first = serde_json::json!({"assignments": [{
+            "sessionId": "s-noplan",
+            "taskRef": {"boardId": 5, "taskId": 5024, "taskNumber": 4639},
+            "title": "Без плана",
+            "provider": "claude",
+            "maxDurationMin": 0,
+            "prepareMaxDurationMin": 0,
+        }]})
+        .to_string();
+        let seen = log.clone();
+        record(
+            &mut server,
+            "GET",
+            &format!("{base}/inbox"),
+            &log,
+            move |_| {
+                let (profile_applied, accepted) = {
+                    let log = seen.lock();
+                    (
+                        log.iter()
+                            .any(|(path, _)| path.contains("/profile/applied")),
+                        log.iter().any(|(path, body)| {
+                            path.contains("/assignments/s-noplan/ack")
+                                && body.contains("\"accepted\":true")
+                        }),
+                    )
+                };
+                if !profile_applied || accepted {
+                    return b"-".to_vec();
+                }
+                first.clone().into_bytes()
+            },
+        );
+    }
+    record(
+        &mut server,
+        "POST",
+        &format!("{base}/assignments/"),
+        &log,
+        |_| Vec::new(),
+    );
+    record(
+        &mut server,
+        "POST",
+        &format!("{base}/sessions/"),
+        &log,
+        |_| Vec::new(),
+    );
+
+    let host = Arc::new(FakeHost::new(
+        WorkerConfig {
+            base_url: format!("{}/agents", server.url()),
+            key: "agk_test".to_owned(),
+            name: "test-pc".to_owned(),
+            root: root.clone(),
+            paused: false,
+        },
+        homes.clone(),
+    ));
+    // Nothing writes a plan, and the orchestrator's process is gone at once.
+    let timing = Timing {
+        tick: Duration::from_millis(100),
+        journal_every: Duration::from_millis(100),
+        config_every: Duration::from_millis(100),
+        inbox_wait_secs: 0,
+        session_lookup_grace: Duration::from_secs(30),
+        exit_grace: Duration::from_millis(100),
+        stop_grace: Duration::from_millis(100),
+        usage_every: Duration::from_secs(60),
+        profile_every: Duration::from_millis(100),
+        proxy_every: Duration::from_secs(60),
+        min_backoff: Duration::from_millis(100),
+        max_backoff: Duration::from_secs(1),
+    };
+    let worker = Worker::new(
+        host.clone(),
+        Arc::new(FakeMachine),
+        http_client::Client::new_for_test(),
+        homes.clone(),
+        profile_target(dir.path(), &homes),
+        timing,
+        "test".to_owned(),
+    );
+    let runner = worker.clone();
+    std::thread::spawn(move || futures::executor::block_on(runner.run()));
+
+    // The orchestrator opened, wrote no plan and exited.
+    let prepare_dir = root.join(".agents").join("s-noplan");
+    wait_for("the orchestrator tab", || !host.tabs.lock().is_empty());
+    std::fs::write(
+        prepare_dir.join("exit-code"),
+        "0
+",
+    )
+    .unwrap();
+    wait_for("failed", || {
+        log.lock()
+            .iter()
+            .any(|(path, body)| path.contains("/s-noplan/status") && body.contains("\"failed\""))
+    });
+    let (_, failed) = log
+        .lock()
+        .iter()
+        .find(|(path, body)| path.contains("/s-noplan/status") && body.contains("\"failed\""))
+        .cloned()
+        .unwrap();
+    let failed: serde_json::Value = serde_json::from_str(&failed).unwrap();
+    assert_eq!(failed["reason"], "prepare_failed");
+    assert!(
+        failed["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("plan.json"),
+        "{failed}"
+    );
+    // No worktree was made: the executor never started.
+    assert!(!root.join("SteepMans").exists());
 }

@@ -6,10 +6,16 @@
 //! Codex) in its own tab and reports the transcript and the statuses back. There is no separate
 //! daemon: the worker lives as long as Ward runs. See [`worker`] for the loops.
 //!
+//! An assignment may come without a prompt: Ward then first runs the orchestrator session in
+//! the vault of the machine profile, which leaves the plan of the task, and only then the
+//! executor ([`prepare`], [`plan`]). The machine profile itself (MCP servers, the agent's
+//! settings, shared skills, the DNS proxy and the vault) is applied by [`profile`].
+//!
 //! Settings: address, worker name, root and "take tasks" in the private user preferences; the
 //! key and the worker token in the platform secure storage, like the Chimney credentials. For
 //! testing, `WARD_AGENTS_URL`, `WARD_AGENTS_KEY`, `WARD_AGENTS_NAME` and `WARD_AGENTS_ROOT` are
-//! used where nothing is saved. Neither the key nor the token is ever logged.
+//! used where nothing is saved. Neither the key nor the token is ever logged, and the contents
+//! of the machine profile are not logged either: they carry the secrets of this machine.
 
 pub mod admission;
 pub mod client;
@@ -18,6 +24,9 @@ pub mod git;
 pub mod journal;
 pub mod launch;
 pub mod machine;
+pub mod plan;
+pub mod prepare;
+pub mod profile;
 pub mod provider;
 pub mod worker;
 
@@ -406,11 +415,13 @@ pub fn init(ctx: &mut AppContext) {
         let host = Arc::new(UiHost {
             spawner: ctx.spawner(),
         });
+        let profile_target = profile::Target::of_machine(&homes);
         let worker = Worker::new(
             host,
             Arc::new(machine::RealMachine::default()),
             http_client::Client::new_external(),
             homes,
+            profile_target,
             Timing::default(),
             ChannelState::app_version().unwrap_or("unknown").to_owned(),
         );

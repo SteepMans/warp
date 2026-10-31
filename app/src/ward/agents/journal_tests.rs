@@ -72,3 +72,35 @@ fn reads_appended_lines_from_the_file() {
     assert_eq!(second.bytes, b"{\"n\":2}\n");
     assert_eq!(second.seq, 2);
 }
+
+#[test]
+fn a_new_part_keeps_the_numbering_and_starts_the_file_over() {
+    let dir = tempfile::tempdir().unwrap();
+    let first_path = dir.path().join("orchestrator.jsonl");
+    let second_path = dir.path().join("executor.jsonl");
+    std::fs::write(&first_path, "{\"n\":1}\n{\"n\":2}\n").unwrap();
+    std::fs::write(&second_path, "{\"n\":3}\n").unwrap();
+
+    let mut journal = Journal::default();
+    journal.start_part("{\"role\":\"orchestrator\"}");
+    journal.read_from(&first_path).unwrap();
+    journal.start_part("{\"role\":\"executor\"}");
+    journal.read_from(&second_path).unwrap();
+
+    let mut chunks = Vec::new();
+    while let Some(chunk) = journal.next_pending().cloned() {
+        chunks.push((chunk.seq, String::from_utf8(chunk.bytes).unwrap()));
+        journal.mark_sent(chunk.seq);
+    }
+    assert_eq!(
+        chunks,
+        [
+            (1, "{\"role\":\"orchestrator\"}\n".to_owned()),
+            (2, "{\"n\":1}\n{\"n\":2}\n".to_owned()),
+            (3, "{\"role\":\"executor\"}\n".to_owned()),
+            (4, "{\"n\":3}\n".to_owned()),
+        ]
+    );
+    // The tail is the new part only: the end of the executor's transcript.
+    assert_eq!(journal.tail(), "{\"n\":3}\n");
+}
