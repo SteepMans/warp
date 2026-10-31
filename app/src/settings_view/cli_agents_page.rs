@@ -303,7 +303,10 @@ impl CLIAgentsPageView {
     /// secure storage; the password input is masked.
     fn create_chimney_account_editors(
         ctx: &mut ViewContext<Self>,
-    ) -> (ViewHandle<SubmittableTextInput>, ViewHandle<SubmittableTextInput>) {
+    ) -> (
+        ViewHandle<SubmittableTextInput>,
+        ViewHandle<SubmittableTextInput>,
+    ) {
         let email_editor = ctx.add_typed_action_view(|ctx| {
             let mut input = SubmittableTextInput::new(ctx);
             input.set_placeholder_text("service account email", ctx);
@@ -1312,10 +1315,13 @@ impl SettingsWidget for ChimneyWidget {
                 "Ward signs in with these, like chimney-mcp, and renews the session itself. \
                  CHIMNEY_EMAIL and CHIMNEY_PASSWORD work as fallbacks."
             }
-            (ward_chimney::TokenSource::SecureStorage, ward_chimney::TokenSource::SecureStorage) => {
-                "The email and password are saved in the secure storage."
+            (
+                ward_chimney::TokenSource::SecureStorage,
+                ward_chimney::TokenSource::SecureStorage,
+            ) => "The email and password are saved in the secure storage.",
+            _ => {
+                "Using CHIMNEY_EMAIL / CHIMNEY_PASSWORD from the environment where not saved here."
             }
-            _ => "Using CHIMNEY_EMAIL / CHIMNEY_PASSWORD from the environment where not saved here.",
         };
         let token_status = match token_source {
             ward_chimney::TokenSource::SecureStorage => {
@@ -1357,27 +1363,28 @@ impl SettingsWidget for ChimneyWidget {
                 })
                 .map(|err| format!("Last request: {}.", err.message()))
                 .or_else(|| {
-                    model.board(board_id).map(|board| {
-                        format!("Connected to board \u{201c}{}\u{201d}.", board.title)
-                    })
+                    model
+                        .board(board_id)
+                        .map(|board| format!("Connected to board \u{201c}{}\u{201d}.", board.title))
                 })
         });
-        let remove_row = |text: &str, mouse_state: MouseStateHandle, action: CLIAgentsPageAction| {
-            let button = appearance
-                .ui_builder()
-                .close_button(16., mouse_state)
-                .build()
-                .on_click(move |ctx, _, _| {
-                    ctx.dispatch_typed_action(action.clone());
-                })
-                .finish();
-            Flex::row()
-                .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                .with_spacing(6.)
-                .with_child(label(text.to_owned()))
-                .with_child(button)
-                .finish()
-        };
+        let remove_row =
+            |text: &str, mouse_state: MouseStateHandle, action: CLIAgentsPageAction| {
+                let button = appearance
+                    .ui_builder()
+                    .close_button(16., mouse_state)
+                    .build()
+                    .on_click(move |ctx, _, _| {
+                        ctx.dispatch_typed_action(action.clone());
+                    })
+                    .finish();
+                Flex::row()
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_spacing(6.)
+                    .with_child(label(text.to_owned()))
+                    .with_child(button)
+                    .finish()
+            };
 
         let mut column = Flex::column()
             .with_child(label("Chimney".to_owned()))
@@ -1456,6 +1463,75 @@ fn agents_connection_text(connection: &ward_agents::worker::Connection) -> Strin
     }
 }
 
+/// What the panel says about the machine profile: the version, whether it is applied, the
+/// proxy and the part that failed.
+fn agents_profile_text(snapshot: &ward_agents::worker::Snapshot) -> Vec<String> {
+    let mut lines = Vec::new();
+    match &snapshot.profile {
+        None if snapshot.profile_version == 0 => {
+            lines.push("No machine profile on the service yet.".to_owned());
+        }
+        None => lines.push(format!(
+            "Version {} is not applied yet.",
+            snapshot.profile_version
+        )),
+        Some(profile) => {
+            let mut text = format!(
+                "Version {} {}.",
+                profile.version,
+                if profile.ok {
+                    "applied"
+                } else {
+                    "applied with errors"
+                }
+            );
+            if snapshot.profile_version > profile.version {
+                text.push_str(&format!(
+                    " The service has {} already.",
+                    snapshot.profile_version
+                ));
+            }
+            if let Some(at) = profile.at {
+                text.push_str(&format!(
+                    " At {}.",
+                    at.with_timezone(&chrono::Local).format("%H:%M:%S")
+                ));
+            }
+            if !profile.message.is_empty() {
+                text.push_str(&format!(" {}", profile.message));
+            }
+            lines.push(text);
+            let proxy = match (&profile.proxy, profile.proxy_required) {
+                (Some(proxy), true) => format!(
+                    "Proxy: {} ({}).",
+                    if proxy.ok { "passes" } else { "does not pass" },
+                    proxy.message
+                ),
+                (_, false) => "Proxy: not required by the profile.".to_owned(),
+                (None, true) => "Proxy: not checked yet.".to_owned(),
+            };
+            lines.push(proxy);
+            for part in &profile.parts {
+                lines.push(format!(
+                    "{}: {} \u{2014} {}",
+                    part.name,
+                    if part.ok { "ok" } else { "failed" },
+                    part.message
+                ));
+            }
+        }
+    }
+    match &snapshot.vault {
+        Some(vault) => lines.push(format!(
+            "Vault: {vault}. Assignments without a prompt are prepared by an orchestrator \
+             session there."
+        )),
+        None => lines
+            .push("No vault in the profile: assignments without a prompt are refused.".to_owned()),
+    }
+    lines
+}
+
 /// `5h 12% · week 40%` from the usage reports of one provider.
 fn agents_usage_text(provider: &str, usage: &[ward_agents::contract::UsageReport]) -> String {
     let windows: Vec<String> = usage
@@ -1480,7 +1556,8 @@ impl SettingsWidget for AgentsWorkerWidget {
     type View = CLIAgentsPageView;
 
     fn search_terms(&self) -> &str {
-        "agents worker agents-service key sessions worktree take tasks pause codex claude ward"
+        "agents worker agents-service key sessions worktree take tasks pause codex claude ward \
+         profile mcp skills proxy vault plan preparing orchestrator"
     }
 
     fn should_render(&self, _app: &AppContext) -> bool {
@@ -1540,8 +1617,9 @@ impl SettingsWidget for AgentsWorkerWidget {
             .with_child(description(format!(
                 "Ward registers as a worker of agents-service, takes tasks started from Chimney \
                  cards and runs Claude Code or Codex in its own tabs, one git worktree per \
-                 session under the repository root. Where nothing is saved, {}, {}, {} and {} \
-                 are used.",
+                 session under the repository root. A task without a prompt is prepared first \
+                 by an orchestrator session in the vault of the machine profile. Where nothing \
+                 is saved, {}, {}, {} and {} are used.",
                 ward_agents::URL_ENV_VAR,
                 ward_agents::KEY_ENV_VAR,
                 ward_agents::NAME_ENV_VAR,
@@ -1619,6 +1697,8 @@ impl SettingsWidget for AgentsWorkerWidget {
                 matches!(
                     session.status,
                     ward_agents::contract::SessionStatus::Assigned
+                        | ward_agents::contract::SessionStatus::Preparing
+                        | ward_agents::contract::SessionStatus::PlanReview
                         | ward_agents::contract::SessionStatus::Running
                         | ward_agents::contract::SessionStatus::Blocked
                 )
@@ -1641,6 +1721,11 @@ impl SettingsWidget for AgentsWorkerWidget {
             snapshot.limits.usage_max_percent
         ));
         column.add_child(description(load));
+
+        column.add_child(label("Machine profile".to_owned()));
+        for line in agents_profile_text(snapshot) {
+            column.add_child(description(line));
+        }
 
         if !snapshot.agents.is_empty() {
             column.add_child(label("Agents".to_owned()));
@@ -1694,6 +1779,9 @@ impl SettingsWidget for AgentsWorkerWidget {
                 text.push_str(&format!(". {message}"));
             }
             column.add_child(description(text));
+            if let Some(plan) = &session.plan {
+                column.add_child(description(format!("Plan: {plan}")));
+            }
             if let Some(url) = &session.remote_control_url {
                 column.add_child(
                     appearance
