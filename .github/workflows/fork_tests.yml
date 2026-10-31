@@ -61,7 +61,7 @@ jobs:
 
       - name: Test the Ward modules
         shell: pwsh
-        run: cargo test -p warp --lib -- ward::
+        run: "cargo test -p warp --lib -- ward::"
 
       - name: Clippy on the Ward modules
         shell: pwsh
