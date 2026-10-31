@@ -90,7 +90,7 @@ fn fixture_with_elevation(allow: bool) -> Fixture {
     }
 }
 
-fn profile(parts: serde_json::Value, version: u32) -> ProfileBody {
+fn profile_body(parts: serde_json::Value, version: u32) -> ProfileBody {
     ProfileBody {
         version,
         parts: parts
@@ -127,7 +127,7 @@ fn mcp_servers_are_merged_and_foreign_ones_are_left_alone() {
         .to_string(),
     )
     .unwrap();
-    let profile = profile(
+    let profile = profile_body(
         json!({"mcp": {"servers": {"chimney": {"url": "https://chimney", "token": "t"}}}}),
         3,
     );
@@ -145,7 +145,7 @@ fn mcp_servers_are_merged_and_foreign_ones_are_left_alone() {
 
     // The server leaves the profile: only Ward's own entry goes with it.
     let outcome = apply(
-        &profile(json!({"mcp": {"servers": {}}}), 4),
+        &profile_body(json!({"mcp": {"servers": {}}}), 4),
         &fixture.target,
         &fixture.machine,
     );
@@ -164,7 +164,7 @@ fn claude_settings_merge_keys_and_mark_their_block_in_claude_md() {
     std::fs::write(&settings, json!({"theme": "dark"}).to_string()).unwrap();
     std::fs::write(&claude_md, "# Моё\n\nПравила владельца.\n").unwrap();
 
-    let profile = profile(
+    let profile = profile_body(
         json!({"claudeSettings": {
             "settings": {"attribution": {"commit": "", "pr": ""}},
             "claudeMd": "## Общее\n\nБез эмодзи."
@@ -205,7 +205,7 @@ fn skills_are_written_and_stale_ones_removed() {
     std::fs::create_dir_all(skills.join("own-skill")).unwrap();
     std::fs::write(skills.join("own-skill").join("SKILL.md"), "мой").unwrap();
 
-    let profile = profile(
+    let profile = profile_body(
         json!({"skills": {"skills": [
             {"name": "bm-notify", "skillMd": "# bm-notify\n", "files": {"scripts/send.ps1": "ok"}},
             {"name": "vault-capture", "content": "# vault\n"}
@@ -233,7 +233,7 @@ fn skills_are_written_and_stale_ones_removed() {
     );
 
     let outcome = apply(
-        &profile(
+        &profile_body(
             json!({"skills": {"skills": [{"name": "bm-notify", "skillMd": "# bm-notify\n"}]}}),
             7,
         ),
@@ -250,7 +250,7 @@ fn skills_are_written_and_stale_ones_removed() {
 fn a_skill_with_an_unsafe_name_or_path_is_refused() {
     let fixture = fixture();
     let outcome = apply(
-        &profile(
+        &profile_body(
             json!({"skills": {"skills": [
                 {"name": "../escape", "skillMd": "x"},
                 {"name": "ok", "files": {"../../outside.txt": "x"}}
@@ -279,7 +279,7 @@ fn the_hosts_block_is_written_with_one_elevation_request_and_only_when_it_change
         "entries": {"api.anthropic.com": "10.0.0.2"}
     }});
     let outcome = apply(
-        &profile(parts.clone(), 8),
+        &profile_body(parts.clone(), 8),
         &fixture.target,
         &fixture.machine,
     );
@@ -298,7 +298,7 @@ fn the_hosts_block_is_written_with_one_elevation_request_and_only_when_it_change
 
     // Applying the same profile again changes nothing.
     let before = std::fs::read_to_string(&fixture.target.hosts).unwrap();
-    let outcome = apply(&profile(parts, 8), &fixture.target, &fixture.machine);
+    let outcome = apply(&profile_body(parts, 8), &fixture.target, &fixture.machine);
     assert!(outcome.ok);
     assert!(
         part_report(&outcome, PART_DNS_PROXY)
@@ -312,7 +312,7 @@ fn the_hosts_block_is_written_with_one_elevation_request_and_only_when_it_change
 
     // Switched off: the block goes, the owner's line stays.
     let outcome = apply(
-        &profile(
+        &profile_body(
             json!({"dnsProxy": {"enabled": false, "mode": "hosts", "checkUrl": "u"}}),
             9,
         ),
@@ -340,7 +340,7 @@ fn a_refused_elevation_marks_the_machine_without_a_proxy() {
     };
     std::fs::write(&fixture.target.hosts, "127.0.0.1 localhost\n").unwrap();
     let outcome = apply(
-        &profile(
+        &profile_body(
             json!({"dnsProxy": {
                 "enabled": true, "mode": "hosts", "checkUrl": "https://api.anthropic.com",
                 "entries": {"api.anthropic.com": "10.0.0.2"}
@@ -367,7 +367,7 @@ fn a_refused_elevation_marks_the_machine_without_a_proxy() {
 fn the_manual_mode_only_asks_for_a_check() {
     let fixture = fixture();
     let outcome = apply(
-        &profile(
+        &profile_body(
             json!({"dnsProxy": {"enabled": true, "mode": "manual", "checkUrl": "https://u"}}),
             11,
         ),
@@ -384,7 +384,7 @@ fn the_manual_mode_only_asks_for_a_check() {
 fn an_unknown_proxy_mode_is_reported_not_run() {
     let fixture = fixture();
     let outcome = apply(
-        &profile(
+        &profile_body(
             json!({"dnsProxy": {"enabled": true, "mode": "install-resolver", "checkUrl": "u"}}),
             12,
         ),
@@ -403,7 +403,7 @@ fn the_vault_part_keeps_its_paths_and_wants_a_directory() {
     let vault_dir = fixture.dir.path().join("vault");
     std::fs::create_dir_all(&vault_dir).unwrap();
     let outcome = apply(
-        &profile(
+        &profile_body(
             json!({"vault": {
                 "enabled": true,
                 "path": vault_dir.to_string_lossy(),
@@ -429,7 +429,7 @@ fn the_vault_part_keeps_its_paths_and_wants_a_directory() {
 
     // No path at all: the part is an error and the worker knows it has no vault.
     let outcome = apply(
-        &profile(json!({"vault": {"enabled": true, "path": "  "}}), 14),
+        &profile_body(json!({"vault": {"enabled": true, "path": "  "}}), 14),
         &fixture.target,
         &fixture.machine,
     );
@@ -441,7 +441,7 @@ fn the_vault_part_keeps_its_paths_and_wants_a_directory() {
 fn a_part_that_is_not_what_the_contract_says_fails_alone() {
     let fixture = fixture();
     let outcome = apply(
-        &profile(
+        &profile_body(
             json!({
                 "mcp": {"servers": "не объект"},
                 "claudeSettings": {"settings": {"theme": "dark"}, "claudeMd": "текст"}
@@ -476,7 +476,7 @@ fn applying_the_same_profile_twice_changes_nothing() {
         "vault": {"enabled": true, "path": vault_dir.to_string_lossy(), "update": "none"}
     });
     let first = apply(
-        &profile(parts.clone(), 20),
+        &profile_body(parts.clone(), 20),
         &fixture.target,
         &fixture.machine,
     );
@@ -502,7 +502,7 @@ fn applying_the_same_profile_twice_changes_nothing() {
         files
     };
     let before = snapshot(&fixture);
-    let second = apply(&profile(parts, 20), &fixture.target, &fixture.machine);
+    let second = apply(&profile_body(parts, 20), &fixture.target, &fixture.machine);
     assert_eq!(snapshot(&fixture), before);
     assert_eq!(first.ok, second.ok);
     assert_eq!(first.parts.len(), second.parts.len());
@@ -520,7 +520,7 @@ fn being_disconnected_removes_everything_of_ward() {
     std::fs::write(fixture.target.claude_dir.join("CLAUDE.md"), "# Моё\n").unwrap();
     std::fs::write(&fixture.target.hosts, "127.0.0.1 localhost\n").unwrap();
     let outcome = apply(
-        &profile(
+        &profile_body(
             json!({
                 "dnsProxy": {"enabled": true, "mode": "hosts", "checkUrl": "u",
                              "entries": {"api.anthropic.com": "10.0.0.2"}},
@@ -608,7 +608,7 @@ fn a_vault_switched_off_in_the_profile_is_not_used() {
     let vault_dir = fixture.dir.path().join("vault");
     std::fs::create_dir_all(&vault_dir).unwrap();
     let outcome = apply(
-        &profile(
+        &profile_body(
             json!({"vault": {"enabled": false, "path": vault_dir.to_string_lossy()}}),
             16,
         ),

@@ -1,6 +1,6 @@
 use super::*;
 
-fn assignment() -> Assignment {
+fn blank() -> Assignment {
     Assignment {
         session_id: "s1".to_owned(),
         title: "Подготовка задания".to_owned(),
@@ -29,7 +29,7 @@ fn a_full_plan_fills_an_empty_assignment() {
     assert_eq!(plan.grouped, vec![4639, 4627]);
     assert_eq!(plan.run_id, "run-20261031-001");
 
-    let mut assignment = assignment();
+    let mut assignment = blank();
     apply(&plan, &mut assignment).unwrap();
     assert_eq!(assignment.repo, "https://github.com/SteepMans/warp.git");
     assert_eq!(assignment.base_branch, "master");
@@ -54,7 +54,7 @@ fn the_assignment_wins_over_the_plan() {
         prompt: "промпт назначения".to_owned(),
         provider: "claude".to_owned(),
         model: Some("claude-opus-5-5".to_owned()),
-        ..assignment()
+        ..blank()
     };
     apply(&plan, &mut assignment).unwrap();
     assert_eq!(assignment.repo, "https://github.com/SteepMans/warp.git");
@@ -72,7 +72,7 @@ fn the_agent_of_the_plan_does_not_change_the_assignment() {
     let plan = parse(r#"{"provider":"codex","model":"claude-opus-5-5"}"#).unwrap();
     let mut assignment = Assignment {
         provider: "auto".to_owned(),
-        ..assignment()
+        ..blank()
     };
     apply(&plan, &mut assignment).unwrap_err();
     // The service chose `auto` and picks the agent itself; the model of the plan is taken.
@@ -84,12 +84,12 @@ fn the_agent_of_the_plan_does_not_change_the_assignment() {
 #[test]
 fn an_incomplete_plan_says_what_is_missing() {
     let plan = parse(r#"{"repo":"https://github.com/SteepMans/warp.git","prompt":null}"#).unwrap();
-    let mut assignment = assignment();
+    let mut assignment = blank();
     let err = apply(&plan, &mut assignment).unwrap_err();
     assert_eq!(err, "в плане нет: ветка, промпт");
 
     let plan = parse("{}").unwrap();
-    let mut assignment = assignment();
+    let mut assignment = blank();
     assert_eq!(
         apply(&plan, &mut assignment).unwrap_err(),
         "в плане нет: репозиторий, ветка, промпт"
@@ -98,7 +98,7 @@ fn an_incomplete_plan_says_what_is_missing() {
     // The prompt came with the assignment: only the repository and the branch are wanted.
     let mut assignment = Assignment {
         prompt: "промпт назначения".to_owned(),
-        ..assignment()
+        ..blank()
     };
     assert_eq!(
         apply(&plan, &mut assignment).unwrap_err(),
