@@ -32,16 +32,6 @@ pub const PART_CLAUDE_SETTINGS: &str = "claudeSettings";
 pub const PART_SKILLS: &str = "skills";
 pub const PART_VAULT: &str = "vault";
 
-/// Parts in the order Ward applies them: the proxy first (the vault may be cloned through it),
-/// then the vault, then the agent's own configuration.
-pub const PARTS: [&str; 5] = [
-    PART_DNS_PROXY,
-    PART_VAULT,
-    PART_MCP,
-    PART_CLAUDE_SETTINGS,
-    PART_SKILLS,
-];
-
 /// `dnsProxy.mode` values this build applies. `hosts` writes the `entries` into the system
 /// `hosts` file inside Ward's markers; `manual` only checks `checkUrl` and reports, for a proxy
 /// installed outside Ward. Ward runs no program named by the profile: an unknown mode is
@@ -265,8 +255,10 @@ pub struct Outcome {
     pub vault: Option<Vault>,
 }
 
-/// Applies `profile` to this machine. Blocking (files, git, possibly one elevation request):
-/// run it off the main thread.
+/// Applies `profile` to this machine, part by part: the proxy first (the vault may be cloned
+/// through it), then the vault, then the MCP servers, the agent's settings and the skills. A
+/// part that is not in the profile any more takes Ward's own entries of it off the machine.
+/// Blocking (files, git, possibly one elevation request): run it off the main thread.
 pub fn apply(profile: &ProfileBody, target: &Target, machine: &dyn Machine) -> Outcome {
     let previous = read_managed(target);
     let mut managed = Managed {
