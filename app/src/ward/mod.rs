@@ -4,6 +4,7 @@
 
 pub mod action;
 pub mod agent_liveness;
+pub mod agents;
 pub mod agent_state;
 pub mod announcements;
 pub mod attention;

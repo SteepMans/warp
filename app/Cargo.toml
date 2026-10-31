@@ -338,7 +338,7 @@ aws-types = "1"
 notify-debouncer-full.workspace = true
 rustls.workspace = true
 syntect = "5.0"
-sysinfo.workspace = true
+sysinfo = { workspace = true, features = ["disk"] }
 warp-command-signatures = { workspace = true, features = ["embed-signatures"] }
 is_executable = "1.0.1"
 watcher.workspace = true

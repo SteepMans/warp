@@ -378,7 +378,7 @@ pub struct OpenedUriTab {
 
 /// Finds a shell by name: the short name (`PowerShell`, `Bash`), the command (`pwsh`,
 /// `bash.exe`) or a WSL distribution (`Ubuntu`, `wsl:Ubuntu`), ignoring case.
-fn find_shell(name: &str, app: &AppContext) -> Option<AvailableShell> {
+pub(crate) fn find_shell(name: &str, app: &AppContext) -> Option<AvailableShell> {
     let wanted = name.trim().to_lowercase();
     let wanted_distro = wanted.strip_prefix("wsl:").unwrap_or(&wanted).to_owned();
     let strip_exe = |value: &str| value.trim_end_matches(".exe").to_owned();
@@ -471,12 +471,40 @@ pub fn handle_new_tab(primary_window_id: Option<WindowId>, url: &Url, ctx: &mut 
         command,
     };
 
+    let (window_id, opened) = open_tab_in_window(primary_window_id, tab, ctx);
+    ctx.windows().show_window_and_focus_app(window_id);
+
+    let Some(ack) = request.ack else {
+        return;
+    };
+    if has_command && opened.is_some() {
+        // The workspace registered the ack; it is written once the command is sent.
+        return;
+    }
+    let record = match (opened, rejection) {
+        (None, _) => AckRecord::failure("could not open the tab", None, Some(window_id)),
+        (Some(opened), Some(reason)) => {
+            AckRecord::failure(reason, opened.pane_uuid, Some(window_id))
+        }
+        // Nothing to send: the tab is all there is to confirm.
+        (Some(opened), None) => AckRecord::success(opened.pane_uuid, Some(window_id)),
+    };
+    write_ack_logged(&ack, &record);
+}
+
+/// Opens `tab` in the workspace of `window_id`, or in a new window when there is none, and
+/// queues its command.
+pub(crate) fn open_tab_in_window(
+    window_id: Option<WindowId>,
+    tab: UriTab,
+    ctx: &mut AppContext,
+) -> (WindowId, Option<OpenedUriTab>) {
     let workspace_in = |window_id: WindowId, ctx: &AppContext| {
         ctx.views_of_type::<Workspace>(window_id)
             .and_then(|workspaces| workspaces.into_iter().next())
     };
-    let target = primary_window_id.and_then(|id| Some((id, workspace_in(id, ctx)?)));
-    let (window_id, opened) = match target {
+    let target = window_id.and_then(|id| Some((id, workspace_in(id, ctx)?)));
+    match target {
         Some((window_id, workspace)) => {
             let opened = workspace.update(ctx, |workspace, ctx| {
                 workspace.ward_open_uri_tab(tab, true, ctx)
@@ -499,25 +527,7 @@ pub fn handle_new_tab(primary_window_id: Option<WindowId>, url: &Url, ctx: &mut 
             });
             (window_id, opened)
         }
-    };
-    ctx.windows().show_window_and_focus_app(window_id);
-
-    let Some(ack) = request.ack else {
-        return;
-    };
-    if has_command && opened.is_some() {
-        // The workspace registered the ack; it is written once the command is sent.
-        return;
     }
-    let record = match (opened, rejection) {
-        (None, _) => AckRecord::failure("could not open the tab", None, Some(window_id)),
-        (Some(opened), Some(reason)) => {
-            AckRecord::failure(reason, opened.pane_uuid, Some(window_id))
-        }
-        // Nothing to send: the tab is all there is to confirm.
-        (Some(opened), None) => AckRecord::success(opened.pane_uuid, Some(window_id)),
-    };
-    write_ack_logged(&ack, &record);
 }
 
 #[cfg(test)]

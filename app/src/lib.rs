@@ -1889,6 +1889,7 @@ pub(crate) fn initialize_app(
         ward::codex_usage::model::init(ctx);
         ward::uri_launch::init();
         ward::announcements::init(ctx);
+        ward::agents::init(ctx);
     }
 
     ctx.set_fallback_font_source_provider(|url| ::asset_cache::url_source(url));
@@ -2800,6 +2801,8 @@ pub(crate) fn app_callbacks(
             #[cfg(all(feature = "local_tty", windows))]
             terminal::local_tty::shutdown_all_pty_event_loops(ctx);
 
+            // Reports the agent sessions this Ward still runs as ended (bounded wait).
+            ward::agents::on_will_terminate(ctx);
             // Records the clean exit and sends the final metrics push (bounded wait).
             ward::metrics::on_will_terminate(ctx);
 

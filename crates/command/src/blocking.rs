@@ -71,10 +71,12 @@ impl Command {
     /// ```
     pub fn new<S: AsRef<OsStr>>(program: S) -> Command {
         let program = crate::wsl::translate_program_for_spawn(program.as_ref());
-        #[cfg_attr(not(windows), expect(unused_mut))]
+        #[cfg_attr(any(not(windows), feature = "test-util"), expect(unused_mut))]
         let mut inner = std::process::Command::new(program);
 
-        #[cfg(windows)]
+        // Tests run inside a job object that forbids breakaway (CI runners do too), so the
+        // flags are left out there, as in [`crate::r#async::Command`].
+        #[cfg(all(windows, not(feature = "test-util")))]
         {
             use std::os::windows::process::CommandExt;
             // We need to set the `CREATE_BREAKAWAY_FROM_JOB` flag to avoid assigning

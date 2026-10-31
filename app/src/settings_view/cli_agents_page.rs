@@ -49,6 +49,7 @@ use crate::terminal::CLIAgent;
 use crate::util::bindings;
 use crate::view_components::dropdown::DropdownAction;
 use crate::view_components::{Dropdown, SubmittableTextInput, SubmittableTextInputEvent};
+use crate::ward::agents as ward_agents;
 use crate::ward::chimney as ward_chimney;
 use crate::ward::claude_launch as ward_claude_launch;
 use crate::ward::claude_usage as ward_claude_usage;
@@ -72,6 +73,14 @@ pub struct CLIAgentsPageView {
     chimney_email_editor: ViewHandle<SubmittableTextInput>,
     chimney_password_editor: ViewHandle<SubmittableTextInput>,
     chimney_remove_account_mouse_state: MouseStateHandle,
+    /// Ward (OSS build) agents worker settings inputs.
+    agents_url_editor: ViewHandle<SubmittableTextInput>,
+    agents_key_editor: ViewHandle<SubmittableTextInput>,
+    agents_name_editor: ViewHandle<SubmittableTextInput>,
+    agents_root_editor: ViewHandle<SubmittableTextInput>,
+    agents_remove_key_mouse_state: MouseStateHandle,
+    /// One per session row link (Remote Control).
+    agents_link_mouse_states: Vec<MouseStateHandle>,
 }
 
 impl CLIAgentsPageView {
@@ -138,6 +147,13 @@ impl CLIAgentsPageView {
             );
         }
 
+        let agents_editors = Self::create_agents_editors(ctx);
+        if ctx.has_singleton_model::<ward_agents::AgentsModel>() {
+            ctx.subscribe_to_model(&ward_agents::AgentsModel::handle(ctx), |_, _, _, ctx| {
+                ctx.notify()
+            });
+        }
+
         Self {
             page: Self::build_page(),
             local_only_icon_tooltip_states: Default::default(),
@@ -152,7 +168,81 @@ impl CLIAgentsPageView {
             chimney_email_editor,
             chimney_password_editor,
             chimney_remove_account_mouse_state: Default::default(),
+            agents_url_editor: agents_editors.0,
+            agents_key_editor: agents_editors.1,
+            agents_name_editor: agents_editors.2,
+            agents_root_editor: agents_editors.3,
+            agents_remove_key_mouse_state: Default::default(),
+            agents_link_mouse_states: (0..AGENTS_MAX_SESSION_ROWS)
+                .map(|_| Default::default())
+                .collect(),
         }
+    }
+
+    /// Address, key, worker name and root inputs of the agents worker. Each saves on Enter; the
+    /// worker picks the change up within a few seconds.
+    fn create_agents_editors(
+        ctx: &mut ViewContext<Self>,
+    ) -> (
+        ViewHandle<SubmittableTextInput>,
+        ViewHandle<SubmittableTextInput>,
+        ViewHandle<SubmittableTextInput>,
+        ViewHandle<SubmittableTextInput>,
+    ) {
+        let url_editor = ctx.add_typed_action_view(|ctx| {
+            let mut input = SubmittableTextInput::new(ctx).validate_on_edit(|url| {
+                url.trim().is_empty() || ward_agents::client::normalize_base_url(url).is_some()
+            });
+            input.set_placeholder_text(ward_agents::DEFAULT_BASE_URL, ctx);
+            input
+        });
+        let key_editor = ctx.add_typed_action_view(|ctx| {
+            let mut input = SubmittableTextInput::new_with_password(true, ctx);
+            input.set_placeholder_text("connection key (agk_...)", ctx);
+            input
+        });
+        let name_editor = ctx.add_typed_action_view(|ctx| {
+            let mut input = SubmittableTextInput::new(ctx);
+            input.set_placeholder_text("worker name (empty: host name)", ctx);
+            input
+        });
+        let root_editor = ctx.add_typed_action_view(|ctx| {
+            let mut input = SubmittableTextInput::new(ctx);
+            input.set_placeholder_text("repository root (empty: ~/agents-work)", ctx);
+            input
+        });
+        for editor in [&url_editor, &key_editor, &name_editor, &root_editor] {
+            update_editor_interaction_state(editor.as_ref(ctx).editor().clone(), true, ctx);
+        }
+        ctx.subscribe_to_view(&url_editor, |_, _, event, ctx| match event {
+            SubmittableTextInputEvent::Submit(url) => {
+                ward_agents::set_base_url(url, ctx);
+                ctx.notify();
+            }
+            SubmittableTextInputEvent::Escape => ctx.emit(CLIAgentsPageEvent::FocusModal),
+        });
+        ctx.subscribe_to_view(&key_editor, |_, _, event, ctx| match event {
+            SubmittableTextInputEvent::Submit(key) => {
+                ward_agents::set_key(key, ctx);
+                ctx.notify();
+            }
+            SubmittableTextInputEvent::Escape => ctx.emit(CLIAgentsPageEvent::FocusModal),
+        });
+        ctx.subscribe_to_view(&name_editor, |_, _, event, ctx| match event {
+            SubmittableTextInputEvent::Submit(name) => {
+                ward_agents::set_worker_name(name, ctx);
+                ctx.notify();
+            }
+            SubmittableTextInputEvent::Escape => ctx.emit(CLIAgentsPageEvent::FocusModal),
+        });
+        ctx.subscribe_to_view(&root_editor, |_, _, event, ctx| match event {
+            SubmittableTextInputEvent::Submit(root) => {
+                ward_agents::set_root(root, ctx);
+                ctx.notify();
+            }
+            SubmittableTextInputEvent::Escape => ctx.emit(CLIAgentsPageEvent::FocusModal),
+        });
+        (url_editor, key_editor, name_editor, root_editor)
     }
 
     /// Base URL, board id and access token inputs of the Chimney section. Each saves on Enter.
@@ -264,6 +354,7 @@ impl CLIAgentsPageView {
             Box::new(CodexUsageChipWidget::default()),
             Box::new(ClaudeNoFlickerWidget::default()),
             Box::new(ChimneyWidget::default()),
+            Box::new(AgentsWorkerWidget::default()),
         ];
         PageType::new_uncategorized(widgets, Some(PageTitle::new(PAGE_TITLE)))
     }
@@ -384,6 +475,10 @@ pub enum CLIAgentsPageAction {
     ToggleCodexUsageChip,
     /// Ward: starts Claude Code tabs with `CLAUDE_CODE_NO_FLICKER=1`.
     ToggleClaudeNoFlicker,
+    /// Ward: turns "Take tasks" of the agents worker on or off.
+    ToggleAgentsTakeTasks,
+    /// Ward: removes the agents connection key (and the worker token) from the secure storage.
+    RemoveAgentsKey,
 }
 
 impl TypedActionView for CLIAgentsPageView {
@@ -479,6 +574,15 @@ impl TypedActionView for CLIAgentsPageView {
             CLIAgentsPageAction::ToggleClaudeNoFlicker => {
                 let enabled = ward_claude_launch::is_no_flicker_enabled(ctx);
                 ward_claude_launch::set_no_flicker_enabled(!enabled, ctx);
+                ctx.notify();
+            }
+            CLIAgentsPageAction::ToggleAgentsTakeTasks => {
+                let paused = ward_agents::is_paused(ctx);
+                ward_agents::set_paused(!paused, ctx);
+                ctx.notify();
+            }
+            CLIAgentsPageAction::RemoveAgentsKey => {
+                ward_agents::set_key("", ctx);
                 ctx.notify();
             }
         }
@@ -1321,6 +1425,291 @@ impl SettingsWidget for ChimneyWidget {
         }
         if let Some(fetch_status) = fetch_status {
             column.add_child(description(fetch_status));
+        }
+        column.finish()
+    }
+}
+
+/// Session rows the agents panel shows.
+const AGENTS_MAX_SESSION_ROWS: usize = 20;
+
+const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+
+fn agents_source_suffix(source: ward_agents::Source, env_var: &str) -> String {
+    match source {
+        ward_agents::Source::Saved => " (saved)".to_owned(),
+        ward_agents::Source::Environment => format!(" (from {env_var})"),
+        ward_agents::Source::Default => " (default)".to_owned(),
+    }
+}
+
+fn agents_connection_text(connection: &ward_agents::worker::Connection) -> String {
+    use ward_agents::worker::Connection;
+    match connection {
+        Connection::Disabled => "Off: no connection key.".to_owned(),
+        Connection::Connecting => "Connecting\u{2026}".to_owned(),
+        Connection::Online => "Online.".to_owned(),
+        Connection::KeyRejected(reason) => {
+            format!("The key was rejected ({reason}). Enter a new key from the Agents screen.")
+        }
+        Connection::Offline(reason) => format!("Service unreachable, retrying: {reason}."),
+    }
+}
+
+/// `5h 12% · week 40%` from the usage reports of one provider.
+fn agents_usage_text(provider: &str, usage: &[ward_agents::contract::UsageReport]) -> String {
+    let windows: Vec<String> = usage
+        .iter()
+        .filter(|report| report.provider == provider)
+        .map(|report| match report.used_percent {
+            Some(percent) => format!("{} {percent:.0}%", report.window),
+            None => format!("{} ?", report.window),
+        })
+        .collect();
+    windows.join(" \u{b7} ")
+}
+
+/// Ward (OSS build): Ward as a worker of agents-service, its settings and the panel with the
+/// connection, slots, agents and sessions of this machine.
+#[derive(Default)]
+struct AgentsWorkerWidget {
+    toggle: SwitchStateHandle,
+}
+
+impl SettingsWidget for AgentsWorkerWidget {
+    type View = CLIAgentsPageView;
+
+    fn search_terms(&self) -> &str {
+        "agents worker agents-service key sessions worktree take tasks pause codex claude ward"
+    }
+
+    fn should_render(&self, _app: &AppContext) -> bool {
+        crate::features::is_fork_oss()
+    }
+
+    fn render(
+        &self,
+        view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        if !self.should_render(app) {
+            return Empty::new().finish();
+        }
+        let label = |text: String| {
+            appearance
+                .ui_builder()
+                .span(text)
+                .with_style(UiComponentStyles {
+                    font_size: Some(CONTENT_FONT_SIZE),
+                    ..Default::default()
+                })
+                .build()
+                .finish()
+        };
+        let description = |text: String| {
+            appearance
+                .ui_builder()
+                .paragraph(text)
+                .with_style(UiComponentStyles {
+                    font_size: Some(appearance.ui_font_size()),
+                    font_color: Some(styles::description_font_color(true, app).into()),
+                    margin: Some(Coords::default().top(2.).bottom(8.)),
+                    ..Default::default()
+                })
+                .build()
+                .finish()
+        };
+
+        let (base_url, url_source) = ward_agents::base_url(app);
+        let (name, name_source) = ward_agents::worker_name(app);
+        let (root, root_source) = ward_agents::root(app);
+        let key_source = ward_agents::key_source(app);
+        let key_status = match key_source {
+            Some(ward_agents::Source::Saved) => "A key is saved in the secure storage.".to_owned(),
+            Some(ward_agents::Source::Environment | ward_agents::Source::Default) => {
+                format!("Using {} from the environment.", ward_agents::KEY_ENV_VAR)
+            }
+            None => "Not set: the worker is off. The key is issued on the Agents screen in \
+                     Chimney and shown once."
+                .to_owned(),
+        };
+
+        let mut column = Flex::column()
+            .with_child(label("Agents worker".to_owned()))
+            .with_child(description(format!(
+                "Ward registers as a worker of agents-service, takes tasks started from Chimney \
+                 cards and runs Claude Code or Codex in its own tabs, one git worktree per \
+                 session under the repository root. Where nothing is saved, {}, {}, {} and {} \
+                 are used.",
+                ward_agents::URL_ENV_VAR,
+                ward_agents::KEY_ENV_VAR,
+                ward_agents::NAME_ENV_VAR,
+                ward_agents::ROOT_ENV_VAR,
+            )))
+            .with_child(render_ward_toggle(
+                "Take tasks",
+                "Off: new assignments are refused; running sessions go on and are still reported.",
+                !ward_agents::is_paused(app),
+                self.toggle.clone(),
+                CLIAgentsPageAction::ToggleAgentsTakeTasks,
+                appearance,
+                app,
+            ))
+            .with_child(label(format!(
+                "Service address: {base_url}{}",
+                agents_source_suffix(url_source, ward_agents::URL_ENV_VAR)
+            )))
+            .with_child(ChildView::new(&view.agents_url_editor).finish())
+            .with_child(label("Connection key".to_owned()))
+            .with_child(description(key_status))
+            .with_child(ChildView::new(&view.agents_key_editor).finish());
+        if key_source == Some(ward_agents::Source::Saved) {
+            let button = appearance
+                .ui_builder()
+                .close_button(16., view.agents_remove_key_mouse_state.clone())
+                .build()
+                .on_click(|ctx, _, _| {
+                    ctx.dispatch_typed_action(CLIAgentsPageAction::RemoveAgentsKey);
+                })
+                .finish();
+            column.add_child(
+                Flex::row()
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_spacing(6.)
+                    .with_child(label("Remove saved key".to_owned()))
+                    .with_child(button)
+                    .finish(),
+            );
+        }
+        column.add_child(label(format!(
+            "Worker name: {name}{}",
+            agents_source_suffix(name_source, ward_agents::NAME_ENV_VAR)
+        )));
+        column.add_child(ChildView::new(&view.agents_name_editor).finish());
+        column.add_child(label(format!(
+            "Repository root: {}{}",
+            root.display(),
+            agents_source_suffix(root_source, ward_agents::ROOT_ENV_VAR)
+        )));
+        column.add_child(ChildView::new(&view.agents_root_editor).finish());
+
+        let Some(snapshot) = ward_agents::model(app).map(|model| model.snapshot()) else {
+            return column.finish();
+        };
+        column.add_child(label("Status".to_owned()));
+        let mut status = agents_connection_text(&snapshot.connection);
+        if let Some(worker_id) = &snapshot.worker_id {
+            status.push_str(&format!(" Worker id {worker_id}."));
+        }
+        if snapshot.server_paused || snapshot.limits.paused {
+            status.push_str(" Paused on the Agents screen.");
+        }
+        if let Some(at) = snapshot.last_heartbeat {
+            status.push_str(&format!(
+                " Last heartbeat {}.",
+                at.with_timezone(&chrono::Local).format("%H:%M:%S")
+            ));
+        }
+        column.add_child(description(status));
+        let active = snapshot
+            .sessions
+            .iter()
+            .filter(|session| {
+                matches!(
+                    session.status,
+                    ward_agents::contract::SessionStatus::Assigned
+                        | ward_agents::contract::SessionStatus::Running
+                        | ward_agents::contract::SessionStatus::Blocked
+                )
+            })
+            .count();
+        let mut load = format!("Slots: {active} of {}.", snapshot.limits.max_sessions);
+        if let Some(resources) = &snapshot.resources {
+            load.push_str(&format!(
+                " CPU {:.0}%, free memory {:.1} GB, free disk {:.0} GB.",
+                resources.cpu_percent,
+                resources.ram_free_bytes as f64 / GIB,
+                resources.disk_free_bytes as f64 / GIB
+            ));
+        }
+        load.push_str(&format!(
+            " Limits: CPU {}%, keep {} GB memory and {} GB disk free, usage up to {}%.",
+            snapshot.limits.cpu_percent,
+            snapshot.limits.ram_reserve_gb,
+            snapshot.limits.disk_min_free_gb,
+            snapshot.limits.usage_max_percent
+        ));
+        column.add_child(description(load));
+
+        if !snapshot.agents.is_empty() {
+            column.add_child(label("Agents".to_owned()));
+            for (provider, info) in &snapshot.agents {
+                let text = if !info.installed {
+                    format!("{provider}: not installed")
+                } else {
+                    let mut text = format!(
+                        "{provider} {}: {}",
+                        info.version.as_deref().unwrap_or("(version unknown)"),
+                        if info.logged_in {
+                            "logged in"
+                        } else {
+                            "not logged in"
+                        }
+                    );
+                    if let Some(plan) = &info.plan {
+                        text.push_str(&format!(", plan {plan}"));
+                    }
+                    let usage = agents_usage_text(provider, &snapshot.usage);
+                    if !usage.is_empty() {
+                        text.push_str(&format!(" \u{b7} {usage}"));
+                    }
+                    text
+                };
+                column.add_child(description(text));
+            }
+        }
+
+        column.add_child(label("Sessions on this machine".to_owned()));
+        if snapshot.sessions.is_empty() {
+            column.add_child(description("None yet.".to_owned()));
+        }
+        for (session, mouse_state) in snapshot
+            .sessions
+            .iter()
+            .zip(view.agents_link_mouse_states.iter())
+        {
+            let number = session
+                .task_number
+                .map(|number| format!("#{number} "))
+                .unwrap_or_default();
+            let mut text = format!(
+                "{number}{} \u{2014} {} ({}), {}",
+                session.title,
+                session.status.as_str(),
+                session.provider,
+                session.branch
+            );
+            if let Some(message) = &session.message {
+                text.push_str(&format!(". {message}"));
+            }
+            column.add_child(description(text));
+            if let Some(url) = &session.remote_control_url {
+                column.add_child(
+                    appearance
+                        .ui_builder()
+                        .link(
+                            "Remote Control".to_owned(),
+                            Some(url.clone()),
+                            None,
+                            mouse_state.clone(),
+                        )
+                        .soft_wrap(false)
+                        .build()
+                        .with_margin_bottom(8.)
+                        .finish(),
+                );
+            }
         }
         column.finish()
     }
