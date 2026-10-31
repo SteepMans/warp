@@ -297,7 +297,12 @@ fn init_platform_native_preferences() -> user_preferences::Model {
             }
         } else if #[cfg(target_os = "windows")] {
             let app_id = warp_core::channel::ChannelState::app_id();
-            Box::new(user_preferences::registry_backed::RegistryBackedPreferences::new(app_id.application_name()))
+            // A development data profile gets its own registry key, like its own data dirs.
+            let key_name = match warp_core::channel::ChannelState::data_profile() {
+                Some(profile) => format!("{}-{profile}", app_id.application_name()),
+                None => app_id.application_name().to_owned(),
+            };
+            Box::new(user_preferences::registry_backed::RegistryBackedPreferences::new(&key_name))
         } else if #[cfg(target_os = "macos")] {
             Box::new(user_preferences::user_defaults::UserDefaultsPreferencesStorage::new(
                 warp_core::channel::ChannelState::data_domain_if_not_default()

@@ -5,6 +5,10 @@ use warp_errors::report_error;
 use windows_registry::{CURRENT_USER, HSTRING};
 
 pub(super) fn register_uri_handler() {
+    // A development data profile runs next to the installed app; the URI scheme stays with it.
+    if ChannelState::data_profile().is_some() {
+        return;
+    }
     // To change the settings for the user, changes must be made under
     // HKEY_CURRENT_USER\Software\Classes instead of under HKEY_CLASSES_ROOT since only an
     // administrator can modify it. It gets merged into HKEY_CLASSES_ROOT later.
