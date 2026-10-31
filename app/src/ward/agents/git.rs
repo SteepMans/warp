@@ -71,6 +71,92 @@ pub fn ensure_excluded(clone: &Path) -> std::io::Result<()> {
     }
 }
 
+/// How the `vault` part of the machine profile wants the vault refreshed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VaultUpdate {
+    /// Leave the vault alone.
+    Off,
+    /// `git fetch origin --prune` only.
+    Fetch,
+    /// Fetch and fast-forward; the default.
+    #[default]
+    Pull,
+}
+
+pub fn parse_vault_update(value: &str) -> VaultUpdate {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" | "off" | "no" | "false" => VaultUpdate::Off,
+        "fetch" => VaultUpdate::Fetch,
+        _ => VaultUpdate::Pull,
+    }
+}
+
+/// The vault of the preparation phase: cloned when its directory is not there yet and
+/// refreshed as the profile asks. Ward never writes inside the vault and never merges or
+/// rebases: a fast-forward that does not apply (the two devices went apart) leaves the vault as
+/// it is and says so, because the vault is still usable. The message goes into the profile
+/// report; an error means no preparation can run on this machine.
+pub fn prepare_vault(
+    path: &Path,
+    repo: &str,
+    branch: &str,
+    update: &str,
+) -> Result<String, String> {
+    if path.as_os_str().is_empty() {
+        return Err("путь к волту не задан".to_owned());
+    }
+    if !path.join(".git").exists() {
+        // A vault of plain notes is usable as it is; only updating it is off the table.
+        if path.is_dir() {
+            return Ok(format!(
+                "волт на месте, но {} не репозиторий git: обновление пропущено",
+                path.display()
+            ));
+        }
+        if repo.is_empty() {
+            return Err(format!(
+                "волта нет в {} и в профиле не задан repo для клонирования",
+                path.display()
+            ));
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|err| format!("cannot create {}: {err}", parent.display()))?;
+        }
+        let target = path.to_string_lossy().into_owned();
+        run(None, &["clone", "--", repo, &target])?;
+        return Ok(format!("волт склонирован в {}", path.display()));
+    }
+    match parse_vault_update(update) {
+        VaultUpdate::Off => Ok("волт на месте, обновление выключено в профиле".to_owned()),
+        VaultUpdate::Fetch => {
+            run(Some(path), &["fetch", "origin", "--prune"])?;
+            Ok("волт: fetch origin".to_owned())
+        }
+        VaultUpdate::Pull => {
+            run(Some(path), &["fetch", "origin", "--prune"])?;
+            let current =
+                run(Some(path), &["symbolic-ref", "-q", "--short", "HEAD"]).unwrap_or_default();
+            let current = current.trim();
+            if current.is_empty() {
+                return Ok("волт не на ветке: только fetch".to_owned());
+            }
+            if !branch.is_empty() && current != branch {
+                return Ok(format!(
+                    "волт на ветке {current}, в профиле {branch}: только fetch"
+                ));
+            }
+            let upstream = format!("origin/{current}");
+            match run(Some(path), &["merge", "--ff-only", &upstream]) {
+                Ok(_) => Ok(format!("волт обновлён до {upstream}")),
+                Err(err) => Ok(format!(
+                    "волт разошёлся с {upstream}, оставлен как есть: {err}"
+                )),
+            }
+        }
+    }
+}
+
 /// What the worktree of a session needs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorktreeSpec<'a> {
