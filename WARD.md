@@ -124,6 +124,90 @@ Settings → Third party CLI agents: адрес, доска, email и парол
 Переключатели обоих чипов (по умолчанию включены) и рендерера — на странице Settings → Third
 party CLI agents.
 
+## Агенты
+
+Ward работает воркером сервиса агентов (`agents-service`): берёт назначения, разворачивает
+worktree, запускает в нём агента во вкладке Ward и отчитывается о ходе сессии. Код —
+`app/src/ward/agents/`.
+
+### Подключение
+
+Settings → Third party CLI agents → Agents worker:
+
+- адрес сервиса, по умолчанию `https://chimney.steep-man.ru/agents`;
+- ключ подключения `agk_…` (выдаёт сервис); без ключа воркер выключен;
+- имя воркера, по умолчанию имя компьютера;
+- корень клонов, по умолчанию `~/agents-work`;
+- переключатель «Take tasks»: выключен — новые назначения отклоняются, идущие сессии работают.
+
+Ключ и токен воркера лежат в защищённом хранилище, как токен Chimney, и в логи не пишутся.
+Смена адреса, имени или ключа сбрасывает регистрацию. Для проверки без настроек:
+`WARD_AGENTS_URL`, `WARD_AGENTS_KEY`, `WARD_AGENTS_NAME`, `WARD_AGENTS_ROOT` (переменная
+важнее сохранённого значения, в панели виден источник).
+
+### Цикл
+
+- Регистрация с паспортом: ядра, память, диск, инструменты (`git`, `claude`, `codex`, `node`,
+  `java`, `cargo`, `dotnet`), агенты (`installed`, `version`, `loggedIn`, `plan`), клоны
+  `<корень>/<owner>/<repo>`. При 401 на любом запросе — повторная регистрация.
+- Пульс раз в `heartbeatSec`: ресурсы, лимиты подписок (`usage`), статусы сессий. Сервис
+  недоступен — повтор с нарастающей паузой до 5 минут.
+- Long-poll `GET /inbox?wait=30`: назначения и команды `stop`/`message` (команды приходят и в
+  ответе пульса).
+- Назначение принимается (`ack`), если есть свободный слот (`maxSessions`), хватает памяти,
+  диска и CPU, репозиторий разрешён (`allowedRepos`), выбранный агент установлен, вошёл в
+  учётку и его лимит ниже `usageMaxPercent`. `provider: auto` — агент с наименьшей загрузкой
+  лимитов, при равенстве по порядку `providers`. Иначе отказ с причиной.
+- Развёртывание: `git clone` или `git fetch` в `<корень>/<owner>/<repo>`, worktree
+  `<клон>/.worktrees/<8 символов sessionId>` на ветке назначения (существующая на origin
+  берётся оттуда, новая создаётся от `origin/<baseBranch>`). `/.agents/` и `/.worktrees/`
+  дописываются в `.git/info/exclude`.
+- Запуск: `<worktree>/.agents/prompt.md` и раннер `run.ps1` (pwsh) или `run.sh` (Git Bash),
+  вкладка Ward в worktree. Раннер убирает из окружения `CLAUDE*`, ставит
+  `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1`, передаёт промпт из файла первым сообщением и
+  пишет код выхода агента в `<worktree>/.agents/exit-code`.
+  - Claude: `claude --remote-control <имя> --dangerously-skip-permissions [--model <m>]`; id
+    сессии и `bridgeSessionId` — из `~/.claude/sessions/<pid>.json`, транскрипт —
+    `~/.claude/projects/<slug>/<sessionId>.jsonl`, ссылка `https://claude.ai/code/<bridge>`.
+  - Codex: `codex --dangerously-bypass-approvals-and-sandbox [-m <m>]`; id — из нового
+    `rollout-*.jsonl` с `cwd` worktree, ссылки удалённого управления нет.
+  - `model: null` — без флага модели.
+- Статусы: `running` (с id сессии агента и ссылкой), `blocked` с `reason: usage_limit` и
+  `resetsAt`, когда агент упёрся в лимит подписки (по записи об ошибке в транскрипте),
+  `review` при коде 0, иначе `failed` с `exitCode`.
+- Транскрипт отправляется раз в 10 секунд кусками целых строк с растущим `seq`; не
+  отправленное копится и уходит позже. Статусы тоже ждут связи и уходят по порядку.
+- `stop` останавливает процесс агента (на Windows `taskkill /T /F`), статус `failed`
+  «Остановлено владельцем». `message` вставляется в агента во вкладке (bracketed paste и Enter).
+  `maxDurationMin` — остановка по времени.
+- Закрытие Ward отправляет по идущим сессиям `failed` «Ward закрыт, сессия прервана». Сессии не
+  переживают перезапуск Ward.
+
+### Лимиты подписок
+
+- Claude: окна `5h` и `week` из того же отчёта `api/oauth/usage`, что и чип Claude
+  (`source: oauth_usage`); без него — `usedPercent: null`, `source: none`.
+- Codex: окна `primary` и `secondary` из последнего `token_count` в rollout-файлах
+  (`source: rollout`).
+- `loggedIn` проверяется без сети и без чтения значений токенов: `oauthAccount` в
+  `~/.claude.json` или `ANTHROPIC_API_KEY`; `~/.codex/auth.json`.
+
+### Второй экземпляр для проверки
+
+Отладочная сборка с `WARP_DATA_PROFILE=<имя>` хранит данные, состояние, защищённые значения и
+настройки (ключ реестра `HKCU\Software\Warp.dev\WarpOss-<имя>`) отдельно от установленного
+Ward, не перерегистрирует схему `warposs://` и не добавляет себя в автозапуск. Сборка без
+`release_bundle` не передаёт ссылки установленному Ward.
+
+```powershell
+$env:WARP_DATA_PROFILE = "agents-test"
+$env:WARD_AGENTS_URL = "https://chimney.steep-man.ru/agents"
+$env:WARD_AGENTS_KEY = "<ключ agk_…>"
+$env:WARD_AGENTS_ROOT = "$HOME\agents-work-test"
+Get-ChildItem env: | Where-Object Name -like 'CLAUDE*' | Remove-Item
+& "$env:CARGO_TARGET_DIR\debug\warp-oss.exe"
+```
+
 ## Вкладка с командой по URI
 
 ```
