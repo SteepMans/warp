@@ -118,11 +118,12 @@ fn prepares_clone_and_worktrees() {
         session_id: "c1b2c3d4",
         ..spec
     };
+    // (The bare origin was made with `feature/existing` checked out: that is its default.)
     let prepared = prepare_worktree(&root, &no_base).unwrap();
-    assert_eq!(prepared.base.as_deref(), Some("main"));
+    assert_eq!(prepared.base.as_deref(), Some("feature/existing"));
     let note = prepared.base_note.unwrap();
     assert!(
-        note.contains("develop") && note.contains("origin/main"),
+        note.contains("develop") && note.contains("origin/feature/existing"),
         "{note}"
     );
 }
@@ -194,7 +195,8 @@ fn fake_clone(path: &Path, url: &str) {
     std::fs::write(
         git_dir.join("config"),
         format!(
-            "[core]\n\trepositoryformatversion = 0\n[remote \"upstream\"]\n\turl = https://example.test/other/x.git\n[remote \"origin\"]\n\turl = {url}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n"
+            "[core]\n\trepositoryformatversion = 0\n[remote \"upstream\"]\n\turl = https://example.test/other/x.git\n[remote \"origin\"]\n\turl = {}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n",
+            url.replace('\\', "\\\\")
         ),
     )
     .unwrap();
@@ -241,6 +243,23 @@ fn remote_urls_are_compared_without_their_form() {
         r"C:\work\remotes\Owner\repo.git",
         r"D:\work\remotes\Owner\repo.git"
     ));
+}
+
+#[test]
+fn config_values_are_unescaped() {
+    assert_eq!(
+        config_value(r" C:\\work\\remotes\\Owner\\repo.git "),
+        r"C:\work\remotes\Owner\repo.git"
+    );
+    assert_eq!(
+        config_value(r#""C:/work/hassle online/x.git" # comment"#),
+        "C:/work/hassle online/x.git"
+    );
+    assert_eq!(
+        config_value("https://github.com/Owner/repo.git ; note"),
+        "https://github.com/Owner/repo.git"
+    );
+    assert_eq!(config_value(r#""a;b\"c""#), r#"a;b"c"#);
 }
 
 #[test]

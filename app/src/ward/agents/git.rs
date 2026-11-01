@@ -227,11 +227,36 @@ pub fn origin_url(repo: &Path) -> Option<String> {
         if let Some((key, value)) = line.split_once('=')
             && key.trim().eq_ignore_ascii_case("url")
         {
-            let value = value.trim().trim_matches('"').trim();
-            return (!value.is_empty()).then(|| value.to_owned());
+            let value = config_value(value);
+            return (!value.is_empty()).then_some(value);
         }
     }
     None
+}
+
+/// A value of a git config file: quotes dropped, `\\`, `\"`, `\t` and `\n` unescaped (git
+/// writes `C:\\work\\repo` for a Windows path), a comment after `#` or `;` cut off.
+pub fn config_value(raw: &str) -> String {
+    let mut value = String::new();
+    let mut quoted = false;
+    let mut chars = raw.trim().chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => quoted = !quoted,
+            '\\' => match chars.next() {
+                Some('n') => value.push('\n'),
+                Some('t') => value.push('\t'),
+                Some('b') => {
+                    value.pop();
+                }
+                Some(other) => value.push(other),
+                None => {}
+            },
+            '#' | ';' if !quoted => break,
+            c => value.push(c),
+        }
+    }
+    value.trim().to_owned()
 }
 
 /// A working copy with its own `.git` directory (a worktree or a submodule has a `.git` file).
@@ -257,7 +282,7 @@ fn collect_clones(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
         .filter(|entry| {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            !name.starts_with('.') && !SKIPPED_DIRS.contains(&name.as_ref())
+            !name.starts_with('.') && !SKIPPED_DIRS.contains(&&*name)
         })
         .map(|entry| entry.path())
         .collect();
