@@ -1,6 +1,11 @@
 //! The whole cycle against a fake service: registration, heartbeat, an accepted and a refused
 //! assignment, a worktree from a local remote, a fake agent session, a message, the transcript
 //! and the final status.
+//!
+//! Every test gives its fake service its own path prefix (`/agents/t-…`). The loops of a worker
+//! never stop, and the fake servers come from one pool, so a worker of a finished test can get
+//! the server of a test that starts later: with its own prefix it matches no mock there and
+//! neither takes that test's assignment nor lands in its log.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -324,11 +329,12 @@ fn full_cycle_against_a_fake_service() {
 
     let mut server = Server::new();
     let log: Log = Arc::default();
+    let base = "/agents/t-cycle/api/v1/worker";
     let registrations = Arc::new(AtomicUsize::new(0));
     {
         let registrations = registrations.clone();
         server
-            .mock("POST", "/agents/api/v1/worker/register")
+            .mock("POST", &format!("{base}/register"))
             .match_body(Matcher::PartialJson(serde_json::json!({
                 "key": "agk_test",
                 "name": "test-pc",
@@ -344,7 +350,6 @@ fn full_cycle_against_a_fake_service() {
             })
             .create();
     }
-    let base = "/agents/api/v1/worker";
     record(
         &mut server,
         "POST",
@@ -411,7 +416,7 @@ fn full_cycle_against_a_fake_service() {
 
     let host = Arc::new(FakeHost::new(
         WorkerConfig {
-            base_url: format!("{}/agents", server.url()),
+            base_url: format!("{}/agents/t-cycle", server.url()),
             key: "agk_test".to_owned(),
             name: "test-pc".to_owned(),
             root: root.clone(),
@@ -613,6 +618,7 @@ fn the_preparation_phase_runs_before_the_executor() {
 
     let mut server = Server::new();
     let log: Log = Arc::default();
+    let base = "/agents/t-prepare/api/v1/worker";
     let profile = serde_json::json!({
         "version": 2,
         "parts": {
@@ -631,11 +637,10 @@ fn the_preparation_phase_runs_before_the_executor() {
         })
         .to_string();
         server
-            .mock("POST", "/agents/api/v1/worker/register")
+            .mock("POST", &format!("{base}/register"))
             .with_body_from_request(move |_| body.clone().into_bytes())
             .create();
     }
-    let base = "/agents/api/v1/worker";
     record(
         &mut server,
         "POST",
@@ -725,7 +730,7 @@ fn the_preparation_phase_runs_before_the_executor() {
 
     let host = Arc::new(FakeHost::new(
         WorkerConfig {
-            base_url: format!("{}/agents", server.url()),
+            base_url: format!("{}/agents/t-prepare", server.url()),
             key: "agk_test".to_owned(),
             name: "test-pc".to_owned(),
             root: root.clone(),
@@ -986,6 +991,7 @@ fn a_preparation_without_a_plan_fails_with_its_own_reason() {
 
     let mut server = Server::new();
     let log: Log = Arc::default();
+    let base = "/agents/t-noplan/api/v1/worker";
     {
         let body = serde_json::json!({
             "workerId": "w-1",
@@ -1000,11 +1006,10 @@ fn a_preparation_without_a_plan_fails_with_its_own_reason() {
         })
         .to_string();
         server
-            .mock("POST", "/agents/api/v1/worker/register")
+            .mock("POST", &format!("{base}/register"))
             .with_body_from_request(move |_| body.clone().into_bytes())
             .create();
     }
-    let base = "/agents/api/v1/worker";
     record(
         &mut server,
         "POST",
@@ -1071,7 +1076,7 @@ fn a_preparation_without_a_plan_fails_with_its_own_reason() {
 
     let host = Arc::new(FakeHost::new(
         WorkerConfig {
-            base_url: format!("{}/agents", server.url()),
+            base_url: format!("{}/agents/t-noplan", server.url()),
             key: "agk_test".to_owned(),
             name: "test-pc".to_owned(),
             root: root.clone(),
@@ -1194,11 +1199,11 @@ fn a_tab_that_never_starts_the_agent_ends_as_failed() {
 
     let mut server = Server::new();
     let log: Log = Arc::default();
+    let base = "/agents/t-silent/api/v1/worker";
     server
-        .mock("POST", "/agents/api/v1/worker/register")
+        .mock("POST", &format!("{base}/register"))
         .with_body(r#"{"workerId":"w-1","token":"agw_token","heartbeatSec":1}"#)
         .create();
-    let base = "/agents/api/v1/worker";
     record(
         &mut server,
         "POST",
@@ -1254,7 +1259,7 @@ fn a_tab_that_never_starts_the_agent_ends_as_failed() {
     let host = Arc::new(
         FakeHost::new(
             WorkerConfig {
-                base_url: format!("{}/agents", server.url()),
+                base_url: format!("{}/agents/t-silent", server.url()),
                 key: "agk_test".to_owned(),
                 name: "test-pc".to_owned(),
                 root: root.clone(),
