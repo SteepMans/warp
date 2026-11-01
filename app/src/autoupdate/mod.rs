@@ -1182,6 +1182,11 @@ impl RelaunchModel {
         ctx.notify();
     }
 
+    /// Whether a relaunch was requested, so the app comes back up by itself after terminating.
+    pub fn is_relaunch_requested(&self) -> bool {
+        self.relaunch_status == RelaunchStatus::Requested
+    }
+
     /// Cancels a requested relaunch, if there was one. Returns the previous relaunch status.
     fn cancel_relaunch(&mut self, ctx: &mut ModelContext<Self>) -> RelaunchStatus {
         let previous_status = self.relaunch_status;

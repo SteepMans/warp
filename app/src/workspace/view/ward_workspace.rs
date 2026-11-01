@@ -151,6 +151,14 @@ impl Workspace {
         Some(OpenedUriTab { pane_uuid })
     }
 
+    /// Activates the tab that was active before an update relaunch, once Ward has reopened the
+    /// window's tabs. An index that no longer fits (a tab whose directory is gone) is ignored.
+    pub(crate) fn ward_activate_restored_tab(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
+        if index < self.tab_count() {
+            self.activate_tab_internal(index, ctx);
+        }
+    }
+
     /// Re-renders (tab row card chips) when a Chimney board was fetched.
     pub(super) fn ward_subscribe_to_chimney(ctx: &mut ViewContext<Self>) {
         if !ctx.has_singleton_model::<chimney::model::ChimneyModel>() {
