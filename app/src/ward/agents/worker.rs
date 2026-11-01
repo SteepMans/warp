@@ -14,9 +14,10 @@
 //!
 //! An assignment without a prompt (or without a repository or a branch) goes through the
 //! preparation phase first: the orchestrator session in the vault writes `plan.json`, Ward
-//! sends the plan to the service and only then, straight away or after the owner's `approve`,
-//! starts the executor. Both sessions of one assignment share one journal, each part marked
-//! with its role.
+//! sends the plan to the service, waits for the orchestrator to end its own session (see
+//! [`PREPARE_EXIT_WAIT`]) and only then, straight away or after the owner's `approve`, starts
+//! the executor. Both sessions of one assignment share one journal, each part marked with its
+//! role.
 //!
 //! Everything that needs the UI goes through [`Host`], so the loops run the same against a fake
 //! host and a fake HTTP server in tests.
@@ -151,6 +152,9 @@ pub struct Timing {
     pub session_start_grace: Duration,
     /// The runner is gone but wrote no exit code: the session ends after this.
     pub exit_grace: Duration,
+    /// How long the orchestrator may take to end by itself after its plan was taken; see
+    /// [`PREPARE_EXIT_WAIT`].
+    pub prepare_exit_wait: Duration,
     /// After a stop, the session ends after this even without an exit code.
     pub stop_grace: Duration,
     pub usage_every: Duration,
@@ -172,6 +176,7 @@ impl Default for Timing {
             session_lookup_grace: Duration::from_secs(120),
             session_start_grace: Duration::from_secs(180),
             exit_grace: Duration::from_secs(15),
+            prepare_exit_wait: PREPARE_EXIT_WAIT,
             stop_grace: Duration::from_secs(30),
             usage_every: Duration::from_secs(60),
             profile_every: Duration::from_secs(5),
@@ -294,10 +299,17 @@ const MESSAGE_USAGE_LIMIT: &str = "Агент упёрся в лимит под�
 const MESSAGE_PREPARING: &str = "Подготовка: оркестратор собирает досье и промпт";
 const MESSAGE_PREPARE_TOO_LONG: &str = "Подготовка не уложилась в prepareMaxDurationMin";
 const MESSAGE_PREPARE_NO_PLAN: &str = "Оркестратор завершился, а plan.json не оставил";
+const MESSAGE_PREPARE_CRASHED: &str = "Оркестратор упал, не оставив plan.json";
 const MESSAGE_PLAN_REJECTED: &str = "План отклонён владельцем";
 
 /// Finished sessions the panel keeps.
 const MAX_FINISHED_SESSIONS: usize = 20;
+
+/// How long the orchestrator gets to end by itself once its plan is taken. The plan is its last
+/// action, so all that is left is its closing answer: seconds, not minutes. Ward ends the
+/// process when the wait is over, because the executor of the same assignment waits for it; a
+/// longer wait would only delay the executor for nothing.
+const PREPARE_EXIT_WAIT: Duration = Duration::from_secs(20);
 
 /// Roles of the two sessions of one assignment, as the journal marks them.
 const ROLE_ORCHESTRATOR: &str = "orchestrator";
@@ -311,6 +323,16 @@ enum Phase {
     Prepare {
         launched_at_ms: i64,
         at: Instant,
+    },
+    /// The plan is taken and the orchestrator ends by itself. The rule stays "two sessions one
+    /// after the other, not at once": the executor starts only once the orchestrator is gone,
+    /// or once Ward ended it because it did not go by itself.
+    PrepareExit {
+        /// The repository root of the settings, as it was when the plan was taken.
+        root: PathBuf,
+        repo: launch::RepoId,
+        /// When the plan was taken.
+        since: Instant,
     },
     /// The plan went to the service and waits for the owner's `approve`.
     PlanReview,
@@ -1365,6 +1387,10 @@ impl Worker {
                 self.watch_preparation(session, launched_at_ms, launched_at)
                     .await;
             }
+            Phase::PrepareExit { root, repo, since } => {
+                let (root, repo, since) = (root.clone(), repo.clone(), *since);
+                self.watch_prepare_exit(session, &root, &repo, since);
+            }
             Phase::PlanReview => self.watch_plan_review(session).await,
             Phase::Worktree(slot) => {
                 let result = slot.lock().take();
@@ -1538,12 +1564,18 @@ impl Worker {
         let gone = session
             .runner_pid
             .is_some_and(|pid| !self.machine.is_alive(pid))
-            || std::fs::read_to_string(dir.join(launch::EXIT_CODE_FILE)).is_ok();
+            || dir.join(launch::EXIT_CODE_FILE).is_file();
         if gone {
             let since = *session.runner_gone_since.get_or_insert_with(Instant::now);
             // The plan may land a moment after the agent's own process is gone.
             if since.elapsed() >= self.timing.exit_grace {
-                self.fail_preparation(session, MESSAGE_PREPARE_NO_PLAN);
+                // Ward ends the orchestrator only after its plan is taken, so a nonzero code
+                // here is the orchestrator's own failure and is named as one.
+                let reason = match read_exit_code(&dir) {
+                    Some(code) if code != 0 => format!("{MESSAGE_PREPARE_CRASHED} (код {code})"),
+                    _ => MESSAGE_PREPARE_NO_PLAN.to_owned(),
+                };
+                self.fail_preparation(session, &reason);
             }
         } else {
             session.runner_gone_since = None;
@@ -1622,8 +1654,61 @@ impl Worker {
         );
         session.plan_outbox = Some(plan.clone());
         session.plan = Some(plan);
-        // Two sessions one after the other, not at once: the orchestrator is done.
-        self.stop_agent(session);
+        // The plan was the orchestrator's last action, so it is left to end by itself: the
+        // next phase waits for its exit before anything of the executor starts.
+        session.phase = Phase::PrepareExit {
+            root,
+            repo,
+            since: Instant::now(),
+        };
+    }
+
+    /// The plan is taken and the orchestrator finishes its own session: Ward waits
+    /// [`Timing::prepare_exit_wait`] for its exit, so its closing answer lands in the
+    /// transcript, reads the journal to the end and only then starts the executor. An
+    /// orchestrator that does not go by itself is ended by Ward, as before; that exit code is
+    /// Ward's doing and says nothing about the preparation, which the plan already settled.
+    fn watch_prepare_exit(
+        &self,
+        session: &mut Session,
+        root: &Path,
+        repo: &launch::RepoId,
+        since: Instant,
+    ) {
+        let dir = session.prepare.as_ref().map(|prepare| prepare.dir.clone());
+        let gone = match dir.as_deref() {
+            Some(dir) => self.orchestrator_gone(session, dir),
+            None => false,
+        };
+        // A stop from the owner is not worth waiting out: the phase after this one answers it.
+        if !gone && session.stop.is_none() && since.elapsed() < self.timing.prepare_exit_wait {
+            if self.journal_due(session) {
+                self.read_journal(session);
+            }
+            return;
+        }
+        if gone {
+            // Its own code, whatever it is: the preparation was settled by the plan.
+            match dir.as_deref().and_then(read_exit_code) {
+                Some(code) => log::info!(
+                    "Ward agents: the orchestrator of {} ended by itself with {code}",
+                    session.assignment.session_id
+                ),
+                None => log::info!(
+                    "Ward agents: the orchestrator of {} ended by itself",
+                    session.assignment.session_id
+                ),
+            }
+        } else {
+            log::info!(
+                "Ward agents: the orchestrator of {} did not end by itself after its plan, \
+                 Ward ends it",
+                session.assignment.session_id
+            );
+            self.stop_agent(session);
+        }
+        // The last lines of the orchestrator belong to the journal either way, so the panel
+        // shows its closing answer instead of a sentence cut in half.
         self.read_journal(session);
         if session.assignment.plan_approval {
             session.phase = Phase::PlanReview;
@@ -1636,7 +1721,17 @@ impl Worker {
             return;
         }
         session.reset_agent();
-        self.start_worktree(session, &root, &repo);
+        self.start_worktree(session, root, repo);
+    }
+
+    /// Whether the orchestrator's own processes are over: the runner left its exit code, or
+    /// neither the agent nor the runner is alive any more.
+    fn orchestrator_gone(&self, session: &Session, dir: &Path) -> bool {
+        if dir.join(launch::EXIT_CODE_FILE).is_file() {
+            return true;
+        }
+        let pids = session.agent_pids();
+        !pids.is_empty() && pids.iter().all(|pid| !self.machine.is_alive(*pid))
     }
 
     /// Waiting in `plan-review` for `approve` or `reject`.
@@ -1827,10 +1922,7 @@ impl Worker {
             self.read_journal(session);
         }
 
-        let exit_code = std::fs::read_to_string(agents.join(launch::EXIT_CODE_FILE))
-            .ok()
-            .and_then(|text| launch::parse_exit_code(&text));
-        if let Some(code) = exit_code {
+        if let Some(code) = read_exit_code(&agents) {
             self.end(session, Some(code));
             return;
         }
@@ -2255,6 +2347,13 @@ fn finish(session: &mut Session, request: StatusRequest) {
     session.phase = Phase::Done;
 }
 
+/// The exit code the runner left in `dir`, when it is there and readable.
+fn read_exit_code(dir: &Path) -> Option<i32> {
+    std::fs::read_to_string(dir.join(launch::EXIT_CODE_FILE))
+        .ok()
+        .and_then(|text| launch::parse_exit_code(&text))
+}
+
 /// The text of `plan.json`, when it is there and not absurdly large.
 fn read_plan_file(path: &Path) -> Option<String> {
     let size = std::fs::metadata(path).ok()?.len();
@@ -2284,15 +2383,17 @@ fn apply_command(sessions: &mut [Session], command: Command) {
                 session.messages.push_back(text);
             }
         }
+        // The plan reaches the service while the orchestrator is still ending, so the owner's
+        // answer may come before the session asks for it: it is kept for `plan-review`.
         Command::Approve { .. } => {
-            if matches!(session.phase, Phase::PlanReview) {
+            if matches!(session.phase, Phase::PlanReview | Phase::PrepareExit { .. }) {
                 session.approval = Some(Ok(()));
             } else {
                 log::info!("Ward agents: approve for a session that waits for nothing");
             }
         }
         Command::Reject { reason, .. } => {
-            if matches!(session.phase, Phase::PlanReview) {
+            if matches!(session.phase, Phase::PlanReview | Phase::PrepareExit { .. }) {
                 session.approval = Some(Err(reason));
             } else {
                 log::info!("Ward agents: reject for a session that waits for nothing");

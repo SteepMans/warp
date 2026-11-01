@@ -9,8 +9,9 @@
 //! orchestrator needs nothing but the vault to start.
 //!
 //! The orchestrator writes no code and touches no working repository: its work is the vault,
-//! the card and the prompt. The plan is its last action, after which Ward closes its session
-//! and starts the executor, so the two sessions run one after the other.
+//! the card and the prompt. The plan is its last action, after which it ends its own session;
+//! Ward waits for that exit (and ends the process itself only if it does not come) and starts
+//! the executor after it, so the two sessions run one after the other.
 
 use std::path::Path;
 
@@ -177,8 +178,8 @@ pub fn orchestrator_prompt(ctx: &PromptContext<'_>) -> String {
          - `summary` — две-три строки для карточки.\n\
          - `grouped` — номера карточек, которые ты решил вести одной сессией.\n\
          - Пути в JSON — с прямыми слэшами.\n\
-         - Файл — последнее действие: прочитав его, Ward закрывает твою сессию и запускает \
-           исполнителя.\n\n",
+         - Файл — последнее действие: записал, коротко ответил — и заверши сессию сам. Ward \
+           дождётся твоего выхода и только потом запустит исполнителя.\n\n",
     );
 
     text.push_str("## Границы\n\n");
