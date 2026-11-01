@@ -12,6 +12,9 @@
 //!   are sent with `usedPercent: null`.
 //! - Limit refusal: an API error entry in the transcript with `"error":"rate_limit"` and
 //!   `quotaLimits.resetsAt`, or the "You've hit your limit" text.
+//! - Last turn: the newest `assistant` or `user` entry of the transcript. A `tool_use` block
+//!   without its `tool_result` means the turn goes on; a text block that nothing follows is the
+//!   agent's closing answer; a `tool_use` of [`ASK_TOOLS`] is a question waiting on the screen.
 
 use std::path::{Path, PathBuf};
 
@@ -19,7 +22,9 @@ use chrono::{DateTime, TimeZone as _, Utc};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-use super::{Account, AgentCommand, FoundSession, Homes, LimitHit, Provider, WardUsage, rfc3339};
+use super::{
+    Account, AgentCommand, FoundSession, Homes, LastTurn, LimitHit, Provider, WardUsage, rfc3339,
+};
 use crate::ward::agents::contract::UsageReport;
 use crate::ward::agents::launch::forward_slashes;
 use crate::ward::agents::profile;
@@ -276,6 +281,72 @@ pub fn parse_limit_hit(tail: &str) -> Option<LimitHit> {
     None
 }
 
+/// The tools Claude Code asks the owner something with. A call of one of these is a question
+/// on the screen of the tab: the agent stands still until somebody answers, and the session has
+/// to call the owner instead of being taken for finished.
+pub const ASK_TOOLS: [&str; 2] = ["AskUserQuestion", "ExitPlanMode"];
+
+/// What the last turn of the transcript was; see the module header for the entries it reads.
+pub fn parse_last_turn(tail: &str) -> LastTurn {
+    for line in tail.lines().rev() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        match entry.get("type").and_then(Value::as_str) {
+            Some("assistant") => {
+                // An error in place of an answer is no answer: the turn is not over.
+                if entry
+                    .get("isApiErrorMessage")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    return LastTurn::Working;
+                }
+                let Some(blocks) = entry.pointer("/message/content").and_then(Value::as_array)
+                else {
+                    return LastTurn::Working;
+                };
+                // The newest block of the message decides; thinking and meta blocks are skipped.
+                for block in blocks.iter().rev() {
+                    match block.get("type").and_then(Value::as_str) {
+                        Some("tool_use") => {
+                            let name = block
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default();
+                            return if ASK_TOOLS.contains(&name) {
+                                LastTurn::Asked
+                            } else {
+                                LastTurn::Working
+                            };
+                        }
+                        Some("text") => {
+                            let text = block
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default();
+                            if !text.trim().is_empty() {
+                                return LastTurn::Answered;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                return LastTurn::Working;
+            }
+            // A `tool_result` or a message of the owner: the agent still owes the answer to it.
+            Some("user") => return LastTurn::Working,
+            // System, summary and file snapshot lines say nothing about the turn.
+            _ => continue,
+        }
+    }
+    LastTurn::Working
+}
+
 impl Provider for Claude {
     fn id(&self) -> &'static str {
         ID
@@ -364,6 +435,10 @@ impl Provider for Claude {
 
     fn limit_hit(&self, tail: &str) -> Option<LimitHit> {
         parse_limit_hit(tail)
+    }
+
+    fn last_turn(&self, tail: &str) -> LastTurn {
+        parse_last_turn(tail)
     }
 }
 
