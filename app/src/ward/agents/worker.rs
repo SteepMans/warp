@@ -1156,6 +1156,7 @@ impl Worker {
         let script = launch::runner_script(kind, &dir, &vault_dir, &command);
         let runner = dir.join(kind.file_name());
         std::fs::write(&runner, script).map_err(|err| err.to_string())?;
+        self.prepare_workspace(orchestrator, &vault_dir);
         self.host
             .open_tab(TabSpec {
                 cwd: vault_dir,
@@ -1355,6 +1356,19 @@ impl Worker {
         }
     }
 
+    /// Lets the agent start in `cwd` without a question on the screen of its tab (Claude Code's
+    /// folder trust). A failure only costs the session the answer it needs, so the launch goes
+    /// on and the watch of the session reports a tab that stays silent.
+    fn prepare_workspace(&self, provider: &'static dyn Provider, cwd: &Path) {
+        if let Err(err) = provider.prepare_workspace(&self.homes, cwd) {
+            log::warn!(
+                "Ward agents: could not record the trust of {} for {}: {err}",
+                cwd.display(),
+                provider.id()
+            );
+        }
+    }
+
     /// Writes the session files and opens its tab.
     async fn launch(&self, session: &Session, worktree: &Path) -> Result<Option<String>, String> {
         let (kind, bash) = self
@@ -1378,6 +1392,7 @@ impl Worker {
         let script = launch::runner_script(kind, &agents, worktree, &command);
         let runner = agents.join(kind.file_name());
         std::fs::write(&runner, script).map_err(|err| err.to_string())?;
+        self.prepare_workspace(session.provider, worktree);
         self.host
             .open_tab(TabSpec {
                 cwd: worktree.to_path_buf(),

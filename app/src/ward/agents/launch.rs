@@ -175,7 +175,8 @@ pub fn sh_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn forward_slashes(path: &Path) -> String {
+/// A path as the agents write it in their own files: forward slashes everywhere.
+pub fn forward_slashes(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 

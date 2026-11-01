@@ -90,6 +90,11 @@ pub trait Provider: Send + Sync {
     /// `session_name`: `<taskNumber> <title>`; `model`: `None` for the agent's default.
     fn command(&self, session_name: &str, model: Option<&str>) -> AgentCommand;
 
+    /// Answers in the agent's own files, before its tab starts, whatever it would otherwise ask
+    /// the owner about a working directory it does not know: nobody is watching that tab, and a
+    /// question left on the screen is a session that never begins.
+    fn prepare_workspace(&self, homes: &Homes, cwd: &Path) -> Result<(), String>;
+
     /// The session the agent started in `worktree` at or after `launched_at_ms` (Unix ms).
     fn find_session(
         &self,

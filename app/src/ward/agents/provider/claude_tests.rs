@@ -219,3 +219,110 @@ fn finds_session_and_transcript_on_disk() {
         Some(project.join("abc-123.jsonl"))
     );
 }
+
+#[test]
+fn project_keys_use_forward_slashes_and_the_resolved_path() {
+    let keys = project_keys(Path::new(
+        r"C:\w\agents-work\SteepMans\bot\.worktrees\86d19c06",
+    ));
+    assert_eq!(
+        keys[0],
+        "C:/w/agents-work/SteepMans/bot/.worktrees/86d19c06"
+    );
+    assert!(!keys.iter().any(|key| key.contains('\\')), "{keys:?}");
+    // An existing directory is also recorded as the file system spells it, which is what Claude
+    // Code's own process reports as its working directory.
+    let dir = tempfile::tempdir().unwrap();
+    let keys = project_keys(dir.path());
+    assert!(keys.contains(&forward_slashes(dir.path())), "{keys:?}");
+    assert!(keys.len() <= 2, "{keys:?}");
+}
+
+#[test]
+fn trust_is_added_without_touching_the_other_projects() {
+    let mut root = serde_json::json!({
+        "numStartups": 961,
+        "projects": {
+            "C:/work/other/bot": {"allowedTools": [], "hasTrustDialogAccepted": true},
+        },
+    });
+    let keys = vec!["C:/w/wt".to_owned()];
+    assert_eq!(with_trusted_folders(&mut root, &keys), Ok(true));
+    assert_eq!(root["numStartups"], 961);
+    assert_eq!(
+        root["projects"]["C:/work/other/bot"]["hasTrustDialogAccepted"],
+        true
+    );
+    let added = &root["projects"]["C:/w/wt"];
+    assert_eq!(added["hasTrustDialogAccepted"], true);
+    // The warning about CLAUDE.md includes from outside counts as shown, so it asks nothing,
+    // and the includes stay unapproved.
+    assert_eq!(added["hasClaudeMdExternalIncludesWarningShown"], true);
+    assert_eq!(added["hasClaudeMdExternalIncludesApproved"], false);
+    assert!(added["allowedTools"].is_array());
+    assert!(added["mcpServers"].is_object());
+    // Nothing left to do the second time.
+    assert_eq!(with_trusted_folders(&mut root, &keys), Ok(false));
+}
+
+#[test]
+fn trust_of_an_existing_entry_keeps_its_fields() {
+    let mut root = serde_json::json!({
+        "projects": {
+            "C:/w/wt": {"allowedTools": ["Bash"], "hasTrustDialogAccepted": false, "lastCost": 1.5},
+        },
+    });
+    let keys = vec!["C:/w/wt".to_owned()];
+    assert_eq!(with_trusted_folders(&mut root, &keys), Ok(true));
+    let entry = &root["projects"]["C:/w/wt"];
+    assert_eq!(entry["hasTrustDialogAccepted"], true);
+    assert_eq!(entry["allowedTools"][0], "Bash");
+    assert_eq!(entry["lastCost"], 1.5);
+}
+
+#[test]
+fn a_file_of_another_shape_is_refused() {
+    let mut array = serde_json::json!([1, 2]);
+    assert!(with_trusted_folders(&mut array, &["C:/w/wt".to_owned()]).is_err());
+    let mut odd = serde_json::json!({"projects": 1});
+    assert!(with_trusted_folders(&mut odd, &["C:/w/wt".to_owned()]).is_err());
+}
+
+#[test]
+fn trust_file_is_written_whole_and_a_broken_one_is_left_alone() {
+    let home = tempfile::tempdir().unwrap();
+    let claude_json = home.path().join(".claude.json");
+    let worktree = home.path().join("wt");
+    std::fs::create_dir_all(&worktree).unwrap();
+
+    // No file yet: one is written with the entry alone.
+    trust_folder(&claude_json, &worktree).unwrap();
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
+    let keys = project_keys(&worktree);
+    for key in &keys {
+        assert_eq!(written["projects"][key]["hasTrustDialogAccepted"], true);
+    }
+
+    // The owner's own fields and projects survive the next launch.
+    std::fs::write(
+        &claude_json,
+        r#"{"oauthAccount":{"accountUuid":"u-1"},"projects":{"C:/work/other/bot":{"hasTrustDialogAccepted":true,"lastCost":2.25}}}"#,
+    )
+    .unwrap();
+    trust_folder(&claude_json, &worktree).unwrap();
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
+    assert_eq!(written["oauthAccount"]["accountUuid"], "u-1");
+    assert_eq!(written["projects"]["C:/work/other/bot"]["lastCost"], 2.25);
+    assert_eq!(
+        written["projects"][&keys[0]]["hasTrustDialogAccepted"],
+        true
+    );
+    assert!(!claude_json.with_extension("ward-tmp").exists());
+
+    // A file that is not JSON is the owner's to fix: Ward refuses and writes nothing.
+    std::fs::write(&claude_json, "{ broken").unwrap();
+    assert!(trust_folder(&claude_json, &worktree).is_err());
+    assert_eq!(std::fs::read_to_string(&claude_json).unwrap(), "{ broken");
+}
