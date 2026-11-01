@@ -262,8 +262,11 @@ pub fn on_will_terminate(ctx: &mut AppContext) {
         return;
     }
     // Only an update relaunch brings Ward back by itself; a plain quit leaves session
-    // restoration to the user's `general.restore_session`.
-    if !RelaunchModel::as_ref(ctx).is_relaunch_requested() {
+    // restoration to the user's `general.restore_session`. Launch modes without the autoupdate
+    // models (the CLI) have no relaunch to prepare for.
+    if !ctx.has_singleton_model::<RelaunchModel>()
+        || !RelaunchModel::as_ref(ctx).is_relaunch_requested()
+    {
         return;
     }
     let handoff = from_app_state(
