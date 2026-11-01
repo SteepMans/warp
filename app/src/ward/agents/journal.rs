@@ -127,6 +127,12 @@ impl Journal {
         !self.pending.is_empty()
     }
 
+    /// Whether the transcript of the part being read has given a whole line yet: the one sign
+    /// that the agent of this launch is working at all.
+    pub fn has_lines(&self) -> bool {
+        self.offset > 0
+    }
+
     /// The service took chunk `seq`.
     pub fn mark_sent(&mut self, seq: u64) {
         if self.pending.front().is_some_and(|chunk| chunk.seq == seq) {

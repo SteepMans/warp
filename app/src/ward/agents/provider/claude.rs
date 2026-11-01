@@ -3,6 +3,10 @@
 //! - Session: `~/.claude/sessions/<pid>.json` of the process started in the worktree
 //!   (`sessionId`, `bridgeSessionId` → `https://claude.ai/code/<bridgeSessionId>`).
 //! - Transcript: `~/.claude/projects/<slug of the worktree>/<sessionId>.jsonl`.
+//! - Folder trust: `projects[<cwd>].hasTrustDialogAccepted` in `~/.claude.json`. In a folder
+//!   it does not know yet an interactive session asks "Do you trust the files in this
+//!   folder?" and waits for the answer; Claude Code's own advice for an unattended run is to
+//!   set that field.
 //! - Account: `oauthAccount` in `~/.claude.json` (no tokens there) or `ANTHROPIC_API_KEY`.
 //! - Limits: the `api/oauth/usage` report of Ward's Claude header chip; without it the windows
 //!   are sent with `usedPercent: null`.
@@ -13,10 +17,12 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, TimeZone as _, Utc};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use super::{Account, AgentCommand, FoundSession, Homes, LimitHit, Provider, WardUsage, rfc3339};
 use crate::ward::agents::contract::UsageReport;
+use crate::ward::agents::launch::forward_slashes;
+use crate::ward::agents::profile;
 
 pub const ID: &str = "claude";
 
@@ -72,6 +78,86 @@ pub fn project_slug(path: &Path) -> String {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()
+}
+
+/// The field of a `projects` entry that holds the answer to the folder trust question.
+const TRUST_FIELD: &str = "hasTrustDialogAccepted";
+
+/// Every spelling of `dir` Claude Code may look the folder up under: the path as Ward built it
+/// and, when it differs, the one the file system resolves it to, which is what Claude Code gets
+/// from the working directory of its own process. Forward slashes, as Claude Code writes the
+/// keys on Windows.
+pub fn project_keys(dir: &Path) -> Vec<String> {
+    let mut keys = vec![forward_slashes(dir)];
+    if let Ok(real) = dunce::canonicalize(dir) {
+        let real = forward_slashes(&real);
+        if !keys.contains(&real) {
+            keys.push(real);
+        }
+    }
+    keys
+}
+
+/// A `projects` entry with the fields Claude Code puts in a new one and both questions of an
+/// unattended start answered: the folder is trusted, and the warning about `@` includes of a
+/// CLAUDE.md outside the repository counts as shown while the includes themselves stay
+/// unapproved, so the session starts without pulling them in.
+fn new_project_entry() -> Value {
+    serde_json::json!({
+        "allowedTools": [],
+        "mcpContextUris": [],
+        "mcpServers": {},
+        "enabledMcpjsonServers": [],
+        "disabledMcpjsonServers": [],
+        "hasTrustDialogAccepted": true,
+        "hasClaudeMdExternalIncludesApproved": false,
+        "hasClaudeMdExternalIncludesWarningShown": true,
+    })
+}
+
+/// Records the folder trust of `keys` in the object of `~/.claude.json`, leaving every other
+/// field and every other project as it is; returns whether anything changed. `Err` for a file
+/// whose shape Ward does not understand: it is the owner's agent configuration and Ward
+/// rewrites nothing it cannot read.
+pub fn with_trusted_folders(root: &mut Value, keys: &[String]) -> Result<bool, &'static str> {
+    let object = root.as_object_mut().ok_or("не объект JSON")?;
+    let projects = object
+        .entry("projects".to_owned())
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or("projects не объект")?;
+    let mut changed = false;
+    for key in keys {
+        match projects.get_mut(key.as_str()) {
+            Some(Value::Object(entry)) => {
+                if entry.get(TRUST_FIELD) != Some(&Value::Bool(true)) {
+                    entry.insert(TRUST_FIELD.to_owned(), Value::Bool(true));
+                    changed = true;
+                }
+            }
+            // No entry, or one Claude Code itself could not read: Ward writes its own.
+            _ => {
+                projects.insert(key.clone(), new_project_entry());
+                changed = true;
+            }
+        }
+    }
+    Ok(changed)
+}
+
+/// Writes the folder trust of `dir` into `claude_json` and leaves the rest of the file alone,
+/// so the agent starts in an unknown folder instead of asking about it. There is no command
+/// line flag and no variable for this: `--dangerously-skip-permissions` is about tools, and the
+/// trust question comes before it.
+pub fn trust_folder(claude_json: &Path, dir: &Path) -> Result<(), String> {
+    let (mut root, original) = profile::read_json_object(claude_json)?;
+    let changed = with_trusted_folders(&mut root, &project_keys(dir))
+        .map_err(|err| format!("{}: {err}", claude_json.display()))?;
+    if !changed {
+        return Ok(());
+    }
+    profile::write_json_if_changed(claude_json, &root, &original)?;
+    Ok(())
 }
 
 /// Plan name from `oauthAccount.organizationType` (`claude_max` → `max`), else the display name.
@@ -218,6 +304,10 @@ impl Provider for Claude {
                 "1".to_owned(),
             )],
         }
+    }
+
+    fn prepare_workspace(&self, homes: &Homes, cwd: &Path) -> Result<(), String> {
+        trust_folder(&homes.claude_json, cwd)
     }
 
     fn find_session(

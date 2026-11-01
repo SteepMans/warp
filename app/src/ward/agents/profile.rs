@@ -741,7 +741,7 @@ fn apply_vault(part: &Vault) -> Result<String, String> {
     )
 }
 
-fn read_json_object(path: &Path) -> Result<(Value, Value), String> {
+pub(super) fn read_json_object(path: &Path) -> Result<(Value, Value), String> {
     let text = std::fs::read_to_string(path).unwrap_or_default();
     let value = if text.trim().is_empty() {
         Value::Object(Map::new())
@@ -753,8 +753,13 @@ fn read_json_object(path: &Path) -> Result<(Value, Value), String> {
 }
 
 /// Writes the object when it differs from what was read, comparing values and not text: the
-/// formatting of a file Ward did not write stays its own.
-fn write_json_if_changed(path: &Path, value: &Value, original: &Value) -> Result<bool, String> {
+/// formatting of a file Ward did not write stays its own. Shared with the folder trust of
+/// [`super::provider::claude`], which edits the same `~/.claude.json`.
+pub(super) fn write_json_if_changed(
+    path: &Path,
+    value: &Value,
+    original: &Value,
+) -> Result<bool, String> {
     if value == original {
         return Ok(false);
     }

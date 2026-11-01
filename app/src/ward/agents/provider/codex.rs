@@ -282,6 +282,12 @@ impl Provider for Codex {
         }
     }
 
+    fn prepare_workspace(&self, _homes: &Homes, _cwd: &Path) -> Result<(), String> {
+        // Nothing to write: `--dangerously-bypass-approvals-and-sandbox` skips every
+        // confirmation Codex would ask, the one about a directory it does not know included.
+        Ok(())
+    }
+
     fn find_session(
         &self,
         homes: &Homes,

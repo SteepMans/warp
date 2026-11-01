@@ -137,6 +137,9 @@ pub struct Timing {
     pub inbox_wait_secs: u64,
     /// Without the agent session found by then, `running` is sent without its ids.
     pub session_lookup_grace: Duration,
+    /// Neither an agent session nor a line of transcript by then: the agent never started and
+    /// the session is reported as failed instead of staying `running` for good.
+    pub session_start_grace: Duration,
     /// The runner is gone but wrote no exit code: the session ends after this.
     pub exit_grace: Duration,
     /// After a stop, the session ends after this even without an exit code.
@@ -158,6 +161,7 @@ impl Default for Timing {
             config_every: Duration::from_secs(5),
             inbox_wait_secs: 30,
             session_lookup_grace: Duration::from_secs(120),
+            session_start_grace: Duration::from_secs(180),
             exit_grace: Duration::from_secs(15),
             stop_grace: Duration::from_secs(30),
             usage_every: Duration::from_secs(60),
@@ -275,6 +279,8 @@ const MESSAGE_STOPPED: &str = "Остановлено владельцем";
 const MESSAGE_TOO_LONG: &str = "Остановлено: превышено maxDurationMin";
 const MESSAGE_NO_EXIT_CODE: &str = "Агент завершился без кода выхода (вкладку закрыли?)";
 const MESSAGE_NO_SESSION_ID: &str = "Сессия запущена, id сессии агента пока не найден";
+const MESSAGE_NOT_STARTED: &str =
+    "Агент не начал работу: ждёт ответа в терминале (вопрос о доверии к папке?)";
 const MESSAGE_USAGE_LIMIT: &str = "Агент упёрся в лимит подписки";
 const MESSAGE_PREPARING: &str = "Подготовка: оркестратор собирает досье и промпт";
 const MESSAGE_PREPARE_TOO_LONG: &str = "Подготовка не уложилась в prepareMaxDurationMin";
@@ -515,6 +521,13 @@ fn shell_of(kind: RunnerKind) -> Option<&'static str> {
         RunnerKind::Sh if cfg!(windows) => Some("powershell"),
         RunnerKind::Pwsh | RunnerKind::Sh => None,
     }
+}
+
+/// Whether a launch never got going: `grace` passed and the agent left neither a session of
+/// its own nor a line of transcript. An agent that asks something on the screen of its tab
+/// looks exactly like this, and nobody is there to answer it.
+fn is_silent(session: &Session, elapsed: Duration, grace: Duration) -> bool {
+    session.found.is_none() && !session.journal.has_lines() && elapsed >= grace
 }
 
 /// The line that marks whose transcript follows in the journal of a session.
@@ -1156,6 +1169,7 @@ impl Worker {
         let script = launch::runner_script(kind, &dir, &vault_dir, &command);
         let runner = dir.join(kind.file_name());
         std::fs::write(&runner, script).map_err(|err| err.to_string())?;
+        self.prepare_workspace(orchestrator, &vault_dir);
         self.host
             .open_tab(TabSpec {
                 cwd: vault_dir,
@@ -1355,6 +1369,19 @@ impl Worker {
         }
     }
 
+    /// Lets the agent start in `cwd` without a question on the screen of its tab (Claude Code's
+    /// folder trust). A failure only costs the session the answer it needs, so the launch goes
+    /// on and the watch of the session reports a tab that stays silent.
+    fn prepare_workspace(&self, provider: &'static dyn Provider, cwd: &Path) {
+        if let Err(err) = provider.prepare_workspace(&self.homes, cwd) {
+            log::warn!(
+                "Ward agents: could not record the trust of {} for {}: {err}",
+                cwd.display(),
+                provider.id()
+            );
+        }
+    }
+
     /// Writes the session files and opens its tab.
     async fn launch(&self, session: &Session, worktree: &Path) -> Result<Option<String>, String> {
         let (kind, bash) = self
@@ -1378,6 +1405,7 @@ impl Worker {
         let script = launch::runner_script(kind, &agents, worktree, &command);
         let runner = agents.join(kind.file_name());
         std::fs::write(&runner, script).map_err(|err| err.to_string())?;
+        self.prepare_workspace(session.provider, worktree);
         self.host
             .open_tab(TabSpec {
                 cwd: worktree.to_path_buf(),
@@ -1441,6 +1469,14 @@ impl Worker {
             request.message = Some(reason.to_owned());
             self.read_journal(session);
             finish(session, request);
+            return;
+        }
+        if is_silent(
+            session,
+            launched_at.elapsed(),
+            self.timing.session_start_grace,
+        ) {
+            self.fail_preparation(session, MESSAGE_NOT_STARTED);
             return;
         }
         if launched_at.elapsed() >= limit {
@@ -1744,6 +1780,23 @@ impl Worker {
             .and_then(|text| launch::parse_exit_code(&text));
         if let Some(code) = exit_code {
             self.end(session, Some(code));
+            return;
+        }
+        if session.stop.is_none()
+            && is_silent(
+                session,
+                launched_at.elapsed(),
+                self.timing.session_start_grace,
+            )
+        {
+            log::warn!(
+                "Ward agents: session {} never started",
+                session.assignment.session_id
+            );
+            self.stop_agent(session);
+            let mut request = session.status_request(SessionStatus::Failed);
+            request.message = Some(MESSAGE_NOT_STARTED.to_owned());
+            finish(session, request);
             return;
         }
         let runner_gone = session
