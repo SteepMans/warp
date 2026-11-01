@@ -1,6 +1,6 @@
 //! Clone, fetch and worktree of a session, with the `git` CLI (blocking: run it off the main
-//! thread). Git never prompts: a repository that needs credentials Ward does not have fails
-//! instead of hanging.
+//! thread), and the search for the clones the owner already has on the machine. Git never
+//! prompts: a repository that needs credentials Ward does not have fails instead of hanging.
 
 use std::path::{Path, PathBuf};
 
@@ -61,11 +61,16 @@ fn is_valid_branch(name: &str) -> bool {
 
 /// Adds Ward's lines to the clone's `.git/info/exclude`.
 pub fn ensure_excluded(clone: &Path) -> std::io::Result<()> {
+    ensure_excluded_entries(clone, &launch::EXCLUDE_ENTRIES)
+}
+
+/// Adds `entries` to the clone's `.git/info/exclude`.
+fn ensure_excluded_entries(clone: &Path, entries: &[&str]) -> std::io::Result<()> {
     let info = clone.join(".git").join("info");
     std::fs::create_dir_all(&info)?;
     let path = info.join("exclude");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    match launch::exclude_with_entries(&existing) {
+    match launch::exclude_with(&existing, entries) {
         Some(text) => std::fs::write(&path, text),
         None => Ok(()),
     }
@@ -157,6 +162,222 @@ pub fn prepare_vault(
     }
 }
 
+/// Folders never searched for local clones: build output and dependencies.
+const SKIPPED_DIRS: [&str; 2] = ["node_modules", "target"];
+
+/// How deep under a search folder a local clone is looked for: `C:/work/<group>/<repo>` is 2.
+pub const SEARCH_DEPTH: usize = 3;
+
+/// A remote URL reduced to what names the repository: the lowercase host and path, without the
+/// user, the port, the scheme and `.git`. `https://github.com/Owner/Repo.git`,
+/// `git@github.com:owner/repo` and `ssh://git@github.com:22/owner/repo` give the same key; a
+/// local path (also `file://`) keeps its whole path with forward slashes.
+pub fn remote_key(url: &str) -> Option<String> {
+    let url = url.trim();
+    let (host, path) = if let Some((scheme, rest)) = url.split_once("://") {
+        if scheme.eq_ignore_ascii_case("file") {
+            ("", rest)
+        } else {
+            let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+            let host = authority.rsplit('@').next().unwrap_or(authority);
+            (host.split(':').next().unwrap_or(host), path)
+        }
+    } else {
+        match url.split_once(':') {
+            // `git@host:owner/repo`, but not a Windows drive (`C:\...`).
+            Some((left, path)) if left.len() > 1 && !left.contains(['/', '\\']) => {
+                (left.rsplit('@').next().unwrap_or(left), path)
+            }
+            _ => ("", url),
+        }
+    };
+    let path = path.replace('\\', "/");
+    let path = path.trim_matches('/');
+    let path = path
+        .strip_suffix(".git")
+        .unwrap_or(path)
+        .trim_end_matches('/');
+    if path.is_empty() {
+        return None;
+    }
+    let host = host.to_ascii_lowercase();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    Some(format!("{host}/{}", path.to_lowercase()))
+}
+
+/// Whether two remote URLs name the same repository.
+pub fn same_remote(a: &str, b: &str) -> bool {
+    matches!((remote_key(a), remote_key(b)), (Some(a), Some(b)) if a == b)
+}
+
+/// The `origin` URL in `<repo>/.git/config`, read from the file: no git process per folder.
+pub fn origin_url(repo: &Path) -> Option<String> {
+    let config = std::fs::read_to_string(repo.join(".git").join("config")).ok()?;
+    let mut in_origin = false;
+    for line in config.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            let section: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+            in_origin = section == "[remote\"origin\"]";
+            continue;
+        }
+        if !in_origin {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=')
+            && key.trim().eq_ignore_ascii_case("url")
+        {
+            let value = config_value(value);
+            return (!value.is_empty()).then_some(value);
+        }
+    }
+    None
+}
+
+/// A value of a git config file: quotes dropped, `\\`, `\"`, `\t` and `\n` unescaped (git
+/// writes `C:\\work\\repo` for a Windows path), a comment after `#` or `;` cut off.
+pub fn config_value(raw: &str) -> String {
+    let mut value = String::new();
+    let mut quoted = false;
+    let mut chars = raw.trim().chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => quoted = !quoted,
+            '\\' => match chars.next() {
+                Some('n') => value.push('\n'),
+                Some('t') => value.push('\t'),
+                Some('b') => {
+                    value.pop();
+                }
+                Some(other) => value.push(other),
+                None => {}
+            },
+            '#' | ';' if !quoted => break,
+            c => value.push(c),
+        }
+    }
+    value.trim().to_owned()
+}
+
+/// A working copy with its own `.git` directory (a worktree or a submodule has a `.git` file).
+fn is_clone(dir: &Path) -> bool {
+    dir.join(".git").is_dir()
+}
+
+fn collect_clones(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    if is_clone(dir) {
+        out.push(dir.to_path_buf());
+        // Nothing of another repository is looked for inside a working copy.
+        return;
+    }
+    if depth == 0 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut children: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            !name.starts_with('.') && !SKIPPED_DIRS.contains(&&*name)
+        })
+        .map(|entry| entry.path())
+        .collect();
+    children.sort();
+    for child in children {
+        collect_clones(&child, depth - 1, out);
+    }
+}
+
+/// The local clones in `search`: each entry is a clone itself or a folder searched
+/// [`SEARCH_DEPTH`] levels down, without hidden folders, `node_modules` and `target`. In the
+/// order of `search`, without repeats.
+pub fn find_clones(search: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for entry in search {
+        collect_clones(entry, SEARCH_DEPTH, &mut out);
+    }
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|path| seen.insert(launch::forward_slashes(path).to_lowercase()));
+    out
+}
+
+/// The first local clone in `search` whose `origin` is `repo_url`.
+pub fn find_local_clone(search: &[PathBuf], repo_url: &str) -> Option<PathBuf> {
+    find_clones(search)
+        .into_iter()
+        .find(|clone| origin_url(clone).is_some_and(|url| same_remote(&url, repo_url)))
+}
+
+/// `owner/repo` of the local clones in `search`, for the passport.
+pub fn local_repos(search: &[PathBuf]) -> Vec<String> {
+    let mut repos: Vec<String> = find_clones(search)
+        .iter()
+        .filter_map(|clone| origin_url(clone))
+        .filter_map(|url| launch::parse_repo(&url))
+        .map(|repo| repo.to_string())
+        .collect();
+    repos.sort();
+    repos.dedup();
+    repos
+}
+
+/// The default branch of `origin`: `refs/remotes/origin/HEAD`, else what the remote says.
+fn default_branch(clone: &Path) -> Option<String> {
+    if let Ok(head) = run(
+        Some(clone),
+        &["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
+    ) && let Some(branch) = head.trim().strip_prefix("origin/")
+        && !branch.is_empty()
+    {
+        return Some(branch.to_owned());
+    }
+    let listing = run(Some(clone), &["ls-remote", "--symref", "origin", "HEAD"]).ok()?;
+    parse_symref_head(&listing)
+}
+
+/// The branch of `ref: refs/heads/<branch>\tHEAD` in `git ls-remote --symref origin HEAD`.
+pub fn parse_symref_head(listing: &str) -> Option<String> {
+    listing.lines().find_map(|line| {
+        let (reference, name) = line
+            .strip_prefix("ref:")?
+            .trim()
+            .split_once(char::is_whitespace)?;
+        if name.trim() != "HEAD" {
+            return None;
+        }
+        reference
+            .strip_prefix("refs/heads/")
+            .filter(|branch| !branch.is_empty())
+            .map(str::to_owned)
+    })
+}
+
+/// The base the new branch starts from: `requested` when origin has it, else the default
+/// branch of origin, with a note saying so.
+fn resolve_base(clone: &Path, requested: &str) -> Result<(String, Option<String>), String> {
+    if !requested.is_empty() && has_ref(clone, &format!("refs/remotes/origin/{requested}")) {
+        return Ok((requested.to_owned(), None));
+    }
+    let default = default_branch(clone)
+        .filter(|branch| has_ref(clone, &format!("refs/remotes/origin/{branch}")));
+    match default {
+        Some(branch) => {
+            let note = if requested.is_empty() {
+                format!("база не задана, взята ветка по умолчанию origin/{branch}")
+            } else {
+                format!("ветки {requested} на origin нет, взята ветка по умолчанию origin/{branch}")
+            };
+            Ok((branch, Some(note)))
+        }
+        None if requested.is_empty() => Err("origin has no default branch".to_owned()),
+        None => Err(format!("origin has no branch {requested}")),
+    }
+}
+
 /// What the worktree of a session needs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorktreeSpec<'a> {
@@ -165,56 +386,126 @@ pub struct WorktreeSpec<'a> {
     pub base_branch: &'a str,
     pub branch: &'a str,
     pub session_id: &'a str,
+    /// Where the owner's own clones are looked for before cloning (see [`find_clones`]).
+    pub search: &'a [PathBuf],
 }
 
-/// Clones or fetches `<root>/<owner>/<repo>` and creates the session's worktree on `branch`:
-/// from `origin/<branch>` when it exists, else from `origin/<base_branch>`. An existing
-/// worktree of the same session is reused.
-pub fn prepare_worktree(root: &Path, spec: &WorktreeSpec<'_>) -> Result<PathBuf, String> {
+/// The worktree of a session and where it came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedWorktree {
+    pub path: PathBuf,
+    /// The repository the worktree belongs to: the clone under the root or the owner's own.
+    pub clone: PathBuf,
+    /// The clone is the owner's, found outside the root.
+    pub local_clone: bool,
+    /// `<base>` of `origin/<base>` the new branch started from; `None` for a branch that
+    /// already existed or a reused worktree.
+    pub base: Option<String>,
+    /// Why the base is not the one the assignment asked for.
+    pub base_note: Option<String>,
+}
+
+impl PreparedWorktree {
+    /// For the log and the status of the session: which base and which clone.
+    pub fn summary(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        match (&self.base_note, &self.base) {
+            (Some(note), _) => parts.push(note.clone()),
+            (None, Some(base)) => parts.push(format!("база origin/{base}")),
+            (None, None) => {}
+        }
+        if self.local_clone {
+            parts.push(format!(
+                "локальный клон {}",
+                launch::forward_slashes(&self.clone)
+            ));
+        }
+        (!parts.is_empty()).then(|| parts.join("; "))
+    }
+}
+
+/// Creates the session's worktree on `branch`: from the local branch or `origin/<branch>` when
+/// one exists, else from `origin/<base_branch>`, else from the default branch of origin. The
+/// repository is, in this order, the clone `<root>/<owner>/<repo>`, a clone of the same remote
+/// the owner already has (see [`WorktreeSpec::search`]) or a new clone under the root. The
+/// owner's clone is only fetched: its working copy and its current branch stay as they are,
+/// and the worktree goes under the root. An existing worktree of the same session is reused.
+pub fn prepare_worktree(root: &Path, spec: &WorktreeSpec<'_>) -> Result<PreparedWorktree, String> {
     if !is_valid_branch(spec.branch) {
         return Err(format!("invalid branch name: {}", spec.branch));
     }
-    let base_branch = if spec.base_branch.trim().is_empty() {
-        "main"
-    } else {
-        spec.base_branch.trim()
-    };
-    if !is_valid_branch(base_branch) {
-        return Err(format!("invalid base branch name: {base_branch}"));
+    let requested_base = spec.base_branch.trim();
+    if !requested_base.is_empty() && !is_valid_branch(requested_base) {
+        return Err(format!("invalid base branch name: {requested_base}"));
     }
-    let clone = launch::clone_dir(root, spec.repo);
-    if clone.join(".git").exists() {
-        run(Some(&clone), &["fetch", "origin", "--prune"])?;
+    let own = launch::clone_dir(root, spec.repo);
+    let (clone, local_clone) = if own.join(".git").exists() {
+        run(Some(&own), &["fetch", "origin", "--prune"])?;
+        (own, false)
+    } else if let Some(local) = find_local_clone(spec.search, spec.repo_url) {
+        log::info!(
+            "Ward agents: {} is already cloned at {}, no new clone",
+            spec.repo,
+            local.display()
+        );
+        // No `--prune`: the owner's remote-tracking branches stay as they are.
+        run(Some(&local), &["fetch", "origin"])?;
+        (local, true)
     } else {
-        if let Some(parent) = clone.parent() {
+        if let Some(parent) = own.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|err| format!("cannot create {}: {err}", parent.display()))?;
         }
-        let target = clone.to_string_lossy().into_owned();
+        let target = own.to_string_lossy().into_owned();
         run(None, &["clone", "--", spec.repo_url, &target])?;
-    }
-    ensure_excluded(&clone).map_err(|err| format!("cannot update .git/info/exclude: {err}"))?;
+        (own, false)
+    };
+    let excluded = if local_clone {
+        ensure_excluded_entries(&clone, &launch::LOCAL_CLONE_EXCLUDE_ENTRIES)
+    } else {
+        ensure_excluded(&clone)
+    };
+    excluded.map_err(|err| format!("cannot update .git/info/exclude: {err}"))?;
 
-    let worktree = launch::worktree_dir(&clone, spec.session_id)
-        .ok_or_else(|| "invalid session id".to_owned())?;
-    if worktree.join(".git").exists() {
-        return Ok(worktree);
+    let worktree = if local_clone {
+        launch::external_worktree_dir(root, spec.repo, spec.session_id)
+    } else {
+        launch::worktree_dir(&clone, spec.session_id)
     }
-    // The clone itself may have the branch checked out (a fresh clone of a repository whose
-    // default branch is the session's): git refuses a second worktree on it.
-    let clone_head =
-        run(Some(&clone), &["symbolic-ref", "-q", "--short", "HEAD"]).unwrap_or_default();
-    if clone_head.trim() == spec.branch {
-        run(Some(&clone), &["checkout", "-q", "--detach"])?;
+    .ok_or_else(|| "invalid session id".to_owned())?;
+    let prepared = |base: Option<String>, base_note: Option<String>| PreparedWorktree {
+        path: worktree.clone(),
+        clone: clone.clone(),
+        local_clone,
+        base,
+        base_note,
+    };
+    if worktree.join(".git").exists() {
+        return Ok(prepared(None, None));
+    }
+    if let Some(parent) = worktree.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("cannot create {}: {err}", parent.display()))?;
+    }
+    if !local_clone {
+        // The clone itself may have the branch checked out (a fresh clone of a repository
+        // whose default branch is the session's): git refuses a second worktree on it. The
+        // owner's clone is never switched: git then reports the branch as checked out.
+        let clone_head =
+            run(Some(&clone), &["symbolic-ref", "-q", "--short", "HEAD"]).unwrap_or_default();
+        if clone_head.trim() == spec.branch {
+            run(Some(&clone), &["checkout", "-q", "--detach"])?;
+        }
     }
     let worktree_arg = worktree.to_string_lossy().into_owned();
-    let remote_branch = format!("refs/remotes/origin/{}", spec.branch);
     if has_ref(&clone, &format!("refs/heads/{}", spec.branch)) {
         run(
             Some(&clone),
             &["worktree", "add", &worktree_arg, spec.branch],
         )?;
-    } else if has_ref(&clone, &remote_branch) {
+        return Ok(prepared(None, None));
+    }
+    if has_ref(&clone, &format!("refs/remotes/origin/{}", spec.branch)) {
         let start = format!("origin/{}", spec.branch);
         run(
             Some(&clone),
@@ -228,25 +519,23 @@ pub fn prepare_worktree(root: &Path, spec: &WorktreeSpec<'_>) -> Result<PathBuf,
                 &start,
             ],
         )?;
-    } else {
-        let start = format!("origin/{base_branch}");
-        if !has_ref(&clone, &format!("refs/remotes/{start}")) {
-            return Err(format!("origin has no branch {base_branch}"));
-        }
-        run(
-            Some(&clone),
-            &[
-                "worktree",
-                "add",
-                "--no-track",
-                "-b",
-                spec.branch,
-                &worktree_arg,
-                &start,
-            ],
-        )?;
+        return Ok(prepared(None, None));
     }
-    Ok(worktree)
+    let (base, base_note) = resolve_base(&clone, requested_base)?;
+    let start = format!("origin/{base}");
+    run(
+        Some(&clone),
+        &[
+            "worktree",
+            "add",
+            "--no-track",
+            "-b",
+            spec.branch,
+            &worktree_arg,
+            &start,
+        ],
+    )?;
+    Ok(prepared(Some(base), base_note))
 }
 
 #[cfg(test)]

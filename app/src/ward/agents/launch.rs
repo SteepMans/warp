@@ -1,8 +1,11 @@
 //! Where a session lives on disk and how its tab starts the agent.
 //!
 //! A clone is `<root>/<owner>/<repo>`, the session's worktree `<clone>/.worktrees/<first 8
-//! characters of sessionId>`. Ward's files of the session are in `<worktree>/.agents/`: the
-//! prompt, the runner script, the runner's pid and, once the agent exits, its exit code.
+//! characters of sessionId>`. A session on a clone the owner already has elsewhere on the
+//! machine gets its worktree under the root instead, `<root>/.worktrees/<owner>/<repo>/<first 8
+//! characters of sessionId>`, so nothing appears inside the owner's working copy. Ward's files
+//! of the session are in `<worktree>/.agents/`: the prompt, the runner script, the runner's
+//! pid and, once the agent exits, its exit code.
 //!
 //! The tab runs the runner (pwsh on Windows, sh elsewhere), not the agent directly: the runner
 //! clears the inherited agent variables, starts the agent with the prompt from the file as its
@@ -101,6 +104,17 @@ pub fn worktree_dir(clone: &Path, session_id: &str) -> Option<PathBuf> {
     )
 }
 
+/// The worktree of a session on a local clone outside the root: `None` for a session id too
+/// odd to be a directory name.
+pub fn external_worktree_dir(root: &Path, repo: &RepoId, session_id: &str) -> Option<PathBuf> {
+    Some(
+        root.join(WORKTREES_DIR)
+            .join(&repo.owner)
+            .join(&repo.name)
+            .join(short_session_id(session_id)?),
+    )
+}
+
 /// Where the files of the preparation phase live, before the worktree exists and while the
 /// repository may still be unknown: `<root>/.agents/<first 8 characters of sessionId>`. The
 /// orchestrator works in the vault, so nothing of Ward is ever written inside it.
@@ -126,10 +140,20 @@ pub fn session_name(task_ref: &TaskRef, title: &str) -> String {
 /// Lines Ward keeps in the clone's `.git/info/exclude`.
 pub const EXCLUDE_ENTRIES: [&str; 2] = ["/.agents/", "/.worktrees/"];
 
+/// The line Ward keeps in `.git/info/exclude` of a local clone outside the root: its worktrees
+/// share that file, and the clone has no `.worktrees` of Ward.
+pub const LOCAL_CLONE_EXCLUDE_ENTRIES: [&str; 1] = ["/.agents/"];
+
 /// The exclude file with Ward's entries added, or `None` when they are all there.
 pub fn exclude_with_entries(existing: &str) -> Option<String> {
-    let missing: Vec<&str> = EXCLUDE_ENTRIES
-        .into_iter()
+    exclude_with(existing, &EXCLUDE_ENTRIES)
+}
+
+/// The exclude file with `entries` added, or `None` when they are all there.
+pub fn exclude_with(existing: &str, entries: &[&str]) -> Option<String> {
+    let missing: Vec<&str> = entries
+        .iter()
+        .copied()
         .filter(|entry| !existing.lines().any(|line| line.trim() == *entry))
         .collect();
     if missing.is_empty() {

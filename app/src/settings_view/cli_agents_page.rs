@@ -78,6 +78,7 @@ pub struct CLIAgentsPageView {
     agents_key_editor: ViewHandle<SubmittableTextInput>,
     agents_name_editor: ViewHandle<SubmittableTextInput>,
     agents_root_editor: ViewHandle<SubmittableTextInput>,
+    agents_clone_search_editor: ViewHandle<SubmittableTextInput>,
     agents_remove_key_mouse_state: MouseStateHandle,
     /// One per session row link (Remote Control).
     agents_link_mouse_states: Vec<MouseStateHandle>,
@@ -172,6 +173,7 @@ impl CLIAgentsPageView {
             agents_key_editor: agents_editors.1,
             agents_name_editor: agents_editors.2,
             agents_root_editor: agents_editors.3,
+            agents_clone_search_editor: agents_editors.4,
             agents_remove_key_mouse_state: Default::default(),
             agents_link_mouse_states: (0..AGENTS_MAX_SESSION_ROWS)
                 .map(|_| Default::default())
@@ -179,11 +181,12 @@ impl CLIAgentsPageView {
         }
     }
 
-    /// Address, key, worker name and root inputs of the agents worker. Each saves on Enter; the
-    /// worker picks the change up within a few seconds.
+    /// Address, key, worker name, root and clone search inputs of the agents worker. Each saves
+    /// on Enter; the worker picks the change up within a few seconds.
     fn create_agents_editors(
         ctx: &mut ViewContext<Self>,
     ) -> (
+        ViewHandle<SubmittableTextInput>,
         ViewHandle<SubmittableTextInput>,
         ViewHandle<SubmittableTextInput>,
         ViewHandle<SubmittableTextInput>,
@@ -211,7 +214,21 @@ impl CLIAgentsPageView {
             input.set_placeholder_text("repository root (empty: ~/agents-work)", ctx);
             input
         });
-        for editor in [&url_editor, &key_editor, &name_editor, &root_editor] {
+        let clone_search_editor = ctx.add_typed_action_view(|ctx| {
+            let mut input = SubmittableTextInput::new(ctx);
+            input.set_placeholder_text(
+                "existing clones or folders with clones, separated by ';' (empty: ~/work and similar)",
+                ctx,
+            );
+            input
+        });
+        for editor in [
+            &url_editor,
+            &key_editor,
+            &name_editor,
+            &root_editor,
+            &clone_search_editor,
+        ] {
             update_editor_interaction_state(editor.as_ref(ctx).editor().clone(), true, ctx);
         }
         ctx.subscribe_to_view(&url_editor, |_, _, event, ctx| match event {
@@ -242,7 +259,20 @@ impl CLIAgentsPageView {
             }
             SubmittableTextInputEvent::Escape => ctx.emit(CLIAgentsPageEvent::FocusModal),
         });
-        (url_editor, key_editor, name_editor, root_editor)
+        ctx.subscribe_to_view(&clone_search_editor, |_, _, event, ctx| match event {
+            SubmittableTextInputEvent::Submit(value) => {
+                ward_agents::set_clone_search(value, ctx);
+                ctx.notify();
+            }
+            SubmittableTextInputEvent::Escape => ctx.emit(CLIAgentsPageEvent::FocusModal),
+        });
+        (
+            url_editor,
+            key_editor,
+            name_editor,
+            root_editor,
+            clone_search_editor,
+        )
     }
 
     /// Base URL, board id and access token inputs of the Chimney section. Each saves on Enter.
@@ -1594,6 +1624,7 @@ impl SettingsWidget for AgentsWorkerWidget {
         let (base_url, url_source) = ward_agents::base_url(app);
         let (name, name_source) = ward_agents::worker_name(app);
         let (root, root_source) = ward_agents::root(app);
+        let (clone_search, clone_search_source) = ward_agents::clone_search(app);
         let key_source = ward_agents::key_source(app);
         let key_status = match key_source {
             Some(ward_agents::Source::Saved) => "A key is saved in the secure storage.".to_owned(),
@@ -1612,11 +1643,12 @@ impl SettingsWidget for AgentsWorkerWidget {
                  cards and runs Claude Code or Codex in its own tabs, one git worktree per \
                  session under the repository root. A task without a prompt is prepared first \
                  by an orchestrator session in the vault of the machine profile. Where nothing \
-                 is saved, {}, {}, {} and {} are used.",
+                 is saved, {}, {}, {}, {} and {} are used.",
                 ward_agents::URL_ENV_VAR,
                 ward_agents::KEY_ENV_VAR,
                 ward_agents::NAME_ENV_VAR,
                 ward_agents::ROOT_ENV_VAR,
+                ward_agents::LOCAL_REPOS_ENV_VAR,
             )))
             .with_child(render_ward_toggle(
                 "Take tasks",
@@ -1664,6 +1696,27 @@ impl SettingsWidget for AgentsWorkerWidget {
             agents_source_suffix(root_source, ward_agents::ROOT_ENV_VAR)
         )));
         column.add_child(ChildView::new(&view.agents_root_editor).finish());
+        let clone_search_text = if clone_search.is_empty() {
+            "none".to_owned()
+        } else {
+            clone_search
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+        column.add_child(label(format!(
+            "Existing clones: {clone_search_text}{}",
+            agents_source_suffix(clone_search_source, ward_agents::LOCAL_REPOS_ENV_VAR)
+        )));
+        column.add_child(description(format!(
+            "Before cloning, Ward looks for a clone with the same origin here: each entry is a \
+             clone or a folder searched {} levels down. Such a clone is only fetched, its \
+             working copy and branch stay as they are; the session's worktree goes under the \
+             repository root.",
+            ward_agents::git::SEARCH_DEPTH
+        )));
+        column.add_child(ChildView::new(&view.agents_clone_search_editor).finish());
 
         let Some(snapshot) = ward_agents::model(app).map(|model| model.snapshot()) else {
             return column.finish();

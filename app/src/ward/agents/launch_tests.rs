@@ -65,6 +65,20 @@ fn session_paths() {
     );
     assert_eq!(worktree_dir(&clone, "../../etc"), None);
     assert_eq!(worktree_dir(&clone, ""), None);
+    // A session on the owner's own clone keeps its worktree under the root.
+    assert_eq!(
+        external_worktree_dir(root, &repo("HassleGames", "game-server"), "5f0e8a5b-0c3e"),
+        Some(
+            root.join(".worktrees")
+                .join("HassleGames")
+                .join("game-server")
+                .join("5f0e8a5b")
+        )
+    );
+    assert_eq!(
+        external_worktree_dir(root, &repo("HassleGames", "game-server"), "../x"),
+        None
+    );
     // The preparation phase keeps its files under the root: the orchestrator works in the
     // vault, and the repository may still be unknown.
     assert_eq!(
