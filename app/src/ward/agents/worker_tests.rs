@@ -435,6 +435,7 @@ fn full_cycle_against_a_fake_service() {
         session_lookup_grace: Duration::from_secs(30),
         session_start_grace: Duration::from_secs(300),
         exit_grace: Duration::from_secs(30),
+        prepare_exit_wait: Duration::from_millis(200),
         stop_grace: Duration::from_secs(30),
         usage_every: Duration::from_secs(60),
         profile_every: Duration::from_millis(100),
@@ -766,6 +767,7 @@ fn the_preparation_phase_runs_before_the_executor() {
         session_lookup_grace: Duration::from_secs(30),
         session_start_grace: Duration::from_secs(300),
         exit_grace: Duration::from_secs(30),
+        prepare_exit_wait: Duration::from_millis(200),
         stop_grace: Duration::from_secs(30),
         usage_every: Duration::from_secs(60),
         profile_every: Duration::from_millis(100),
@@ -1098,6 +1100,7 @@ fn a_preparation_without_a_plan_fails_with_its_own_reason() {
         session_lookup_grace: Duration::from_secs(30),
         session_start_grace: Duration::from_secs(300),
         exit_grace: Duration::from_millis(100),
+        prepare_exit_wait: Duration::from_millis(200),
         stop_grace: Duration::from_millis(100),
         usage_every: Duration::from_secs(60),
         profile_every: Duration::from_millis(100),
@@ -1283,6 +1286,7 @@ fn a_tab_that_never_starts_the_agent_ends_as_failed() {
         session_lookup_grace: Duration::from_millis(100),
         session_start_grace: Duration::from_millis(300),
         exit_grace: Duration::from_secs(30),
+        prepare_exit_wait: Duration::from_millis(200),
         stop_grace: Duration::from_secs(30),
         usage_every: Duration::from_secs(60),
         profile_every: Duration::from_millis(100),
@@ -1341,4 +1345,269 @@ fn a_tab_that_never_starts_the_agent_ends_as_failed() {
             "{key} missing in {claude_json}"
         );
     }
+}
+
+/// Pids of the orchestrator of the tests below: the agent itself and the runner around it.
+const ORCHESTRATOR_PID: u32 = 4343;
+const RUNNER_PID: u32 = 4242;
+
+/// A machine whose processes can be declared gone and which remembers what Ward asked it to
+/// stop; everything else is [`FakeMachine`].
+struct WatchedMachine {
+    alive: Mutex<bool>,
+    stopped: Mutex<Vec<u32>>,
+}
+
+impl Default for WatchedMachine {
+    fn default() -> Self {
+        Self {
+            alive: Mutex::new(true),
+            stopped: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl Machine for WatchedMachine {
+    fn hardware(&self, root: &Path) -> machine::Hardware {
+        FakeMachine.hardware(root)
+    }
+
+    fn resources(&self, root: &Path) -> Resources {
+        FakeMachine.resources(root)
+    }
+
+    fn has_tool(&self, name: &str) -> bool {
+        FakeMachine.has_tool(name)
+    }
+
+    fn tool_version(&self, name: &str) -> Option<String> {
+        FakeMachine.tool_version(name)
+    }
+
+    fn is_alive(&self, _pid: u32) -> bool {
+        *self.alive.lock()
+    }
+
+    fn stop(&self, pids: &[u32]) {
+        self.stopped.lock().extend_from_slice(pids);
+    }
+
+    fn runner(&self) -> Option<(RunnerKind, Option<PathBuf>)> {
+        FakeMachine.runner()
+    }
+
+    fn write_elevated(&self, path: &Path, contents: &str) -> Result<(), String> {
+        FakeMachine.write_elevated(path, contents)
+    }
+}
+
+/// A worker with no service and no loops behind it: the tests of the preparation phase move a
+/// session by hand with [`Worker::advance`].
+fn offline_worker(dir: &Path, machine: Arc<dyn Machine>, timing: Timing) -> Arc<Worker> {
+    let homes = Homes {
+        claude_dir: dir.join("home").join(".claude"),
+        claude_json: dir.join("home").join(".claude.json"),
+        codex_dir: dir.join("home").join(".codex"),
+    };
+    std::fs::create_dir_all(dir.join("home")).unwrap();
+    let config = WorkerConfig {
+        base_url: "http://127.0.0.1:1/agents".to_owned(),
+        key: "agk_test".to_owned(),
+        name: "test-pc".to_owned(),
+        root: dir.join("agents-work"),
+        clone_search: Vec::new(),
+        paused: false,
+    };
+    let host = Arc::new(FakeHost::new(config.clone(), homes.clone()));
+    let worker = Worker::new(
+        host,
+        machine,
+        http_client::Client::new_for_test(),
+        homes.clone(),
+        profile_target(dir, &homes),
+        timing,
+        "test".to_owned(),
+    );
+    worker.state.lock().config = Some(config);
+    worker
+}
+
+/// A session in the preparation phase: the orchestrator's directory, the agent session Ward
+/// found and the transcript it writes.
+fn preparing_session(root: &Path, transcript: &Path, plan_approval: bool) -> Session {
+    let assignment = Assignment {
+        session_id: "s-exit".to_owned(),
+        title: "Выход оркестратора".to_owned(),
+        plan_approval,
+        ..Assignment::default()
+    };
+    let dir = launch::prepare_dir(root, &assignment.session_id).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut session = Session::new(
+        assignment,
+        provider::by_id("claude").unwrap(),
+        Phase::Prepare {
+            launched_at_ms: now_ms(),
+            at: Instant::now(),
+        },
+    );
+    session.prepare = Some(PrepareRun {
+        plan_path: dir.join(plan::PLAN_FILE),
+        dir,
+        vault_dir: root.join("vault"),
+        limit: Duration::from_secs(600),
+        last_error: None,
+    });
+    session.status = SessionStatus::Preparing;
+    session.runner_pid = Some(RUNNER_PID);
+    session.found = Some(FoundSession {
+        agent_session_id: AGENT_SESSION_ID.to_owned(),
+        pid: Some(ORCHESTRATOR_PID),
+        remote_control_url: None,
+        transcript: None,
+    });
+    session.transcript = Some(transcript.to_path_buf());
+    session
+}
+
+/// What the orchestrator writes into `plan.json`.
+fn demo_plan() -> String {
+    serde_json::json!({
+        "repo": "https://github.com/SteepMans/demo.git",
+        "baseBranch": "main",
+        "branch": "feature/4650-demo",
+        "prompt": "Промпт из плана",
+        "summary": "План готов",
+    })
+    .to_string()
+}
+
+/// The transcript of the orchestrator with its closing answer added.
+const ANSWERED: &str =
+    "{\"type\":\"user\",\"n\":1}\n{\"type\":\"assistant\",\"text\":\"план записан\"}\n";
+
+/// The plan is taken and the orchestrator ends its own session: Ward never touches its
+/// process, its closing answer still reaches the journal, and nothing of the executor starts
+/// while it is alive.
+#[test]
+fn an_orchestrator_that_ends_by_itself_is_not_stopped() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("agents-work");
+    let transcript = dir.path().join("orchestrator.jsonl");
+    std::fs::write(&transcript, "{\"type\":\"user\",\"n\":1}\n").unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let timing = Timing {
+        prepare_exit_wait: Duration::from_secs(30),
+        ..Timing::default()
+    };
+    let worker = offline_worker(dir.path(), machine.clone(), timing);
+    let mut session = preparing_session(&root, &transcript, true);
+    let prepare_dir = session.prepare.as_ref().unwrap().dir.clone();
+    std::fs::write(prepare_dir.join(plan::PLAN_FILE), demo_plan()).unwrap();
+
+    // The plan is read, but the orchestrator is still running: it is left to finish.
+    futures::executor::block_on(worker.advance(&mut session));
+    assert!(matches!(session.phase, Phase::PrepareExit { .. }));
+    assert_eq!(session.assignment.branch, "feature/4650-demo");
+    assert!(session.plan.is_some());
+    futures::executor::block_on(worker.advance(&mut session));
+    assert!(
+        matches!(session.phase, Phase::PrepareExit { .. }),
+        "the executor must not start while the orchestrator is alive"
+    );
+    assert_eq!(session.status, SessionStatus::Preparing);
+    assert!(session.worktree.is_none());
+    assert!(machine.stopped.lock().is_empty());
+
+    // It answers and exits by itself; the exit code is then its own and no doing of Ward's.
+    std::fs::write(&transcript, ANSWERED).unwrap();
+    *machine.alive.lock() = false;
+    std::fs::write(prepare_dir.join(launch::EXIT_CODE_FILE), "0").unwrap();
+    futures::executor::block_on(worker.advance(&mut session));
+    assert!(matches!(session.phase, Phase::PlanReview));
+    assert_eq!(session.status, SessionStatus::PlanReview);
+    assert!(
+        machine.stopped.lock().is_empty(),
+        "an orchestrator that already went needs no stopping"
+    );
+    // The journal was read to the end: the last message is there, not a sentence cut in half.
+    assert!(
+        session.journal.tail().contains("план записан"),
+        "{}",
+        session.journal.tail()
+    );
+}
+
+/// The plan is taken and the orchestrator hangs: Ward waits for it, ends it when the wait is
+/// over and goes on with the session.
+#[test]
+fn an_orchestrator_that_hangs_after_the_plan_is_ended_by_ward() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("agents-work");
+    let transcript = dir.path().join("orchestrator.jsonl");
+    std::fs::write(&transcript, "{\"type\":\"user\",\"n\":1}\n").unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let timing = Timing {
+        prepare_exit_wait: Duration::from_millis(100),
+        ..Timing::default()
+    };
+    let worker = offline_worker(dir.path(), machine.clone(), timing);
+    let mut session = preparing_session(&root, &transcript, true);
+    let prepare_dir = session.prepare.as_ref().unwrap().dir.clone();
+    std::fs::write(prepare_dir.join(plan::PLAN_FILE), demo_plan()).unwrap();
+
+    futures::executor::block_on(worker.advance(&mut session));
+    assert!(matches!(session.phase, Phase::PrepareExit { .. }));
+    assert!(machine.stopped.lock().is_empty());
+
+    // Nothing comes of the wait: the process of the orchestrator is ended, and its last lines
+    // are read all the same.
+    std::fs::write(&transcript, ANSWERED).unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+    futures::executor::block_on(worker.advance(&mut session));
+    assert_eq!(*machine.stopped.lock(), vec![ORCHESTRATOR_PID]);
+    assert!(matches!(session.phase, Phase::PlanReview));
+    assert_eq!(session.status, SessionStatus::PlanReview);
+    assert!(
+        session.journal.tail().contains("план записан"),
+        "{}",
+        session.journal.tail()
+    );
+}
+
+/// The orchestrator fell over before it wrote a plan: that is a failed preparation, and the
+/// code it died with is named in the message.
+#[test]
+fn an_orchestrator_that_crashes_before_the_plan_fails_the_preparation() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("agents-work");
+    let transcript = dir.path().join("orchestrator.jsonl");
+    std::fs::write(&transcript, "{\"type\":\"user\",\"n\":1}\n").unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let timing = Timing {
+        exit_grace: Duration::from_millis(100),
+        ..Timing::default()
+    };
+    let worker = offline_worker(dir.path(), machine.clone(), timing);
+    let mut session = preparing_session(&root, &transcript, false);
+    let prepare_dir = session.prepare.as_ref().unwrap().dir.clone();
+    std::fs::write(prepare_dir.join(launch::EXIT_CODE_FILE), "2\n").unwrap();
+
+    // The plan may still land right after the exit, so the failure waits out `exit_grace`.
+    futures::executor::block_on(worker.advance(&mut session));
+    assert!(!session.is_done());
+    std::thread::sleep(Duration::from_millis(150));
+    futures::executor::block_on(worker.advance(&mut session));
+    assert!(session.is_done());
+    assert_eq!(session.status, SessionStatus::Failed);
+    let message = session.message.clone().unwrap_or_default();
+    assert!(message.contains("plan.json"), "{message}");
+    assert!(message.contains("код 2"), "{message}");
+    let failed = session
+        .outbox
+        .iter()
+        .find(|request| request.status == SessionStatus::Failed)
+        .unwrap();
+    assert_eq!(failed.reason.as_deref(), Some(REASON_PREPARE_FAILED));
+    assert!(session.worktree.is_none());
 }
