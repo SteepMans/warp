@@ -326,3 +326,55 @@ fn trust_file_is_written_whole_and_a_broken_one_is_left_alone() {
     assert!(trust_folder(&claude_json, &worktree).is_err());
     assert_eq!(std::fs::read_to_string(&claude_json).unwrap(), "{ broken");
 }
+
+/// One `assistant` line of a transcript with the content blocks given.
+fn assistant(blocks: &str) -> String {
+    format!(r#"{{"type":"assistant","message":{{"content":[{blocks}]}}}}"#)
+}
+
+#[test]
+fn the_last_turn_tells_an_answer_from_a_tool_call_and_from_a_question() {
+    let answered = assistant(r#"{"type":"text","text":"Готово, PR открыт"}"#);
+    assert_eq!(parse_last_turn(&answered), LastTurn::Answered);
+    // Thinking before the text does not hide the answer.
+    let thinking = assistant(
+        r#"{"type":"thinking","thinking":"..."},{"type":"text","text":"Готово, PR открыт"}"#,
+    );
+    assert_eq!(parse_last_turn(&thinking), LastTurn::Answered);
+    // System, summary and snapshot lines after the answer do not hide it either.
+    let meta = format!(
+        "{answered}\n{}\n{}\n",
+        r#"{"type":"summary","summary":"итог"}"#, r#"{"type":"system","content":"hook"}"#
+    );
+    assert_eq!(parse_last_turn(&meta), LastTurn::Answered);
+
+    // A tool call waits for its result: the turn goes on.
+    let tool = assistant(r#"{"type":"tool_use","name":"Bash","input":{"command":"cargo test"}}"#);
+    assert_eq!(parse_last_turn(&tool), LastTurn::Working);
+    // Text and then a tool call in one turn: the newest block decides.
+    let both = assistant(
+        r#"{"type":"text","text":"Сейчас проверю"},{"type":"tool_use","name":"Bash","input":{}}"#,
+    );
+    assert_eq!(parse_last_turn(&both), LastTurn::Working);
+    // The result came, the agent still owes the answer to it.
+    let result = format!(
+        "{answered}\n{tool}\n{}\n",
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1"}]}}"#
+    );
+    assert_eq!(parse_last_turn(&result), LastTurn::Working);
+
+    // The question tools wait for the owner, not for a tool.
+    for name in ASK_TOOLS {
+        let asked = assistant(&format!(
+            r#"{{"type":"tool_use","name":"{name}","input":{{}}}}"#
+        ));
+        assert_eq!(parse_last_turn(&asked), LastTurn::Asked, "{name}");
+    }
+
+    // An API error in place of an answer is no answer, and a transcript that says nothing
+    // keeps the session going.
+    let error = r#"{"type":"assistant","isApiErrorMessage":true,"message":{"content":[{"type":"text","text":"Overloaded"}]}}"#;
+    assert_eq!(parse_last_turn(error), LastTurn::Working);
+    assert_eq!(parse_last_turn(""), LastTurn::Working);
+    assert_eq!(parse_last_turn("not json\n"), LastTurn::Working);
+}

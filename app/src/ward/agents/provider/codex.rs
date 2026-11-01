@@ -9,6 +9,11 @@
 //!   `plan_type`) in the newest rollouts.
 //! - Limit refusal: after the last turn started, an `error` event about the usage limit or a
 //!   `token_count` with `rate_limit_reached_type`.
+//! - Last turn: the newest event or item of the rollout that says something about it —
+//!   `task_complete` and `agent_message` end a turn, a `function_call` waits for its output,
+//!   `task_started` and `user_message` are a turn still going. Codex runs with
+//!   `--dangerously-bypass-approvals-and-sandbox`, so it asks the owner nothing and
+//!   [`super::LastTurn::Asked`] never comes of a rollout.
 
 use std::fs::File;
 use std::io::{Read as _, Seek as _, SeekFrom};
@@ -20,7 +25,9 @@ use serde::Deserialize;
 use serde::de::IgnoredAny;
 use serde_json::Value;
 
-use super::{Account, AgentCommand, FoundSession, Homes, LimitHit, Provider, WardUsage, rfc3339};
+use super::{
+    Account, AgentCommand, FoundSession, Homes, LastTurn, LimitHit, Provider, WardUsage, rfc3339,
+};
 use crate::ward::agents::contract::UsageReport;
 use crate::ward::codex_usage::rollout::recent_rollouts;
 
@@ -155,6 +162,29 @@ pub fn parse_limit_hit(tail: &str) -> Option<LimitHit> {
             .max()
     });
     Some(LimitHit { resets_at })
+}
+
+/// What the last turn of the rollout was; see the module header for the events it reads.
+pub fn parse_last_turn(tail: &str) -> LastTurn {
+    for line in tail.lines().rev() {
+        let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        match value.pointer("/payload/type").and_then(Value::as_str) {
+            Some("task_complete" | "agent_message") => return LastTurn::Answered,
+            Some(
+                "task_started"
+                | "user_message"
+                | "function_call"
+                | "function_call_output"
+                | "custom_tool_call"
+                | "local_shell_call",
+            ) => return LastTurn::Working,
+            // Reasoning, token counts and errors say nothing about the end of the turn.
+            _ => continue,
+        }
+    }
+    LastTurn::Working
 }
 
 /// `auth.json`; token values are skipped, only their presence is kept.
@@ -330,6 +360,10 @@ impl Provider for Codex {
 
     fn limit_hit(&self, tail: &str) -> Option<LimitHit> {
         parse_limit_hit(tail)
+    }
+
+    fn last_turn(&self, tail: &str) -> LastTurn {
+        parse_last_turn(tail)
     }
 }
 

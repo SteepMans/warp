@@ -186,3 +186,31 @@ fn finds_the_rollout_of_the_worktree() {
     .unwrap();
     assert_eq!(Codex.account(&homes).plan.as_deref(), Some("plus"));
 }
+
+#[test]
+fn the_last_turn_of_a_rollout_ends_with_the_task() {
+    let started = r#"{"type":"event_msg","payload":{"type":"task_started"}}"#;
+    let call = r#"{"type":"response_item","payload":{"type":"function_call","name":"shell"}}"#;
+    let answer = r#"{"type":"event_msg","payload":{"type":"agent_message","message":"Готово"}}"#;
+    let complete = r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#;
+    assert_eq!(parse_last_turn(started), LastTurn::Working);
+    assert_eq!(
+        parse_last_turn(&format!("{started}\n{call}\n")),
+        LastTurn::Working
+    );
+    assert_eq!(
+        parse_last_turn(&format!("{started}\n{call}\n{answer}\n{complete}\n")),
+        LastTurn::Answered
+    );
+    // A token count after the turn does not hide its end.
+    assert_eq!(
+        parse_last_turn(&format!("{complete}\n{TOKEN_COUNT}\n")),
+        LastTurn::Answered
+    );
+    // A new turn after the answer: the agent owes a new one.
+    assert_eq!(
+        parse_last_turn(&format!("{complete}\n{started}\n")),
+        LastTurn::Working
+    );
+    assert_eq!(parse_last_turn(""), LastTurn::Working);
+}

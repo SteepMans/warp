@@ -73,6 +73,20 @@ pub struct LimitHit {
     pub resets_at: Option<DateTime<Utc>>,
 }
 
+/// What the end of a transcript says the agent is doing, for a session whose transcript stopped
+/// growing. An agent in remote control mode does not end its process after its answer, so the
+/// last turn is the only thing that tells a finished session from one still going.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LastTurn {
+    /// The agent owes something: a tool call without its result, the owner's message not
+    /// answered yet, or an end of transcript Ward cannot read. Nothing is concluded from it.
+    Working,
+    /// The agent ended its turn with an answer of its own and waits for nothing.
+    Answered,
+    /// The agent ended its turn with a question for the owner and waits for the answer.
+    Asked,
+}
+
 /// Login state of the agent, found without network calls and without using token values.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Account {
@@ -114,6 +128,9 @@ pub trait Provider: Send + Sync {
 
     /// Whether the end of the transcript (`tail`, whole lines) says the agent hit its limit.
     fn limit_hit(&self, tail: &str) -> Option<LimitHit>;
+
+    /// What the end of the transcript (`tail`, whole lines) says about the agent's last turn.
+    fn last_turn(&self, tail: &str) -> LastTurn;
 }
 
 static CLAUDE: claude::Claude = claude::Claude;
