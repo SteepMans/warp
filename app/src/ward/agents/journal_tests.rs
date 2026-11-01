@@ -104,3 +104,60 @@ fn a_new_part_keeps_the_numbering_and_starts_the_file_over() {
     // The tail is the new part only: the end of the executor's transcript.
     assert_eq!(journal.tail(), "{\"n\":3}\n");
 }
+
+#[test]
+fn a_restart_goes_on_from_what_the_service_took() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.jsonl");
+    std::fs::write(&path, "{\"n\":1}\n{\"n\":2}\n").unwrap();
+
+    let mut journal = Journal::default();
+    journal.start_part("{\"role\":\"executor\"}");
+    journal.read_from(&path).unwrap();
+    // The marker went out, the transcript chunk behind it did not.
+    let marker = journal.next_pending().unwrap().seq;
+    journal.mark_sent(marker);
+    let (offset, next_seq) = journal.sent_position();
+    assert_eq!((offset, next_seq), (0, 2));
+
+    // Ward starts again: the chunk the service never took is cut again under the same `seq`,
+    // and the lines written in the meantime go with it.
+    std::fs::write(&path, "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n").unwrap();
+    let mut after = Journal::default();
+    after.resume(offset, next_seq);
+    assert!(after.read_from(&path).unwrap());
+    let chunk = after.next_pending().unwrap().clone();
+    assert_eq!(chunk.seq, 2);
+    assert_eq!(chunk.bytes, b"{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n");
+    after.mark_sent(chunk.seq);
+    assert_eq!(after.sent_position(), (24, 3));
+    assert!(!after.has_pending());
+
+    // And from there on nothing is sent twice.
+    assert!(!after.read_from(&path).unwrap());
+    std::fs::write(&path, "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n{\"n\":4}\n").unwrap();
+    assert!(after.read_from(&path).unwrap());
+    let chunk = after.next_pending().unwrap();
+    assert_eq!(
+        (chunk.seq, chunk.bytes.as_slice()),
+        (3, b"{\"n\":4}\n".as_slice())
+    );
+}
+
+#[test]
+fn a_chunk_of_a_closed_part_does_not_move_the_new_part() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("orchestrator.jsonl");
+    std::fs::write(&first, "{\"n\":1}\n").unwrap();
+    let mut journal = Journal::default();
+    journal.start_part("{\"role\":\"orchestrator\"}");
+    journal.read_from(&first).unwrap();
+    // The service is away: the orchestrator's lines wait while the executor's part opens.
+    journal.start_part("{\"role\":\"executor\"}");
+    assert_eq!(journal.sent_position(), (0, 1));
+    while let Some(chunk) = journal.next_pending().map(|chunk| chunk.seq) {
+        journal.mark_sent(chunk);
+    }
+    // The position is the new part's, not the eight bytes of the orchestrator's transcript.
+    assert_eq!(journal.sent_position(), (0, 4));
+}
