@@ -8,7 +8,10 @@
 //! - **Sessions**: moves every session through its phases (preparation, plan review, worktree,
 //!   tab, agent session found, exit code), ships the transcript every
 //!   [`Timing::journal_every`] and sends statuses. What could not be sent waits and goes out
-//!   with the next tick.
+//!   with the next tick. An agent in remote control mode does not end its process after its
+//!   answer, so a session whose transcript stands still for [`IDLE_AFTER_ANSWER`] is read for
+//!   its last turn: a closing answer ends the session as `review`, a question for the owner
+//!   turns it `blocked` until somebody answers (see [`Worker::gone_quiet`]).
 //! - **Profile**: applies the machine profile whenever its version changes, checks the proxy
 //!   and reports both; with the key gone it takes Ward's own entries off the machine.
 //!
@@ -37,9 +40,9 @@ use super::admission::{self, MachineState};
 use super::client::{Api, ApiError};
 use super::contract::{
     AckRequest, AgentInfo, AppliedRequest, Assignment, Command, HeartbeatRequest, Limits,
-    PartReport, Passport, ProfileBeat, ProfileBody, ProxyCheck, REASON_PLAN_REJECTED,
-    REASON_PREPARE_FAILED, REASON_USAGE_LIMIT, RegisterRequest, Resources, SessionBeat,
-    SessionStatus, StatusRequest, Tools, UsageReport,
+    PartReport, Passport, ProfileBeat, ProfileBody, ProxyCheck, REASON_OWNER_QUESTION,
+    REASON_PLAN_REJECTED, REASON_PREPARE_FAILED, REASON_USAGE_LIMIT, RegisterRequest, Resources,
+    SessionBeat, SessionStatus, StatusRequest, Tools, UsageReport,
 };
 use super::git::{self, WorktreeSpec};
 use super::journal::Journal;
@@ -48,7 +51,7 @@ use super::machine::{self, Machine};
 use super::plan::{self, Plan};
 use super::prepare;
 use super::profile::{self, Vault};
-use super::provider::{self, FoundSession, Homes, Provider, WardUsage};
+use super::provider::{self, FoundSession, Homes, LastTurn, Provider, WardUsage};
 
 /// What the worker needs from the settings. `Debug` leaves the key out.
 #[derive(Clone, PartialEq, Eq)]
@@ -155,6 +158,9 @@ pub struct Timing {
     /// How long the orchestrator may take to end by itself after its plan was taken; see
     /// [`PREPARE_EXIT_WAIT`].
     pub prepare_exit_wait: Duration,
+    /// How long the transcript of a launched agent may stand still before its last turn
+    /// decides what became of the session; see [`IDLE_AFTER_ANSWER`].
+    pub idle_after_answer: Duration,
     /// After a stop, the session ends after this even without an exit code.
     pub stop_grace: Duration,
     pub usage_every: Duration,
@@ -177,6 +183,7 @@ impl Default for Timing {
             session_start_grace: Duration::from_secs(180),
             exit_grace: Duration::from_secs(15),
             prepare_exit_wait: PREPARE_EXIT_WAIT,
+            idle_after_answer: IDLE_AFTER_ANSWER,
             stop_grace: Duration::from_secs(30),
             usage_every: Duration::from_secs(60),
             profile_every: Duration::from_secs(5),
@@ -296,6 +303,9 @@ const MESSAGE_NO_SESSION_ID: &str = "Сессия запущена, id сесс�
 const MESSAGE_NOT_STARTED: &str =
     "Агент не начал работу: ждёт ответа в терминале (вопрос о доверии к папке?)";
 const MESSAGE_USAGE_LIMIT: &str = "Агент упёрся в лимит подписки";
+const MESSAGE_IDLE_ANSWER: &str =
+    "Работа готова: агент выдал финальный ответ и замолчал, Ward закрыл его сессию";
+const MESSAGE_OWNER_QUESTION: &str = "Агент задал вопрос и ждёт ответа владельца";
 const MESSAGE_PREPARING: &str = "Подготовка: оркестратор собирает досье и промпт";
 const MESSAGE_PREPARE_TOO_LONG: &str = "Подготовка не уложилась в prepareMaxDurationMin";
 const MESSAGE_PREPARE_NO_PLAN: &str = "Оркестратор завершился, а plan.json не оставил";
@@ -310,6 +320,16 @@ const MAX_FINISHED_SESSIONS: usize = 20;
 /// process when the wait is over, because the executor of the same assignment waits for it; a
 /// longer wait would only delay the executor for nothing.
 const PREPARE_EXIT_WAIT: Duration = Duration::from_secs(20);
+
+/// How long the transcript of a launched agent may stand still before Ward reads its last turn
+/// and decides. An agent in remote control mode does not end its process after its answer: the
+/// transcript standing still is the only sign Ward gets, so the wait has to outlast every quiet
+/// stretch inside a turn — a long build, a test run, a wait for the model. Those stretches are
+/// opened by a tool call the transcript already holds, so the last turn tells them from a
+/// finished one; the wait is only there for the pauses between two lines of one turn. Five
+/// minutes is far past any of them and far short of `maxDurationMin`, which used to be the only
+/// way out of a session whose agent had long finished.
+const IDLE_AFTER_ANSWER: Duration = Duration::from_secs(5 * 60);
 
 /// Roles of the two sessions of one assignment, as the journal marks them.
 const ROLE_ORCHESTRATOR: &str = "orchestrator";
@@ -371,6 +391,8 @@ struct Session {
     runner_pid: Option<u32>,
     journal: Journal,
     last_journal_read: Option<Instant>,
+    /// When the transcript of the agent running now last grew; the idle watch counts from here.
+    transcript_grew_at: Option<Instant>,
     outbox: VecDeque<StatusRequest>,
     messages: VecDeque<String>,
     stop: Option<(&'static str, Option<Instant>)>,
@@ -404,6 +426,7 @@ impl Session {
             runner_pid: None,
             journal: Journal::default(),
             last_journal_read: None,
+            transcript_grew_at: None,
             outbox: VecDeque::new(),
             messages: VecDeque::new(),
             stop: None,
@@ -427,6 +450,7 @@ impl Session {
         self.runner_pid = None;
         self.runner_gone_since = None;
         self.last_journal_read = None;
+        self.transcript_grew_at = None;
     }
 
     /// The processes of the agent that runs now.
@@ -1885,8 +1909,51 @@ impl Worker {
         }
     }
 
+    /// Whether the transcript of the agent running now has stood still for
+    /// [`Timing::idle_after_answer`]. A launch that never wrote a line is not quiet but silent,
+    /// and [`is_silent`] answers for that one.
+    fn gone_quiet(&self, session: &Session) -> bool {
+        session.journal.has_lines()
+            && session
+                .transcript_grew_at
+                .is_some_and(|at| at.elapsed() >= self.timing.idle_after_answer)
+    }
+
+    /// The agent gave its closing answer and went quiet without ending its process: the work is
+    /// done, so Ward ends the processes and reports the session as ready for review, instead of
+    /// holding the slot of the machine until `maxDurationMin` runs out. Not a failure and not a
+    /// stop of the owner's: the message says the result is there to look at.
+    fn finish_answered(&self, session: &mut Session) {
+        log::info!(
+            "Ward agents: session {} answered and went quiet, taking the work for done",
+            session.assignment.session_id
+        );
+        self.stop_agent(session);
+        let mut request = session.status_request(SessionStatus::Review);
+        request.message = Some(MESSAGE_IDLE_ANSWER.to_owned());
+        finish(session, request);
+    }
+
+    /// The agent ended its turn with a question for the owner: the session is not over, it
+    /// calls the owner. It stays where it is, so a `message` command still reaches the tab, and
+    /// the next lines of the transcript put it back to `running` (see [`Self::read_journal`]).
+    fn ask_owner(&self, session: &mut Session) {
+        if session.status == SessionStatus::Blocked {
+            return;
+        }
+        log::info!(
+            "Ward agents: session {} waits for an answer of the owner",
+            session.assignment.session_id
+        );
+        let mut request = session.status_request(SessionStatus::Blocked);
+        request.reason = Some(REASON_OWNER_QUESTION.to_owned());
+        request.message = Some(MESSAGE_OWNER_QUESTION.to_owned());
+        session.set_status(request);
+    }
+
     /// A launched session: finds the agent session, ships the transcript, handles stop and
-    /// message commands and notices the exit.
+    /// message commands and notices the exit — the exit code, the runner that went, a stop that
+    /// ran out of grace, or a transcript that stood still after the agent's last turn.
     async fn watch(&self, session: &mut Session, launched_at_ms: i64, launched_at: Instant) {
         let Some(worktree) = session.worktree.clone() else {
             return;
@@ -1944,6 +2011,23 @@ impl Worker {
             finish(session, request);
             return;
         }
+        if session.stop.is_none() && self.gone_quiet(session) {
+            // The transcript is read to the end before anything is concluded from it: an answer
+            // that landed between two ticks counts, and the agent's last word reaches the
+            // service whichever way the session goes.
+            self.read_journal(session);
+            let turn = session.provider.last_turn(&session.journal.tail());
+            if self.gone_quiet(session) {
+                match turn {
+                    LastTurn::Answered => {
+                        self.finish_answered(session);
+                        return;
+                    }
+                    LastTurn::Asked => self.ask_owner(session),
+                    LastTurn::Working => {}
+                }
+            }
+        }
         let runner_gone = session
             .runner_pid
             .is_some_and(|pid| !self.machine.is_alive(pid));
@@ -1977,6 +2061,9 @@ impl Worker {
                 false
             }
         };
+        if added {
+            session.transcript_grew_at = Some(Instant::now());
+        }
         if !added || session.found.is_none() {
             return;
         }

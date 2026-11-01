@@ -427,6 +427,10 @@ impl AckRequest {
 /// `reason` of a `blocked` status after the agent hit its subscription limit.
 pub const REASON_USAGE_LIMIT: &str = "usage_limit";
 
+/// `reason` of a `blocked` status after the agent asked the owner a question and stopped. The
+/// session is not over: the owner answers it with a `message` command and the agent goes on.
+pub const REASON_OWNER_QUESTION: &str = "owner_question";
+
 /// `reason` of a `failed` status when the preparation phase left no usable plan.
 pub const REASON_PREPARE_FAILED: &str = "prepare_failed";
 

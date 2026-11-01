@@ -436,6 +436,7 @@ fn full_cycle_against_a_fake_service() {
         session_start_grace: Duration::from_secs(300),
         exit_grace: Duration::from_secs(30),
         prepare_exit_wait: Duration::from_millis(200),
+        idle_after_answer: Duration::from_secs(300),
         stop_grace: Duration::from_secs(30),
         usage_every: Duration::from_secs(60),
         profile_every: Duration::from_millis(100),
@@ -768,6 +769,7 @@ fn the_preparation_phase_runs_before_the_executor() {
         session_start_grace: Duration::from_secs(300),
         exit_grace: Duration::from_secs(30),
         prepare_exit_wait: Duration::from_millis(200),
+        idle_after_answer: Duration::from_secs(300),
         stop_grace: Duration::from_secs(30),
         usage_every: Duration::from_secs(60),
         profile_every: Duration::from_millis(100),
@@ -1101,6 +1103,7 @@ fn a_preparation_without_a_plan_fails_with_its_own_reason() {
         session_start_grace: Duration::from_secs(300),
         exit_grace: Duration::from_millis(100),
         prepare_exit_wait: Duration::from_millis(200),
+        idle_after_answer: Duration::from_secs(300),
         stop_grace: Duration::from_millis(100),
         usage_every: Duration::from_secs(60),
         profile_every: Duration::from_millis(100),
@@ -1287,6 +1290,7 @@ fn a_tab_that_never_starts_the_agent_ends_as_failed() {
         session_start_grace: Duration::from_millis(300),
         exit_grace: Duration::from_secs(30),
         prepare_exit_wait: Duration::from_millis(200),
+        idle_after_answer: Duration::from_secs(300),
         stop_grace: Duration::from_secs(30),
         usage_every: Duration::from_secs(60),
         profile_every: Duration::from_millis(100),
@@ -1610,4 +1614,222 @@ fn an_orchestrator_that_crashes_before_the_plan_fails_the_preparation() {
         .unwrap();
     assert_eq!(failed.reason.as_deref(), Some(REASON_PREPARE_FAILED));
     assert!(session.worktree.is_none());
+}
+
+/// Pid of the agent of the executor in the tests below; its runner is [`RUNNER_PID`].
+const EXECUTOR_PID: u32 = 4344;
+
+/// A launched executor: the worktree Ward made and, when the agent got going, the session Ward
+/// found with the transcript it writes.
+fn launched_session(root: &Path, transcript: Option<&Path>) -> Session {
+    let assignment = Assignment {
+        session_id: "s-idle".to_owned(),
+        title: "Исполнитель замолчал".to_owned(),
+        branch: "fix/4654-demo".to_owned(),
+        max_duration_min: 60,
+        ..Assignment::default()
+    };
+    let mut session = Session::new(
+        assignment,
+        provider::by_id("claude").unwrap(),
+        Phase::Launched {
+            launched_at_ms: now_ms(),
+            at: Instant::now(),
+        },
+    );
+    session.worktree = Some(root.join("worktree"));
+    session.runner_pid = Some(RUNNER_PID);
+    match transcript {
+        Some(path) => {
+            session.status = SessionStatus::Running;
+            session.found = Some(FoundSession {
+                agent_session_id: AGENT_SESSION_ID.to_owned(),
+                pid: Some(EXECUTOR_PID),
+                remote_control_url: None,
+                transcript: None,
+            });
+            session.transcript = Some(path.to_path_buf());
+        }
+        None => session.status = SessionStatus::Assigned,
+    }
+    session
+}
+
+/// Every tick reads the journal and the wait after the last line of the transcript is over in a
+/// moment.
+fn idle_timing() -> Timing {
+    Timing {
+        journal_every: Duration::ZERO,
+        idle_after_answer: Duration::from_millis(200),
+        ..Timing::default()
+    }
+}
+
+/// One `assistant` line of a Claude Code transcript with the content blocks given.
+fn assistant_line(blocks: &str) -> String {
+    format!("{{\"type\":\"assistant\",\"message\":{{\"content\":[{blocks}]}}}}\n")
+}
+
+/// The owner's prompt, the first line of every transcript below.
+const PROMPT_LINE: &str =
+    "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"сделай\"}}\n";
+
+/// The agent answered and went quiet without ending its process: the work is done, so the
+/// session is closed as ready for review, the processes go and the slot of the machine is free
+/// long before `maxDurationMin`.
+#[test]
+fn an_executor_that_answered_and_went_quiet_ends_as_review() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("agents-work");
+    let transcript = dir.path().join("executor.jsonl");
+    let answer = assistant_line("{\"type\":\"text\",\"text\":\"Готово, PR открыт\"}");
+    std::fs::write(&transcript, format!("{PROMPT_LINE}{answer}")).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let worker = offline_worker(dir.path(), machine.clone(), idle_timing());
+    let mut session = launched_session(&root, Some(transcript.as_path()));
+
+    // The answer is still fresh: nothing is concluded from it yet.
+    futures::executor::block_on(worker.advance(&mut session));
+    assert!(!session.is_done());
+    assert_eq!(session.status, SessionStatus::Running);
+    assert!(machine.stopped.lock().is_empty());
+
+    std::thread::sleep(Duration::from_millis(300));
+    futures::executor::block_on(worker.advance(&mut session));
+    assert!(session.is_done());
+    assert_eq!(session.status, SessionStatus::Review);
+    let message = session.message.clone().unwrap_or_default();
+    assert!(message.contains("Работа готова"), "{message}");
+    // Neither a failure nor a stop of the owner's, and no exit code was invented.
+    let request = session.outbox.back().unwrap();
+    assert_eq!(request.status, SessionStatus::Review);
+    assert_eq!(request.reason, None);
+    assert_eq!(request.exit_code, None);
+    assert_eq!(*machine.stopped.lock(), vec![EXECUTOR_PID]);
+    // The journal was read to the end: the closing answer reaches the service.
+    assert!(
+        session.journal.tail().contains("PR открыт"),
+        "{}",
+        session.journal.tail()
+    );
+}
+
+/// The transcript stands still in the middle of a turn: the agent called a tool and waits for
+/// its result. Nothing is over, so the session goes on.
+#[test]
+fn an_executor_waiting_for_a_tool_is_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("agents-work");
+    let transcript = dir.path().join("executor.jsonl");
+    let tool = assistant_line("{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{}}");
+    std::fs::write(&transcript, format!("{PROMPT_LINE}{tool}")).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let worker = offline_worker(dir.path(), machine.clone(), idle_timing());
+    let mut session = launched_session(&root, Some(transcript.as_path()));
+
+    futures::executor::block_on(worker.advance(&mut session));
+    std::thread::sleep(Duration::from_millis(300));
+    futures::executor::block_on(worker.advance(&mut session));
+    assert!(!session.is_done());
+    assert_eq!(session.status, SessionStatus::Running);
+    assert!(machine.stopped.lock().is_empty());
+    assert!(session.outbox.is_empty());
+}
+
+/// The agent asked the owner something and waits: the session calls the owner instead of being
+/// taken for finished, and the owner's answer puts it back to work.
+#[test]
+fn an_executor_that_asked_the_owner_calls_for_an_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("agents-work");
+    let transcript = dir.path().join("executor.jsonl");
+    let question =
+        assistant_line("{\"type\":\"tool_use\",\"name\":\"AskUserQuestion\",\"input\":{}}");
+    std::fs::write(&transcript, format!("{PROMPT_LINE}{question}")).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let worker = offline_worker(dir.path(), machine.clone(), idle_timing());
+    let mut session = launched_session(&root, Some(transcript.as_path()));
+
+    futures::executor::block_on(worker.advance(&mut session));
+    std::thread::sleep(Duration::from_millis(300));
+    futures::executor::block_on(worker.advance(&mut session));
+    assert!(!session.is_done());
+    assert_eq!(session.status, SessionStatus::Blocked);
+    let blocked = session.outbox.back().unwrap();
+    assert_eq!(blocked.reason.as_deref(), Some(REASON_OWNER_QUESTION));
+    let message = session.message.clone().unwrap_or_default();
+    assert!(message.contains("вопрос"), "{message}");
+    assert!(machine.stopped.lock().is_empty());
+
+    // Asked once, not with every tick.
+    futures::executor::block_on(worker.advance(&mut session));
+    assert_eq!(
+        session
+            .outbox
+            .iter()
+            .filter(|request| request.status == SessionStatus::Blocked)
+            .count(),
+        1
+    );
+
+    // The owner answered: the session is running again.
+    std::fs::write(&transcript, format!("{PROMPT_LINE}{question}{PROMPT_LINE}")).unwrap();
+    futures::executor::block_on(worker.advance(&mut session));
+    assert!(!session.is_done());
+    assert_eq!(session.status, SessionStatus::Running);
+}
+
+/// The agent goes on writing: every new line starts the wait again, and only the silence after
+/// the last one closes the session.
+#[test]
+fn an_executor_that_is_still_writing_keeps_its_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("agents-work");
+    let transcript = dir.path().join("executor.jsonl");
+    let answer = assistant_line("{\"type\":\"text\",\"text\":\"Готово, PR открыт\"}");
+    let more = assistant_line("{\"type\":\"text\",\"text\":\"И ещё одно\"}");
+    std::fs::write(&transcript, format!("{PROMPT_LINE}{answer}")).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let worker = offline_worker(dir.path(), machine.clone(), idle_timing());
+    let mut session = launched_session(&root, Some(transcript.as_path()));
+
+    futures::executor::block_on(worker.advance(&mut session));
+    std::thread::sleep(Duration::from_millis(300));
+    // The wait is over, but the agent wrote one more line: the session goes on.
+    std::fs::write(&transcript, format!("{PROMPT_LINE}{answer}{more}")).unwrap();
+    futures::executor::block_on(worker.advance(&mut session));
+    assert!(!session.is_done());
+    assert_eq!(session.status, SessionStatus::Running);
+    assert!(machine.stopped.lock().is_empty());
+
+    // Now it is quiet after that line too.
+    std::thread::sleep(Duration::from_millis(300));
+    futures::executor::block_on(worker.advance(&mut session));
+    assert!(session.is_done());
+    assert_eq!(session.status, SessionStatus::Review);
+}
+
+/// A launch that never wrote a line is not a finished one: it keeps the old way out, `failed`
+/// with the message about the agent that never started.
+#[test]
+fn a_launch_without_a_transcript_still_fails_as_not_started() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("agents-work");
+    let machine = Arc::new(WatchedMachine::default());
+    let timing = Timing {
+        session_start_grace: Duration::from_millis(200),
+        ..idle_timing()
+    };
+    let worker = offline_worker(dir.path(), machine.clone(), timing);
+    let mut session = launched_session(&root, None);
+
+    futures::executor::block_on(worker.advance(&mut session));
+    assert!(!session.is_done());
+    std::thread::sleep(Duration::from_millis(300));
+    futures::executor::block_on(worker.advance(&mut session));
+    assert!(session.is_done());
+    assert_eq!(session.status, SessionStatus::Failed);
+    let message = session.message.clone().unwrap_or_default();
+    assert!(message.contains("не начал работу"), "{message}");
+    assert_eq!(*machine.stopped.lock(), vec![RUNNER_PID]);
 }
