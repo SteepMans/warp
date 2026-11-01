@@ -21,7 +21,10 @@
 //! process is still there (or which came back with the tab of an update relaunch) is picked up
 //! where it was left, transcript position included, and one that did not survive ends with a
 //! status that says so instead of looking like a session that never started. Quitting
-//! therefore no longer reports the sessions as failed, see [`ShutdownReport`].
+//! therefore no longer reports the sessions as failed, see [`ShutdownReport`]. The session's
+//! tab comes back with it: the owner's `message` is typed into the pane the session had, the
+//! pane that runs its agent session, or the pane whose agent works in its directory, see
+//! [`Worker::find_pane`].
 //!
 //! An assignment without a prompt (or without a repository or a branch) goes through the
 //! preparation phase first: the orchestrator session in the vault writes `plan.json`, Ward
@@ -135,6 +138,27 @@ pub struct TabSpec {
     pub shell: Option<&'static str>,
 }
 
+/// How the tab of a session is looked for, in this order: the pane the session already had,
+/// the pane whose agent runs the session's own agent session, and the pane whose agent works in
+/// the session's directory. The first two name one tab exactly; the directory is the last
+/// resort, for an agent whose session id Ward never found.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PaneQuery {
+    /// The pane UUID of the session's tab, which an update relaunch keeps.
+    pub pane_uuid: Option<String>,
+    /// The agent session the tab must be running.
+    pub agent_session_id: Option<String>,
+    /// The working directory the tab's agent must be in.
+    pub cwd: Option<PathBuf>,
+}
+
+impl PaneQuery {
+    /// Nothing to look a tab up by.
+    pub fn is_empty(&self) -> bool {
+        self.pane_uuid.is_none() && self.agent_session_id.is_none() && self.cwd.is_none()
+    }
+}
+
 /// The UI side of the worker.
 #[async_trait]
 pub trait Host: Send + Sync {
@@ -145,6 +169,8 @@ pub trait Host: Send + Sync {
     async fn ward_usage(&self) -> WardUsage;
     /// Opens the tab and queues its command; returns the pane UUID.
     async fn open_tab(&self, tab: TabSpec) -> Result<Option<String>, String>;
+    /// The pane of an open tab that matches `query`; `None` when no tab does.
+    async fn find_pane(&self, query: PaneQuery) -> Option<String>;
     /// Types `text` into the agent of the pane and submits it.
     async fn send_text(&self, pane_uuid: &str, text: &str) -> Result<(), String>;
     async fn publish(&self, snapshot: Snapshot);
@@ -333,8 +359,7 @@ const MESSAGE_AGENT_GONE: &str =
     "Ward перезапустился, процесс агента не выжил: работа сессии прервана на середине";
 const MESSAGE_PREPARE_AGENT_GONE: &str =
     "Ward перезапустился, процесс оркестратора не выжил, плана он не оставил";
-const MESSAGE_NO_TAB: &str =
-    "Сообщение не доставлено: вкладки сессии больше нет (перезапуск Ward?)";
+const MESSAGE_NO_TAB: &str = "Сообщение не доставлено: открытой вкладки сессии не нашлось";
 
 /// Finished sessions the panel keeps.
 const MAX_FINISHED_SESSIONS: usize = 20;
@@ -493,6 +518,30 @@ impl Session {
         self.transcript_grew_at = None;
     }
 
+    /// Where the agent of this session works now: the vault for the orchestrator of the
+    /// preparation phase, the worktree for the executor.
+    fn agent_cwd(&self) -> Option<PathBuf> {
+        match &self.phase {
+            Phase::Prepare { .. } | Phase::PrepareExit { .. } => self
+                .prepare
+                .as_ref()
+                .map(|prepare| prepare.vault_dir.clone()),
+            _ => self.worktree.clone(),
+        }
+    }
+
+    /// What the session's tab can be recognised by.
+    fn pane_query(&self) -> PaneQuery {
+        PaneQuery {
+            pane_uuid: self.pane_uuid.clone(),
+            agent_session_id: self
+                .found
+                .as_ref()
+                .map(|found| found.agent_session_id.clone()),
+            cwd: self.agent_cwd(),
+        }
+    }
+
     /// The processes of the agent that runs now.
     fn agent_pids(&self) -> Vec<u32> {
         match self.found.as_ref().and_then(|found| found.pid) {
@@ -583,6 +632,7 @@ impl Session {
                 remote_control_url: found.remote_control_url.clone(),
             }),
             transcript: self.transcript.as_deref().map(text),
+            pane_uuid: self.pane_uuid.clone(),
             role: self.role.map(str::to_owned),
             journal: SavedJournal { offset, next_seq },
             prepare: self.prepare.as_ref().map(|prepare| SavedPrepare {
@@ -1561,6 +1611,7 @@ impl Worker {
             transcript: None,
         });
         session.transcript = saved.transcript.as_deref().map(PathBuf::from);
+        session.pane_uuid = saved.pane_uuid.clone();
         session.role = match saved.role.as_deref() {
             Some(ROLE_ORCHESTRATOR) => Some(ROLE_ORCHESTRATOR),
             Some(ROLE_EXECUTOR) => Some(ROLE_EXECUTOR),
@@ -2423,27 +2474,63 @@ impl Worker {
         }
     }
 
-    /// Types the owner's messages into the tab of the agent running now. A session picked up
-    /// after a restart of Ward has no tab of Ward's any more: the owner's message cannot be
-    /// typed anywhere, and the card says so instead of swallowing it.
+    /// Binds the session to its tab again and returns that tab's pane: the pane the session
+    /// already had (an update relaunch reopens the tab under the same UUID), the pane whose
+    /// agent runs this very agent session, or the pane whose agent works in the session's
+    /// directory. `None` when no open tab is the session's, and the pane the session knew is
+    /// then forgotten rather than kept as a tab that is not there.
+    async fn find_pane(&self, session: &mut Session) -> Option<String> {
+        let query = session.pane_query();
+        if query.is_empty() {
+            return None;
+        }
+        let found = self.host.find_pane(query).await;
+        if found != session.pane_uuid {
+            match &found {
+                Some(pane) => log::info!(
+                    "Ward agents: session {} found its tab again ({pane})",
+                    session.assignment.session_id
+                ),
+                None => log::info!(
+                    "Ward agents: session {} has no open tab of its own",
+                    session.assignment.session_id
+                ),
+            }
+            session.pane_uuid = found.clone();
+        }
+        found
+    }
+
+    /// Types the owner's messages into the tab of the agent running now. The tab is looked for
+    /// before every message ([`Self::find_pane`]): a session picked up after a restart of Ward
+    /// has no tab of this run, and the tab an update relaunch reopened, or the one the agent
+    /// still runs in, is its tab again. Without any such tab the card says the message was not
+    /// delivered instead of swallowing it.
     async fn send_messages(&self, session: &mut Session) {
         while let Some(text) = session.messages.pop_front() {
-            match session.pane_uuid.clone() {
-                Some(pane) => {
-                    if let Err(err) = self.host.send_text(&pane, &text).await {
+            let pane = self.find_pane(session).await;
+            let delivered = match &pane {
+                Some(pane) => match self.host.send_text(pane, &text).await {
+                    Ok(()) => true,
+                    Err(err) => {
                         log::warn!("Ward agents: could not type a message into the session: {err}");
+                        false
                     }
-                }
+                },
                 None => {
                     log::warn!("Ward agents: a message for a session without a tab");
-                    let status = session.status;
-                    if is_reportable(status) {
-                        let mut request = session.status_request(status);
-                        request.reason = session.reason.clone();
-                        request.message = Some(MESSAGE_NO_TAB.to_owned());
-                        session.set_status(request);
-                    }
+                    false
                 }
+            };
+            if delivered {
+                continue;
+            }
+            let status = session.status;
+            if is_reportable(status) {
+                let mut request = session.status_request(status);
+                request.reason = session.reason.clone();
+                request.message = Some(MESSAGE_NO_TAB.to_owned());
+                session.set_status(request);
             }
         }
     }

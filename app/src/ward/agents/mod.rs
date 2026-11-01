@@ -51,7 +51,9 @@ use warpui::{AppContext, Entity, ModelSpawner, SingletonEntity};
 use warpui_extras::secure_storage::AppContextExt as _;
 
 use self::provider::{Homes, WardUsage};
-use self::worker::{Host, Registration, Snapshot, TabSpec, Timing, Worker, WorkerConfig};
+use self::worker::{
+    Host, PaneQuery, Registration, Snapshot, TabSpec, Timing, Worker, WorkerConfig,
+};
 use crate::pane_group::NewTerminalOptions;
 use crate::ward::uri_launch::{self, UriTab};
 use crate::workspace::WorkspaceRegistry;
@@ -331,6 +333,47 @@ struct UiHost {
 const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
 
+/// The pane of the open tab that belongs to a session, see [`PaneQuery`]. The pane the session
+/// already had wins outright: an update relaunch reopens the tab under the same persistent
+/// UUID, so that is the session's own tab. Otherwise the agent each tab runs is read off the
+/// pane (`claude_resume_info`, the same detection the tab row and the Chimney bindings use): a
+/// tab running this very agent session is the session's tab whatever pane it sits in, and a tab
+/// whose agent works in the session's directory is the last resort, for a session whose agent
+/// id Ward never found.
+fn find_pane_of_session(query: &PaneQuery, ctx: &AppContext) -> Option<String> {
+    let mut by_agent_session = None;
+    let mut by_cwd = None;
+    for (_, workspace) in WorkspaceRegistry::as_ref(ctx).all_workspaces(ctx) {
+        for pane_group in workspace.as_ref(ctx).tab_views() {
+            let pane_group = pane_group.as_ref(ctx);
+            for view in pane_group.terminal_views(ctx) {
+                let Some(uuid) = pane_group.terminal_pane_session_uuid(view.id(), ctx) else {
+                    continue;
+                };
+                let uuid = crate::ward::chimney::bindings::uuid_hex(&uuid);
+                if query.pane_uuid.as_deref() == Some(uuid.as_str()) {
+                    return Some(uuid);
+                }
+                let Some(info) = view.as_ref(ctx).claude_resume_info() else {
+                    continue;
+                };
+                if by_agent_session.is_none()
+                    && query.agent_session_id.as_deref() == Some(info.session_id.as_str())
+                {
+                    by_agent_session = Some(uuid.clone());
+                }
+                if by_cwd.is_none()
+                    && let (Some(cwd), Some(dir)) = (query.cwd.as_deref(), info.cwd.as_deref())
+                    && provider::same_path(dir, cwd)
+                {
+                    by_cwd = Some(uuid.clone());
+                }
+            }
+        }
+    }
+    by_agent_session.or(by_cwd)
+}
+
 fn send_text_to_pane(pane_uuid: &str, text: &str, ctx: &mut AppContext) -> Result<(), String> {
     let mut found = None;
     for (_, workspace) in WorkspaceRegistry::as_ref(ctx).all_workspaces(ctx) {
@@ -436,6 +479,14 @@ impl Host for UiHost {
             .spawn(move |_, ctx| open_tab(tab, ctx))
             .await
             .map_err(|_| "Ward is shutting down".to_owned())?
+    }
+
+    async fn find_pane(&self, query: PaneQuery) -> Option<String> {
+        self.spawner
+            .spawn(move |_, ctx| find_pane_of_session(&query, ctx))
+            .await
+            .ok()
+            .flatten()
     }
 
     async fn send_text(&self, pane_uuid: &str, text: &str) -> Result<(), String> {
