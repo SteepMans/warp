@@ -37,6 +37,7 @@ fn secrets_stay_out_of_debug() {
         key: "agk_secret".to_owned(),
         name: "pc".to_owned(),
         root: PathBuf::from("root"),
+        clone_search: Vec::new(),
         paused: false,
     };
     assert!(!format!("{config:?}").contains("agk_secret"));
@@ -44,6 +45,7 @@ fn secrets_stay_out_of_debug() {
         fingerprint: config.fingerprint(),
         worker_id: "w".to_owned(),
         token: "agw_secret".to_owned(),
+        repos: None,
     };
     assert!(!format!("{registration:?}").contains("agw_secret"));
     let other_key = WorkerConfig {
@@ -420,6 +422,7 @@ fn full_cycle_against_a_fake_service() {
             key: "agk_test".to_owned(),
             name: "test-pc".to_owned(),
             root: root.clone(),
+            clone_search: Vec::new(),
             paused: false,
         },
         homes.clone(),
@@ -734,6 +737,7 @@ fn the_preparation_phase_runs_before_the_executor() {
             key: "agk_test".to_owned(),
             name: "test-pc".to_owned(),
             root: root.clone(),
+            clone_search: Vec::new(),
             paused: false,
         },
         homes.clone(),
@@ -1080,6 +1084,7 @@ fn a_preparation_without_a_plan_fails_with_its_own_reason() {
             key: "agk_test".to_owned(),
             name: "test-pc".to_owned(),
             root: root.clone(),
+            clone_search: Vec::new(),
             paused: false,
         },
         homes.clone(),
@@ -1263,6 +1268,7 @@ fn a_tab_that_never_starts_the_agent_ends_as_failed() {
                 key: "agk_test".to_owned(),
                 name: "test-pc".to_owned(),
                 root: root.clone(),
+                clone_search: Vec::new(),
                 paused: false,
             },
             homes.clone(),

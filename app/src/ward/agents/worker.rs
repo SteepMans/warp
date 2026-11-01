@@ -56,6 +56,9 @@ pub struct WorkerConfig {
     pub key: String,
     pub name: String,
     pub root: PathBuf,
+    /// Where the owner's own clones are looked for before a repository is cloned into `root`
+    /// (see [`git::find_clones`]).
+    pub clone_search: Vec<PathBuf>,
     /// "Take tasks" is off: assignments are refused, running sessions go on.
     pub paused: bool,
 }
@@ -67,6 +70,7 @@ impl std::fmt::Debug for WorkerConfig {
             .field("key", &"<redacted>")
             .field("name", &self.name)
             .field("root", &self.root)
+            .field("clone_search", &self.clone_search)
             .field("paused", &self.paused)
             .finish()
     }
@@ -91,6 +95,11 @@ pub struct Registration {
     pub fingerprint: String,
     pub worker_id: String,
     pub token: String,
+    /// `passport.repos` sent with this registration: another set of clones on the machine
+    /// registers again, because the service reads the clones from the passport only. `None`
+    /// in a registration saved by an older Ward.
+    #[serde(default)]
+    pub repos: Option<Vec<String>>,
 }
 
 impl std::fmt::Debug for Registration {
@@ -295,7 +304,7 @@ const ROLE_ORCHESTRATOR: &str = "orchestrator";
 const ROLE_EXECUTOR: &str = "executor";
 
 /// Result of preparing the worktree, filled by the git thread.
-type WorktreeSlot = Arc<Mutex<Option<Result<PathBuf, String>>>>;
+type WorktreeSlot = Arc<Mutex<Option<Result<git::PreparedWorktree, String>>>>;
 
 enum Phase {
     /// The orchestrator session of the preparation phase.
@@ -332,6 +341,8 @@ struct Session {
     phase: Phase,
     status: SessionStatus,
     worktree: Option<PathBuf>,
+    /// Which base and which clone the worktree came from, for the `running` status.
+    worktree_note: Option<String>,
     found: Option<FoundSession>,
     transcript: Option<PathBuf>,
     pane_uuid: Option<String>,
@@ -364,6 +375,7 @@ impl Session {
             phase,
             status: SessionStatus::Assigned,
             worktree: None,
+            worktree_note: None,
             found: None,
             transcript: None,
             pane_uuid: None,
@@ -414,6 +426,14 @@ impl Session {
             && self.outbox.is_empty()
             && self.plan_outbox.is_none()
             && !self.journal.has_pending()
+    }
+
+    /// `text` with the base and the clone of the worktree, when there is something to say.
+    fn with_worktree_note(&self, text: &str) -> String {
+        match &self.worktree_note {
+            Some(note) => format!("{text} ({note})"),
+            None => text.to_owned(),
+        }
     }
 
     fn status_request(&self, status: SessionStatus) -> StatusRequest {
@@ -714,7 +734,17 @@ impl Worker {
         config
     }
 
-    fn passport(&self, root: &Path) -> Passport {
+    /// `owner/repo` of the clones in the root and of the owner's own clones.
+    fn repos(config: &WorkerConfig) -> Vec<String> {
+        let mut repos = machine::scan_repos(&config.root);
+        repos.extend(git::local_repos(&config.clone_search));
+        repos.sort_by_key(|repo| repo.to_ascii_lowercase());
+        repos.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        repos
+    }
+
+    fn passport(&self, config: &WorkerConfig, repos: Vec<String>) -> Passport {
+        let root = &config.root;
         let hardware = self.machine.hardware(root);
         let tools = Tools {
             git: self.machine.has_tool("git"),
@@ -747,7 +777,7 @@ impl Worker {
             disk_total_bytes: hardware.disk_total_bytes,
             tools,
             agents,
-            repos: machine::scan_repos(root),
+            repos,
         }
     }
 
@@ -758,14 +788,16 @@ impl Worker {
         if self.state.lock().registration.is_some() {
             return Ok(());
         }
+        let repos = Self::repos(config);
         if let Some(saved) = self.host.load_registration().await
             && saved.fingerprint == fingerprint
+            && saved.repos.as_ref() == Some(&repos)
         {
             let mut state = self.state.lock();
             state.registration = Some(saved);
             return Ok(());
         }
-        let passport = self.passport(&config.root);
+        let passport = self.passport(config, repos);
         self.state.lock().agents = passport.agents.clone();
         let request = RegisterRequest {
             key: config.key.clone(),
@@ -784,6 +816,7 @@ impl Worker {
             fingerprint,
             worker_id: response.worker_id.clone(),
             token: response.token.clone(),
+            repos: Some(request.passport.repos.clone()),
         };
         {
             let mut state = self.state.lock();
@@ -1040,6 +1073,13 @@ impl Worker {
         let base_branch = session.assignment.base_branch.clone();
         let branch = session.assignment.branch.clone();
         let session_id = session.assignment.session_id.clone();
+        let search = self
+            .state
+            .lock()
+            .config
+            .as_ref()
+            .map(|config| config.clone_search.clone())
+            .unwrap_or_default();
         let spawned = std::thread::Builder::new()
             .name("ward-agents-git".to_owned())
             .spawn(move || {
@@ -1051,6 +1091,7 @@ impl Worker {
                         base_branch: &base_branch,
                         branch: &branch,
                         session_id: &session_id,
+                        search: &search,
                     },
                 );
                 *thread_slot.lock() = Some(result);
@@ -1335,7 +1376,18 @@ impl Worker {
                         request.message = Some(format!("Не удалось развернуть репозиторий: {err}"));
                         finish(session, request);
                     }
-                    Some(Ok(worktree)) => {
+                    Some(Ok(prepared)) => {
+                        let worktree = prepared.path.clone();
+                        session.worktree_note = prepared.summary();
+                        log::info!(
+                            "Ward agents: session {} works in {} ({})",
+                            session.assignment.session_id,
+                            worktree.display(),
+                            session
+                                .worktree_note
+                                .as_deref()
+                                .unwrap_or("существующая ветка")
+                        );
                         session.worktree = Some(worktree.clone());
                         if let Some((reason, _)) = session.stop {
                             let mut request = session.status_request(SessionStatus::Failed);
@@ -1669,7 +1721,7 @@ impl Worker {
             session.found = Some(found);
             if role == ROLE_EXECUTOR {
                 let mut request = session.status_request(SessionStatus::Running);
-                request.message = Some(MESSAGE_RUNNING.to_owned());
+                request.message = Some(session.with_worktree_note(MESSAGE_RUNNING));
                 session.set_status(request);
             } else {
                 // The orchestrator's own ids reach the card with the `preparing` status.
@@ -1687,7 +1739,7 @@ impl Worker {
             && launched_at.elapsed() >= self.timing.session_lookup_grace
         {
             let mut request = session.status_request(SessionStatus::Running);
-            request.message = Some(MESSAGE_NO_SESSION_ID.to_owned());
+            request.message = Some(session.with_worktree_note(MESSAGE_NO_SESSION_ID));
             session.set_status(request);
         }
         if session.transcript.is_none() {

@@ -13,9 +13,15 @@
 //!
 //! Settings: address, worker name, root and "take tasks" in the private user preferences; the
 //! key and the worker token in the platform secure storage, like the Chimney credentials. For
-//! testing, `WARD_AGENTS_URL`, `WARD_AGENTS_KEY`, `WARD_AGENTS_NAME` and `WARD_AGENTS_ROOT` are
-//! used where nothing is saved. Neither the key nor the token is ever logged, and the contents
-//! of the machine profile are not logged either: they carry the secrets of this machine.
+//! testing, `WARD_AGENTS_URL`, `WARD_AGENTS_KEY`, `WARD_AGENTS_NAME`, `WARD_AGENTS_ROOT` and
+//! `WARD_AGENTS_LOCAL_REPOS` are used where nothing is saved.
+//!
+//! Before cloning, Ward looks for a clone of the same remote the owner already has: the clone
+//! search setting lists clones and folders searched a few levels down. Such a clone is only
+//! fetched; the session's worktree goes under the root, see [`git::prepare_worktree`].
+//!
+//! Neither the key nor the token is ever logged, and the contents of the machine profile are
+//! not logged either: they carry the secrets of this machine.
 
 pub mod admission;
 pub mod client;
@@ -51,10 +57,13 @@ pub const URL_ENV_VAR: &str = "WARD_AGENTS_URL";
 pub const KEY_ENV_VAR: &str = "WARD_AGENTS_KEY";
 pub const NAME_ENV_VAR: &str = "WARD_AGENTS_NAME";
 pub const ROOT_ENV_VAR: &str = "WARD_AGENTS_ROOT";
+/// Clones and folders to look for existing clones in, separated like `PATH` (`;` on Windows).
+pub const LOCAL_REPOS_ENV_VAR: &str = "WARD_AGENTS_LOCAL_REPOS";
 
 const URL_KEY: &str = "WardAgentsUrl";
 const NAME_KEY: &str = "WardAgentsWorkerName";
 const ROOT_KEY: &str = "WardAgentsRoot";
+const LOCAL_REPOS_KEY: &str = "WardAgentsLocalRepos";
 const PAUSED_KEY: &str = "WardAgentsPaused";
 /// Secure storage keys.
 const KEY_KEY: &str = "WardAgentsKey";
@@ -202,6 +211,50 @@ pub fn set_root(path: &str, app: &AppContext) {
     write_preference(ROOT_KEY, path, app);
 }
 
+/// The folders where people usually keep their clones, those that exist: `~/work`, `~/src`,
+/// `~/projects`, `~/repos`, `~/code`, `~/dev` and, on Windows, `<system drive>/work`.
+fn default_clone_search() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        for name in ["work", "src", "projects", "repos", "code", "dev"] {
+            paths.push(home.join(name));
+        }
+    }
+    if cfg!(windows) {
+        let drive = environment_value("SystemDrive").unwrap_or_else(|| "C:".to_owned());
+        paths.push(PathBuf::from(format!("{drive}/work")));
+    }
+    paths.retain(|path| path.is_dir());
+    paths
+}
+
+/// Splits a list of paths: `;` (and `:` outside Windows, as in `PATH`) or new lines.
+pub fn parse_path_list(value: &str) -> Vec<PathBuf> {
+    value
+        .lines()
+        .flat_map(std::env::split_paths)
+        .map(|path| path.to_string_lossy().trim().to_owned())
+        .filter(|path| !path.is_empty())
+        .map(|path| PathBuf::from(shellexpand::tilde(&path).into_owned()))
+        .collect()
+}
+
+/// Where existing clones are looked for: saved, else `WARD_AGENTS_LOCAL_REPOS`, else the
+/// usual folders of [`default_clone_search`].
+pub fn clone_search(app: &AppContext) -> (Vec<PathBuf>, Source) {
+    read_preference(LOCAL_REPOS_KEY, app)
+        .map(|value| (parse_path_list(&value), Source::Saved))
+        .or_else(|| {
+            environment_value(LOCAL_REPOS_ENV_VAR)
+                .map(|value| (parse_path_list(&value), Source::Environment))
+        })
+        .unwrap_or_else(|| (default_clone_search(), Source::Default))
+}
+
+pub fn set_clone_search(value: &str, app: &AppContext) {
+    write_preference(LOCAL_REPOS_KEY, value, app);
+}
+
 /// "Take tasks" is off.
 pub fn is_paused(app: &AppContext) -> bool {
     read_preference(PAUSED_KEY, app).is_some_and(|value| value == "true")
@@ -219,6 +272,7 @@ pub fn config(app: &AppContext) -> Option<WorkerConfig> {
         key,
         name: worker_name(app).0,
         root: root(app).0,
+        clone_search: clone_search(app).0,
         paused: is_paused(app),
     })
 }
