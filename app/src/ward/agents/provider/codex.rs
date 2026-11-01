@@ -14,6 +14,9 @@
 //!   `task_started` and `user_message` are a turn still going. Codex runs with
 //!   `--dangerously-bypass-approvals-and-sandbox`, so it asks the owner nothing and
 //!   [`super::LastTurn::Asked`] never comes of a rollout.
+//! - Chat: the same events read as replies ([`parse_said`]) — `user_message` is the owner,
+//!   `agent_message` the agent, a `function_call` (also `custom_tool_call`, `local_shell_call`)
+//!   a line of its own; `error` is Ward's line.
 
 use std::fs::File;
 use std::io::{Read as _, Seek as _, SeekFrom};
@@ -26,7 +29,8 @@ use serde::de::IgnoredAny;
 use serde_json::Value;
 
 use super::{
-    Account, AgentCommand, FoundSession, Homes, LastTurn, LimitHit, Provider, WardUsage, rfc3339,
+    Account, AgentCommand, FoundSession, Homes, LastTurn, LimitHit, Provider, Said, Voice,
+    WardUsage, rfc3339, tool_said,
 };
 use crate::ward::agents::contract::UsageReport;
 use crate::ward::codex_usage::rollout::recent_rollouts;
@@ -185,6 +189,57 @@ pub fn parse_last_turn(tail: &str) -> LastTurn {
         }
     }
     LastTurn::Working
+}
+
+/// What one event of a rollout says in the chat: the owner's message, the agent's message, the
+/// tool it called. Reasoning, token counts, task markers and the output of a tool say nothing
+/// to a reader and give nothing; an error is Ward's line, not an answer of the agent.
+pub fn parse_said(entry: &Value) -> Vec<Said> {
+    let payload = match entry.get("payload") {
+        Some(payload) => payload,
+        None => return Vec::new(),
+    };
+    let text = |field: &str| {
+        payload
+            .get(field)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    match payload.get("type").and_then(Value::as_str) {
+        Some("user_message") => one(Said::new(Voice::Owner, text("message"))),
+        Some("agent_message") => one(Said::new(Voice::Agent, text("message"))),
+        Some("function_call" | "custom_tool_call" | "local_shell_call") => {
+            let name = payload
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("инструмент");
+            // `arguments` is JSON in a string; what cannot be parsed is shown as it is.
+            let arguments = payload.get("arguments").and_then(Value::as_str);
+            let parsed = arguments.and_then(|text| serde_json::from_str::<Value>(text).ok());
+            match parsed {
+                Some(input) => one(tool_said(name, Some(&input))),
+                None => {
+                    let raw = arguments.map(|text| Value::String(text.to_owned()));
+                    one(tool_said(name, raw.as_ref()))
+                }
+            }
+        }
+        Some("error") => one(Said::new(
+            Voice::Ward,
+            format!("Ошибка агента: {}", text("message")),
+        )),
+        _ => Vec::new(),
+    }
+}
+
+/// One line of the chat, or none when it came out empty.
+fn one(said: Said) -> Vec<Said> {
+    if said.text.is_empty() {
+        Vec::new()
+    } else {
+        vec![said]
+    }
 }
 
 /// `auth.json`; token values are skipped, only their presence is kept.
@@ -364,6 +419,10 @@ impl Provider for Codex {
 
     fn last_turn(&self, tail: &str) -> LastTurn {
         parse_last_turn(tail)
+    }
+
+    fn said(&self, entry: &Value) -> Vec<Said> {
+        parse_said(entry)
     }
 }
 

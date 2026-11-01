@@ -1,7 +1,8 @@
 //! Coding agents a worker can run (`provider` in the contract). Everything that differs between
 //! agents lives behind [`Provider`]: the launch command and its environment, how the session id
-//! and the transcript of a launch are found, the account and the subscription limits, and how a
-//! refusal because of the limit looks. A new agent is one more module plus an entry in [`all`].
+//! and the transcript of a launch are found, the account and the subscription limits, how a
+//! refusal because of the limit looks and how one entry of its transcript reads as a line of
+//! the chat ([`chat`]). A new agent is one more module plus an entry in [`all`].
 
 pub mod claude;
 pub mod codex;
@@ -87,6 +88,146 @@ pub enum LastTurn {
     Asked,
 }
 
+/// Who said one line of a session's chat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Voice {
+    /// The owner: the prompt the session started with and every message typed into the agent.
+    Owner,
+    /// The agent's own text.
+    Agent,
+    /// What the agent did: one line per tool call.
+    Tool,
+    /// Not a reply of anybody: Ward's own line in the journal (the role of the part that
+    /// follows, the restart it took the session over after) or an error of the agent's API.
+    Ward,
+}
+
+impl Voice {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Owner => "Владелец",
+            Self::Agent => "Агент",
+            Self::Tool => "Инструмент",
+            Self::Ward => "Ward",
+        }
+    }
+}
+
+/// One line of the chat of a session, as the session screen shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Said {
+    pub voice: Voice,
+    pub text: String,
+}
+
+/// How much of one line of the chat is kept: a tool that printed a megabyte must not push
+/// everything else off the screen.
+pub const MAX_SAID_CHARS: usize = 4000;
+
+/// How much of the arguments of a tool call one line of the chat shows.
+pub const MAX_PREVIEW_CHARS: usize = 160;
+
+impl Said {
+    pub fn new(voice: Voice, text: impl AsRef<str>) -> Self {
+        Self {
+            voice,
+            text: cut(text.as_ref().trim(), MAX_SAID_CHARS),
+        }
+    }
+}
+
+/// `text` up to `max` characters, with an ellipsis when something was left out. Counted in
+/// characters, so a cut never lands inside one.
+pub fn cut(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let kept: String = text.chars().take(max).collect();
+    format!("{kept}…")
+}
+
+/// `text` as one line, runs of whitespace collapsed, up to `max` characters.
+pub fn one_line(text: &str, max: usize) -> String {
+    cut(&text.split_whitespace().collect::<Vec<_>>().join(" "), max)
+}
+
+/// A short, one-line look at the arguments of a tool call: the field that says what was done,
+/// else the arguments themselves.
+pub fn preview(input: &serde_json::Value) -> String {
+    const FIELDS: [&str; 8] = [
+        "command",
+        "file_path",
+        "path",
+        "pattern",
+        "question",
+        "prompt",
+        "description",
+        "url",
+    ];
+    let field = FIELDS.iter().find_map(|name| {
+        input
+            .get(*name)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+    });
+    match field {
+        Some(value) => one_line(value, MAX_PREVIEW_CHARS),
+        None if input.is_null() => String::new(),
+        None => one_line(&input.to_string(), MAX_PREVIEW_CHARS),
+    }
+}
+
+/// One line for a tool call: its name and a short look at what it was called with.
+pub fn tool_said(name: &str, input: Option<&serde_json::Value>) -> Said {
+    let name = name.trim();
+    let preview = input.map(preview).unwrap_or_default();
+    let text = if preview.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{name}: {preview}")
+    };
+    Said::new(Voice::Tool, text)
+}
+
+/// Ward's own marker of the journal, as a line of the chat; `None` for anything else. These are
+/// the only entries of a journal that no agent wrote.
+fn ward_said(entry: &serde_json::Value) -> Option<Said> {
+    let text = match entry.get("type").and_then(serde_json::Value::as_str)? {
+        "ward.role" => {
+            let role = entry
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("агент");
+            format!("Дальше транскрипт: {role}")
+        }
+        "ward.restart" => "Ward перезапустился и подхватил сессию".to_owned(),
+        _ => return None,
+    };
+    Some(Said::new(Voice::Ward, text))
+}
+
+/// The chat of a session out of its journal (whole ndjson lines, as the service keeps them):
+/// the owner's messages, the agent's text, the tools it called and Ward's own markers.
+/// Entries that say nothing to a reader — a tool result, a file snapshot, a summary, a token
+/// count — are left out, so the chat reads like a conversation and not like a log.
+pub fn chat(provider: &dyn Provider, journal: &str) -> Vec<Said> {
+    let mut chat = Vec::new();
+    for line in journal.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        match ward_said(&entry) {
+            Some(said) => chat.push(said),
+            None => chat.extend(provider.said(&entry)),
+        }
+    }
+    chat
+}
+
 /// Login state of the agent, found without network calls and without using token values.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Account {
@@ -131,6 +272,11 @@ pub trait Provider: Send + Sync {
 
     /// What the end of the transcript (`tail`, whole lines) says about the agent's last turn.
     fn last_turn(&self, tail: &str) -> LastTurn;
+
+    /// What one entry of the transcript says in the chat of the session: nothing for an entry
+    /// that is no reply (a tool result, a snapshot, a token count), one line for a message,
+    /// several for a message that also called tools. See [`chat`].
+    fn said(&self, entry: &serde_json::Value) -> Vec<Said>;
 }
 
 static CLAUDE: claude::Claude = claude::Claude;

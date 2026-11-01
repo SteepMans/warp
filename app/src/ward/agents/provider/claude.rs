@@ -15,6 +15,9 @@
 //! - Last turn: the newest `assistant` or `user` entry of the transcript. A `tool_use` block
 //!   without its `tool_result` means the turn goes on; a text block that nothing follows is the
 //!   agent's closing answer; a `tool_use` of [`ASK_TOOLS`] is a question waiting on the screen.
+//! - Chat: the same entries read as replies ([`parse_said`]) — `user` is the owner, `assistant`
+//!   the agent, every `tool_use` a line of its own. Both readings go through [`blocks`], so a
+//!   transcript entry has one reading and not two.
 
 use std::path::{Path, PathBuf};
 
@@ -23,7 +26,8 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use super::{
-    Account, AgentCommand, FoundSession, Homes, LastTurn, LimitHit, Provider, WardUsage, rfc3339,
+    Account, AgentCommand, FoundSession, Homes, LastTurn, LimitHit, Provider, Said, Voice,
+    WardUsage, rfc3339, tool_said,
 };
 use crate::ward::agents::contract::UsageReport;
 use crate::ward::agents::launch::forward_slashes;
@@ -286,6 +290,55 @@ pub fn parse_limit_hit(tail: &str) -> Option<LimitHit> {
 /// to call the owner instead of being taken for finished.
 pub const ASK_TOOLS: [&str; 2] = ["AskUserQuestion", "ExitPlanMode"];
 
+/// One content block of a message, as Ward reads it. Both the last turn and the chat of a
+/// session are read off these, so a transcript entry has one reading and not two.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Block<'a> {
+    Text(&'a str),
+    /// A tool call: its name and the arguments it was called with.
+    Tool(&'a str, Option<&'a Value>),
+    /// A block nothing is read out of: thinking, an image, the result of a tool call.
+    Other,
+}
+
+fn block_of(block: &Value) -> Block<'_> {
+    match block.get("type").and_then(Value::as_str) {
+        Some("text") => Block::Text(
+            block
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        ),
+        Some("tool_use") => Block::Tool(
+            block
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            block.get("input"),
+        ),
+        _ => Block::Other,
+    }
+}
+
+/// The content blocks of a `user` or `assistant` entry, in the order they were written. A
+/// `content` that is one string (the owner's own message) is one [`Block::Text`]; an entry
+/// without readable content gives nothing.
+pub fn blocks(entry: &Value) -> Vec<Block<'_>> {
+    match entry.pointer("/message/content") {
+        Some(Value::String(text)) => vec![Block::Text(text)],
+        Some(Value::Array(items)) => items.iter().map(block_of).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether an `assistant` entry is an error of the API in place of an answer.
+fn is_api_error(entry: &Value) -> bool {
+    entry
+        .get("isApiErrorMessage")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// What the last turn of the transcript was; see the module header for the entries it reads.
 pub fn parse_last_turn(tail: &str) -> LastTurn {
     for line in tail.lines().rev() {
@@ -299,40 +352,20 @@ pub fn parse_last_turn(tail: &str) -> LastTurn {
         match entry.get("type").and_then(Value::as_str) {
             Some("assistant") => {
                 // An error in place of an answer is no answer: the turn is not over.
-                if entry
-                    .get("isApiErrorMessage")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-                {
+                if is_api_error(&entry) {
                     return LastTurn::Working;
                 }
-                let Some(blocks) = entry.pointer("/message/content").and_then(Value::as_array)
-                else {
-                    return LastTurn::Working;
-                };
                 // The newest block of the message decides; thinking and meta blocks are skipped.
-                for block in blocks.iter().rev() {
-                    match block.get("type").and_then(Value::as_str) {
-                        Some("tool_use") => {
-                            let name = block
-                                .get("name")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default();
-                            return if ASK_TOOLS.contains(&name) {
+                for block in blocks(&entry).iter().rev() {
+                    match block {
+                        Block::Tool(name, _) => {
+                            return if ASK_TOOLS.contains(name) {
                                 LastTurn::Asked
                             } else {
                                 LastTurn::Working
                             };
                         }
-                        Some("text") => {
-                            let text = block
-                                .get("text")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default();
-                            if !text.trim().is_empty() {
-                                return LastTurn::Answered;
-                            }
-                        }
+                        Block::Text(text) if !text.trim().is_empty() => return LastTurn::Answered,
                         _ => {}
                     }
                 }
@@ -345,6 +378,36 @@ pub fn parse_last_turn(tail: &str) -> LastTurn {
         }
     }
     LastTurn::Working
+}
+
+/// What one entry of a transcript says in the chat: the owner's message, the agent's text, the
+/// tools it called. A `tool_result`, a snapshot, a summary and a system line say nothing to a
+/// reader and give nothing; an error of the API is Ward's line, not an answer of the agent.
+pub fn parse_said(entry: &Value) -> Vec<Said> {
+    let voice = match entry.get("type").and_then(Value::as_str) {
+        Some("assistant") => Voice::Agent,
+        Some("user") => Voice::Owner,
+        _ => return Vec::new(),
+    };
+    if voice == Voice::Agent && is_api_error(entry) {
+        let text = blocks(entry)
+            .into_iter()
+            .filter_map(|block| match block {
+                Block::Text(text) if !text.trim().is_empty() => Some(text.trim().to_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return vec![Said::new(Voice::Ward, format!("Ошибка API агента: {text}"))];
+    }
+    blocks(entry)
+        .into_iter()
+        .filter_map(|block| match block {
+            Block::Text(text) if !text.trim().is_empty() => Some(Said::new(voice, text)),
+            Block::Tool(name, input) => Some(tool_said(name, input)),
+            _ => None,
+        })
+        .collect()
 }
 
 impl Provider for Claude {
@@ -439,6 +502,10 @@ impl Provider for Claude {
 
     fn last_turn(&self, tail: &str) -> LastTurn {
         parse_last_turn(tail)
+    }
+
+    fn said(&self, entry: &Value) -> Vec<Said> {
+        parse_said(entry)
     }
 }
 
