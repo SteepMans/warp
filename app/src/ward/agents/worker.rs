@@ -15,6 +15,14 @@
 //! - **Profile**: applies the machine profile whenever its version changes, checks the proxy
 //!   and reports both; with the key gone it takes Ward's own entries off the machine.
 //!
+//! The sessions outlive a restart of Ward. Every session that is still going has its state in
+//! `<root>/.agents/<short sessionId>/session.json` ([`super::resume`]), and a start of Ward
+//! reads those files before any loop begins ([`Worker::restore_sessions`]): an agent whose
+//! process is still there (or which came back with the tab of an update relaunch) is picked up
+//! where it was left, transcript position included, and one that did not survive ends with a
+//! status that says so instead of looking like a session that never started. Quitting
+//! therefore no longer reports the sessions as failed, see [`ShutdownReport`].
+//!
 //! An assignment without a prompt (or without a repository or a branch) goes through the
 //! preparation phase first: the orchestrator session in the vault writes `plan.json`, Ward
 //! sends the plan to the service, waits for the orchestrator to end its own session (see
@@ -41,8 +49,8 @@ use super::client::{Api, ApiError};
 use super::contract::{
     AckRequest, AgentInfo, AppliedRequest, Assignment, Command, HeartbeatRequest, Limits,
     PartReport, Passport, ProfileBeat, ProfileBody, ProxyCheck, REASON_OWNER_QUESTION,
-    REASON_PLAN_REJECTED, REASON_PREPARE_FAILED, REASON_USAGE_LIMIT, RegisterRequest, Resources,
-    SessionBeat, SessionStatus, StatusRequest, Tools, UsageReport,
+    REASON_PLAN_REJECTED, REASON_PREPARE_FAILED, REASON_USAGE_LIMIT, REASON_WARD_RESTARTED,
+    RegisterRequest, Resources, SessionBeat, SessionStatus, StatusRequest, Tools, UsageReport,
 };
 use super::git::{self, WorktreeSpec};
 use super::journal::Journal;
@@ -52,6 +60,7 @@ use super::plan::{self, Plan};
 use super::prepare;
 use super::profile::{self, Vault};
 use super::provider::{self, FoundSession, Homes, LastTurn, Provider, WardUsage};
+use super::resume::{self, SavedAgent, SavedJournal, SavedPhase, SavedPrepare, SavedSession};
 
 /// What the worker needs from the settings. `Debug` leaves the key out.
 #[derive(Clone, PartialEq, Eq)]
@@ -311,6 +320,21 @@ const MESSAGE_PREPARE_TOO_LONG: &str = "Подготовка не уложила
 const MESSAGE_PREPARE_NO_PLAN: &str = "Оркестратор завершился, а plan.json не оставил";
 const MESSAGE_PREPARE_CRASHED: &str = "Оркестратор упал, не оставив plan.json";
 const MESSAGE_PLAN_REJECTED: &str = "План отклонён владельцем";
+const MESSAGE_SHUTDOWN: &str =
+    "Ward закрывается (обновление или выход), сессия продолжится после запуска";
+const MESSAGE_RESUMED: &str = "Ward перезапустился, сессия подхвачена: процесс агента жив";
+const MESSAGE_RESUMED_PREPARING: &str =
+    "Ward перезапустился, подготовка подхвачена: оркестратор жив";
+const MESSAGE_RESUMED_PLAN_REVIEW: &str = "Ward перезапустился, план по-прежнему ждёт согласования";
+const MESSAGE_RESUMED_WORKTREE: &str =
+    "Ward перезапустился во время развёртывания репозитория, worktree разворачивается заново";
+const MESSAGE_WAITING_AFTER_RESTART: &str = "Ward перезапустился, ждём, вернётся ли процесс агента";
+const MESSAGE_AGENT_GONE: &str =
+    "Ward перезапустился, процесс агента не выжил: работа сессии прервана на середине";
+const MESSAGE_PREPARE_AGENT_GONE: &str =
+    "Ward перезапустился, процесс оркестратора не выжил, плана он не оставил";
+const MESSAGE_NO_TAB: &str =
+    "Сообщение не доставлено: вкладки сессии больше нет (перезапуск Ward?)";
 
 /// Finished sessions the panel keeps.
 const MAX_FINISHED_SESSIONS: usize = 20;
@@ -398,7 +422,19 @@ struct Session {
     stop: Option<(&'static str, Option<Instant>)>,
     runner_gone_since: Option<Instant>,
     started: Instant,
+    /// Unix ms of [`Session::started`], so a restart of Ward keeps counting `maxDurationMin`
+    /// from when the session was taken.
+    started_at_ms: i64,
     message: Option<String>,
+    /// `reason` of the last status, for the state on disk.
+    reason: Option<String>,
+    /// The state already on disk, so an unchanged session is not written again; `None` while
+    /// this run of Ward wrote no state file for the session, and a session that is over then
+    /// has nothing to remove.
+    saved_state: Option<String>,
+    /// The session was picked up after a restart of Ward and its agent has not turned up yet:
+    /// the watch of the session waits for it instead of watching a process that is gone.
+    restarted: bool,
     /// The preparation phase, when the assignment needed one.
     prepare: Option<PrepareRun>,
     /// The plan of the preparation phase, once it was read.
@@ -432,7 +468,11 @@ impl Session {
             stop: None,
             runner_gone_since: None,
             started: Instant::now(),
+            started_at_ms: now_ms(),
             message: None,
+            reason: None,
+            saved_state: None,
+            restarted: false,
             prepare: None,
             plan: None,
             plan_outbox: None,
@@ -504,7 +544,54 @@ impl Session {
     fn set_status(&mut self, request: StatusRequest) {
         self.status = request.status;
         self.message = request.message.clone();
+        self.reason = request.reason.clone();
         self.outbox.push_back(request);
+    }
+
+    /// What the next start of Ward needs to pick this session up again.
+    fn saved(&self) -> SavedSession {
+        let (offset, next_seq) = self.journal.sent_position();
+        let text = |path: &Path| path.to_string_lossy().into_owned();
+        SavedSession {
+            version: resume::FORMAT_VERSION,
+            session_id: self.assignment.session_id.clone(),
+            provider: self.provider.id().to_owned(),
+            phase: match &self.phase {
+                // The plan is read from `plan.json` again, so the wait for the orchestrator's
+                // exit is the preparation phase once more.
+                Phase::Prepare { .. } | Phase::PrepareExit { .. } => SavedPhase::Prepare,
+                Phase::PlanReview => SavedPhase::PlanReview,
+                Phase::Worktree(_) => SavedPhase::Worktree,
+                Phase::Launched { .. } | Phase::Done => SavedPhase::Launched,
+            },
+            status: self.status,
+            reason: self.reason.clone(),
+            started_at_ms: self.started_at_ms,
+            launched_at_ms: match &self.phase {
+                Phase::Prepare { launched_at_ms, .. } | Phase::Launched { launched_at_ms, .. } => {
+                    *launched_at_ms
+                }
+                _ => self.started_at_ms,
+            },
+            assignment: self.assignment.clone(),
+            worktree: self.worktree.as_deref().map(text),
+            worktree_note: self.worktree_note.clone(),
+            runner_pid: self.runner_pid,
+            agent: self.found.as_ref().map(|found| SavedAgent {
+                agent_session_id: found.agent_session_id.clone(),
+                pid: found.pid,
+                remote_control_url: found.remote_control_url.clone(),
+            }),
+            transcript: self.transcript.as_deref().map(text),
+            role: self.role.map(str::to_owned),
+            journal: SavedJournal { offset, next_seq },
+            prepare: self.prepare.as_ref().map(|prepare| SavedPrepare {
+                dir: text(&prepare.dir),
+                plan_path: text(&prepare.plan_path),
+                vault_dir: text(&prepare.vault_dir),
+                limit_secs: prepare.limit.as_secs(),
+            }),
+        }
     }
 
     fn view(&self) -> SessionView {
@@ -607,6 +694,35 @@ fn role_marker(role: &str, session_id: &str) -> String {
     .to_string()
 }
 
+/// The line that marks in the journal that Ward restarted and took the session over.
+fn restart_marker(role: &str, session_id: &str, agent_session_id: Option<&str>) -> String {
+    serde_json::json!({
+        "type": "ward.restart",
+        "role": role,
+        "sessionId": session_id,
+        "agentSessionId": agent_session_id,
+        "at": provider::rfc3339(Utc::now()),
+    })
+    .to_string()
+}
+
+/// The moment `elapsed` ago, for a timer that was already running before Ward restarted; the
+/// present when the clock cannot go that far back.
+fn instant_ago(elapsed: Duration) -> Instant {
+    let now = Instant::now();
+    now.checked_sub(elapsed).unwrap_or(now)
+}
+
+/// How long ago `at_ms` (Unix ms) was; zero for a moment in the future, a clock that moved or a
+/// state file of a session that has no such moment.
+fn elapsed_since_ms(at_ms: i64) -> Duration {
+    let elapsed = now_ms().saturating_sub(at_ms);
+    if at_ms <= 0 || elapsed <= 0 {
+        return Duration::ZERO;
+    }
+    Duration::from_millis(elapsed as u64)
+}
+
 /// The last statuses to send when Ward quits.
 pub struct ShutdownReport {
     pub base_url: String,
@@ -665,8 +781,11 @@ impl Worker {
         })
     }
 
-    /// Runs the four loops; never returns.
+    /// Picks up the sessions of the run before and then runs the four loops; never returns.
+    /// Restoring comes first on purpose: the inbox must not take an assignment of a session
+    /// this Ward is about to own again.
     pub async fn run(self: Arc<Self>) {
+        self.restore_sessions().await;
         futures::join!(
             self.clone().control_loop(),
             self.clone().inbox_loop(),
@@ -715,17 +834,36 @@ impl Worker {
         Some((config.base_url.clone(), registration.token.clone()))
     }
 
-    /// Statuses for the sessions still going, for a last report when Ward quits.
+    /// Saves the state of every session still going and says what to tell the service, for the
+    /// moment Ward quits — an update relaunch above all. The sessions are not reported as
+    /// failed any more: the next start picks them up, so what goes out is the status they are
+    /// in with a message that says Ward is closing. A session whose agent did not survive is
+    /// closed by that next start, which can tell, and not here, which cannot.
     pub fn shutdown_report(&self) -> Option<ShutdownReport> {
+        let root = {
+            let state = self.state.lock();
+            state.config.as_ref().map(|config| config.root.clone())
+        };
+        if let Some(root) = root {
+            let mut state = self.state.lock();
+            for session in state
+                .sessions
+                .iter_mut()
+                .filter(|session| !session.is_done())
+            {
+                save_session_state(session, &root);
+            }
+        }
         let (base_url, token) = self.credentials()?;
         let state = self.state.lock();
         let reports: Vec<(String, StatusRequest)> = state
             .sessions
             .iter()
-            .filter(|session| !session.is_done())
+            .filter(|session| !session.is_done() && is_reportable(session.status))
             .map(|session| {
-                let mut request = session.status_request(SessionStatus::Failed);
-                request.message = Some("Ward закрыт, сессия прервана".to_owned());
+                let mut request = session.status_request(session.status);
+                request.reason = session.reason.clone();
+                request.message = Some(MESSAGE_SHUTDOWN.to_owned());
                 (session.assignment.session_id.clone(), request)
             })
             .collect();
@@ -1353,6 +1491,389 @@ impl Worker {
         })
     }
 
+    /// Picks up the sessions the run before Ward restarted left behind. The state files under
+    /// the root are the whole list: the service hands an assignment out once, so a session it
+    /// has already given to this worker never comes through the inbox again. What the service
+    /// does do is take a session it had given up on (`lost`, after the heartbeat stopped) back
+    /// to `running` as soon as the heartbeat names it again, which the restored session does.
+    async fn restore_sessions(&self) {
+        let Some(config) = self.refresh_config().await else {
+            return;
+        };
+        let saved = resume::scan(&config.root);
+        if saved.is_empty() {
+            return;
+        }
+        log::info!(
+            "Ward agents: {} session(s) of the run before Ward restarted are being picked up",
+            saved.len()
+        );
+        let mut restored = Vec::new();
+        for state in saved {
+            let session_id = state.session_id.clone();
+            let known = self.state.lock().known_ids.contains(&session_id);
+            if known {
+                continue;
+            }
+            match self.restore(state, &config.root) {
+                Some(session) => restored.push(session),
+                // Nothing of this session can be used any more; its state goes.
+                None => {
+                    if let Some(path) = resume::path(&config.root, &session_id) {
+                        resume::remove(&path);
+                    }
+                }
+            }
+        }
+        if restored.is_empty() {
+            return;
+        }
+        {
+            let mut state = self.state.lock();
+            for session in &restored {
+                state
+                    .known_ids
+                    .insert(session.assignment.session_id.clone());
+            }
+            state.sessions.extend(restored);
+        }
+        self.publish().await;
+    }
+
+    /// One session of the run before: everything the state file holds, then the phase it was
+    /// in decides whether the agent is picked up or the session is closed. `None` for a state
+    /// file this Ward can make nothing of.
+    fn restore(&self, saved: SavedSession, root: &Path) -> Option<Session> {
+        let provider = provider::by_id(&saved.provider)?;
+        // The phase is set below, by the restoring of that very phase.
+        let mut session = Session::new(saved.assignment.clone(), provider, Phase::Done);
+        session.started_at_ms = saved.started_at_ms;
+        session.started = instant_ago(elapsed_since_ms(saved.started_at_ms));
+        session.status = saved.status;
+        session.reason = saved.reason.clone();
+        session.worktree = saved.worktree.as_deref().map(PathBuf::from);
+        session.worktree_note = saved.worktree_note.clone();
+        session.runner_pid = saved.runner_pid;
+        session.found = saved.agent.as_ref().map(|agent| FoundSession {
+            agent_session_id: agent.agent_session_id.clone(),
+            pid: agent.pid,
+            remote_control_url: agent.remote_control_url.clone(),
+            transcript: None,
+        });
+        session.transcript = saved.transcript.as_deref().map(PathBuf::from);
+        session.role = match saved.role.as_deref() {
+            Some(ROLE_ORCHESTRATOR) => Some(ROLE_ORCHESTRATOR),
+            Some(ROLE_EXECUTOR) => Some(ROLE_EXECUTOR),
+            _ => None,
+        };
+        session
+            .journal
+            .resume(saved.journal.offset, saved.journal.next_seq);
+        // Only what the service has not taken is sent again, but what the session is read from
+        // is the end of the transcript, so the tail is filled from the file.
+        if let Some(path) = session.transcript.clone()
+            && let Err(err) = session.journal.prime_tail(&path)
+        {
+            log::debug!("Ward agents: the transcript of a session is not readable yet: {err}");
+        }
+        session.prepare = saved.prepare.as_ref().map(|prepare| PrepareRun {
+            dir: PathBuf::from(&prepare.dir),
+            plan_path: PathBuf::from(&prepare.plan_path),
+            vault_dir: PathBuf::from(&prepare.vault_dir),
+            limit: Duration::from_secs(prepare.limit_secs),
+            last_error: None,
+        });
+        // There is a state file for this session; the tick that finds the session over removes
+        // it, whether this run ever wrote it or not.
+        session.saved_state = Some(String::new());
+        let launched_at = instant_ago(elapsed_since_ms(saved.launched_at_ms));
+        match saved.phase {
+            SavedPhase::Worktree => self.restore_worktree(&mut session, root),
+            SavedPhase::Prepare => self.restore_prepare(&mut session, &saved, launched_at),
+            SavedPhase::PlanReview => self.restore_plan_review(&mut session),
+            SavedPhase::Launched => self.restore_launched(&mut session, &saved, launched_at),
+        }
+        Some(session)
+    }
+
+    /// The worktree was not ready when Ward went: no agent had started, so the repository is
+    /// deployed again, which is what the git thread would have done anyway.
+    fn restore_worktree(&self, session: &mut Session, root: &Path) {
+        let Some(repo) = launch::parse_repo(&session.assignment.repo) else {
+            let mut request = session.status_request(SessionStatus::Failed);
+            request.reason = Some(REASON_WARD_RESTARTED.to_owned());
+            request.message = Some(format!(
+                "{MESSAGE_AGENT_GONE}: репозиторий назначения не разобрать"
+            ));
+            finish(session, request);
+            return;
+        };
+        log::info!(
+            "Ward agents: session {} deploys its worktree again after the restart",
+            session.assignment.session_id
+        );
+        session.message = Some(MESSAGE_RESUMED_WORKTREE.to_owned());
+        session.reset_agent();
+        self.start_worktree(session, root, &repo);
+    }
+
+    /// The orchestrator of the preparation phase. Alive (or back with the tab of an update
+    /// relaunch): the phase goes on. Gone, but its `plan.json` is there: the next tick takes
+    /// the plan, so the preparation counts as done. Gone with nothing: the preparation ends
+    /// saying what happened, not blaming the orchestrator for a plan it never got to write.
+    fn restore_prepare(&self, session: &mut Session, saved: &SavedSession, launched_at: Instant) {
+        let Some((plan_path, vault_dir)) = session
+            .prepare
+            .as_ref()
+            .map(|prepare| (prepare.plan_path.clone(), prepare.vault_dir.clone()))
+        else {
+            let mut request = session.status_request(SessionStatus::Failed);
+            request.reason = Some(REASON_PREPARE_FAILED.to_owned());
+            request.message = Some(MESSAGE_PREPARE_AGENT_GONE.to_owned());
+            finish(session, request);
+            return;
+        };
+        let alive = self.revive(session, &vault_dir, saved.launched_at_ms, ROLE_ORCHESTRATOR);
+        let has_plan = read_plan_file(&plan_path).is_some();
+        session.phase = Phase::Prepare {
+            launched_at_ms: saved.launched_at_ms,
+            // Without the orchestrator the wait for it starts now, not when it was launched.
+            at: if alive || has_plan {
+                launched_at
+            } else {
+                Instant::now()
+            },
+        };
+        // The plan on disk settles the phase on the next tick, whether the orchestrator is
+        // there or not; without either, the orchestrator is waited for.
+        session.restarted = !alive && !has_plan;
+        let message = match (alive, has_plan) {
+            (true, _) => MESSAGE_RESUMED_PREPARING,
+            (false, true) => MESSAGE_PREPARING,
+            (false, false) => MESSAGE_WAITING_AFTER_RESTART,
+        };
+        let mut request = session.status_request(SessionStatus::Preparing);
+        request.message = Some(message.to_owned());
+        session.set_status(request);
+    }
+
+    /// The plan was ready and the owner had not answered: nothing of the agent is running, the
+    /// session only waits again. The plan is read from `plan.json` once more, so the panel
+    /// shows it and the service gets it again — a repeat of the same plan is idempotent.
+    fn restore_plan_review(&self, session: &mut Session) {
+        let plan = session
+            .prepare
+            .as_ref()
+            .and_then(|prepare| read_plan_file(&prepare.plan_path))
+            .and_then(|text| plan::parse(&text).ok());
+        if let Some(plan) = plan {
+            session.plan_outbox = Some(plan.clone());
+            session.plan = Some(plan);
+        }
+        session.phase = Phase::PlanReview;
+        session.reset_agent();
+        let mut request = session.status_request(SessionStatus::PlanReview);
+        request.message = Some(MESSAGE_RESUMED_PLAN_REVIEW.to_owned());
+        session.set_status(request);
+    }
+
+    /// The executor: picked up while its process is still there, closed honestly when it is
+    /// not. An exit code the runner managed to leave is the end of the session, whatever Ward
+    /// was doing at the time; without one the restart is what ended it, and the message says
+    /// that instead of "never started" or a `review` nobody earned.
+    fn restore_launched(&self, session: &mut Session, saved: &SavedSession, launched_at: Instant) {
+        let Some(worktree) = session.worktree.clone() else {
+            self.fail_after_restart(session, MESSAGE_AGENT_GONE);
+            return;
+        };
+        let agents = launch::agents_dir(&worktree);
+        if session.runner_pid.is_none() {
+            session.runner_pid = read_runner_pid(&agents);
+        }
+        if self.revive(session, &worktree, saved.launched_at_ms, ROLE_EXECUTOR) {
+            session.phase = Phase::Launched {
+                launched_at_ms: saved.launched_at_ms,
+                at: launched_at,
+            };
+            // A session that was waiting for the owner goes on waiting; anything else is
+            // running again.
+            let blocked = saved.status == SessionStatus::Blocked;
+            let mut request = session.status_request(if blocked {
+                SessionStatus::Blocked
+            } else {
+                SessionStatus::Running
+            });
+            request.reason = saved.reason.clone().filter(|_| blocked);
+            request.message = Some(session.with_worktree_note(MESSAGE_RESUMED));
+            log::info!(
+                "Ward agents: session {} is picked up after the restart of Ward",
+                session.assignment.session_id
+            );
+            session.set_status(request);
+            return;
+        }
+        if let Some(code) = read_exit_code(&agents) {
+            log::info!(
+                "Ward agents: session {} ended with {code} while Ward was away",
+                session.assignment.session_id
+            );
+            self.end(session, Some(code));
+            return;
+        }
+        // The agent is not there yet, which does not mean it is gone: an update relaunch
+        // reopens the session's tab with a resume command, and the agent needs a moment more
+        // than Ward to come up. The watch of the session waits it out ([`Worker::watch`]) and
+        // only then gives the session up.
+        session.phase = Phase::Launched {
+            launched_at_ms: saved.launched_at_ms,
+            at: Instant::now(),
+        };
+        session.restarted = true;
+        let mut request = session.status_request(session.status);
+        request.reason = session.reason.clone();
+        request.message = Some(MESSAGE_WAITING_AFTER_RESTART.to_owned());
+        if !is_reportable(request.status) {
+            request.status = SessionStatus::Running;
+            request.reason = None;
+        }
+        session.set_status(request);
+    }
+
+    /// A session picked up after a restart of Ward whose agent has not turned up: it is looked
+    /// for once more every tick, because an update relaunch brings it back with the tab, and
+    /// the grace of a launch is how long that may take. Returns whether the session is over.
+    fn wait_for_agent(
+        &self,
+        session: &mut Session,
+        cwd: &Path,
+        launched_at_ms: i64,
+        launched_at: Instant,
+        role: &'static str,
+    ) -> bool {
+        if self.revive(session, cwd, launched_at_ms, role) {
+            session.restarted = false;
+            let status = if role == ROLE_EXECUTOR {
+                SessionStatus::Running
+            } else {
+                SessionStatus::Preparing
+            };
+            let mut request = session.status_request(status);
+            request.message = Some(session.with_worktree_note(if role == ROLE_EXECUTOR {
+                MESSAGE_RESUMED
+            } else {
+                MESSAGE_RESUMED_PREPARING
+            }));
+            session.set_status(request);
+            return false;
+        }
+        if launched_at.elapsed() < self.timing.session_start_grace {
+            return false;
+        }
+        if role == ROLE_EXECUTOR {
+            self.fail_after_restart(session, MESSAGE_AGENT_GONE);
+        } else {
+            self.fail_prepare_after_restart(session);
+        }
+        true
+    }
+
+    /// Closes a session whose agent did not survive the restart of Ward.
+    fn fail_after_restart(&self, session: &mut Session, message: &str) {
+        log::info!(
+            "Ward agents: session {} did not survive the restart of Ward",
+            session.assignment.session_id
+        );
+        self.stop_agent(session);
+        self.read_journal(session);
+        let mut request = session.status_request(SessionStatus::Failed);
+        request.reason = Some(REASON_WARD_RESTARTED.to_owned());
+        request.message = Some(message.to_owned());
+        finish(session, request);
+    }
+
+    /// The same for the orchestrator of the preparation phase, which left no plan: a failed
+    /// preparation, named for what it was.
+    fn fail_prepare_after_restart(&self, session: &mut Session) {
+        let code = session
+            .prepare
+            .as_ref()
+            .and_then(|prepare| read_exit_code(&prepare.dir));
+        log::info!(
+            "Ward agents: the orchestrator of {} did not survive the restart of Ward",
+            session.assignment.session_id
+        );
+        self.stop_agent(session);
+        self.read_journal(session);
+        let mut request = session.status_request(SessionStatus::Failed);
+        request.reason = Some(REASON_PREPARE_FAILED.to_owned());
+        request.message = Some(match code {
+            Some(code) => format!("{MESSAGE_PREPARE_AGENT_GONE} (код {code})"),
+            None => MESSAGE_PREPARE_AGENT_GONE.to_owned(),
+        });
+        finish(session, request);
+    }
+
+    /// Whether the agent of a saved launch is still there, and what it is now. A process of
+    /// that launch which is still alive is taken as it is. Otherwise the agent's own files are
+    /// read once more: an update relaunch reopens the session's tab with a resume command, so
+    /// the agent may be back under another process — with the same transcript when it resumed
+    /// its session, with another one when it started a new one.
+    ///
+    /// Either way the journal gets a line saying Ward restarted here, and the chunks go on
+    /// being numbered from where the service stopped taking them.
+    fn revive(
+        &self,
+        session: &mut Session,
+        cwd: &Path,
+        launched_at_ms: i64,
+        role: &'static str,
+    ) -> bool {
+        let pids = session.agent_pids();
+        let mut alive = pids.iter().any(|pid| self.machine.is_alive(*pid));
+        // The same process means the same transcript, read on from the position the service
+        // confirmed.
+        let mut same_transcript = alive;
+        if !alive
+            && let Some(found) = session
+                .provider
+                .find_session(&self.homes, cwd, launched_at_ms)
+            && found.pid.is_none_or(|pid| self.machine.is_alive(pid))
+        {
+            same_transcript = session
+                .found
+                .as_ref()
+                .is_some_and(|old| old.agent_session_id == found.agent_session_id);
+            log::info!(
+                "Ward agents: session {} found the agent session {} again after the restart",
+                session.assignment.session_id,
+                found.agent_session_id
+            );
+            session.found = Some(found);
+            alive = true;
+        }
+        if !alive {
+            return false;
+        }
+        let agent = session
+            .found
+            .as_ref()
+            .map(|found| found.agent_session_id.clone());
+        let marker = restart_marker(role, &session.assignment.session_id, agent.as_deref());
+        if same_transcript && session.transcript.is_some() {
+            session.journal.mark(&marker);
+        } else {
+            // Another transcript, or none found yet: its own part of the journal, read from
+            // the beginning of the file.
+            session.transcript = None;
+            session.journal.start_part(&marker);
+            session.role = Some(role);
+        }
+        // The idle watch counts from the restart: the agent may have said its last word while
+        // Ward was away.
+        session.transcript_grew_at = Some(Instant::now());
+        true
+    }
+
     async fn sessions_loop(self: Arc<Self>) {
         loop {
             let (mut sessions, commands) = {
@@ -1365,9 +1886,20 @@ impl Worker {
             for command in commands {
                 apply_command(&mut sessions, command);
             }
+            let root = self
+                .state
+                .lock()
+                .config
+                .as_ref()
+                .map(|config| config.root.clone());
             for session in &mut sessions {
                 self.advance(session).await;
                 self.deliver(session).await;
+                // After the delivery: what is saved is the journal position the service has
+                // confirmed, so a crash of Ward costs at most this tick.
+                if let Some(root) = &root {
+                    save_session_state(session, root);
+                }
             }
             {
                 let mut state = self.state.lock();
@@ -1571,6 +2103,18 @@ impl Worker {
             request.message = Some(reason.to_owned());
             self.read_journal(session);
             finish(session, request);
+            return;
+        }
+        // Picked up after a restart of Ward without its orchestrator: it is waited for, and
+        // nothing is concluded from a process that is not there yet.
+        if session.restarted {
+            self.wait_for_agent(
+                session,
+                &vault_dir,
+                launched_at_ms,
+                launched_at,
+                ROLE_ORCHESTRATOR,
+            );
             return;
         }
         if is_silent(
@@ -1824,9 +2368,7 @@ impl Worker {
         role: &'static str,
     ) {
         if session.runner_pid.is_none() {
-            session.runner_pid = std::fs::read_to_string(files_dir.join(launch::RUNNER_PID_FILE))
-                .ok()
-                .and_then(|text| text.trim().parse().ok());
+            session.runner_pid = read_runner_pid(files_dir);
         }
         if session.found.is_none()
             && let Some(found) = session
@@ -1881,16 +2423,27 @@ impl Worker {
         }
     }
 
-    /// Types the owner's messages into the tab of the agent running now.
+    /// Types the owner's messages into the tab of the agent running now. A session picked up
+    /// after a restart of Ward has no tab of Ward's any more: the owner's message cannot be
+    /// typed anywhere, and the card says so instead of swallowing it.
     async fn send_messages(&self, session: &mut Session) {
         while let Some(text) = session.messages.pop_front() {
-            match &session.pane_uuid {
+            match session.pane_uuid.clone() {
                 Some(pane) => {
-                    if let Err(err) = self.host.send_text(pane, &text).await {
+                    if let Err(err) = self.host.send_text(&pane, &text).await {
                         log::warn!("Ward agents: could not type a message into the session: {err}");
                     }
                 }
-                None => log::warn!("Ward agents: a message for a session without a tab"),
+                None => {
+                    log::warn!("Ward agents: a message for a session without a tab");
+                    let status = session.status;
+                    if is_reportable(status) {
+                        let mut request = session.status_request(status);
+                        request.reason = session.reason.clone();
+                        request.message = Some(MESSAGE_NO_TAB.to_owned());
+                        session.set_status(request);
+                    }
+                }
             }
         }
     }
@@ -1969,6 +2522,35 @@ impl Worker {
         );
 
         self.send_messages(session).await;
+
+        // Picked up after a restart of Ward without its agent: it is waited for, because the
+        // tab of an update relaunch brings it back a moment later.
+        if session.restarted {
+            // The owner does not have to wait for that: a stop ends the session now.
+            if let Some((reason, _)) = session.stop {
+                self.stop_agent(session);
+                self.read_journal(session);
+                let mut request = session.status_request(SessionStatus::Failed);
+                request.message = Some(reason.to_owned());
+                finish(session, request);
+                return;
+            }
+            if self.wait_for_agent(
+                session,
+                &worktree,
+                launched_at_ms,
+                launched_at,
+                ROLE_EXECUTOR,
+            ) {
+                return;
+            }
+            if session.restarted {
+                if self.journal_due(session) {
+                    self.read_journal(session);
+                }
+                return;
+            }
+        }
 
         let max_duration = Duration::from_secs(session.assignment.max_duration_min * 60);
         if session.stop.is_none()
@@ -2433,6 +3015,56 @@ impl Worker {
 fn finish(session: &mut Session, request: StatusRequest) {
     session.set_status(request);
     session.phase = Phase::Done;
+}
+
+/// Whether the service takes this status from a worker (`FROM_WORKER` of the contract): a
+/// session that has not started yet has nothing to report.
+fn is_reportable(status: SessionStatus) -> bool {
+    matches!(
+        status,
+        SessionStatus::Preparing
+            | SessionStatus::PlanReview
+            | SessionStatus::Running
+            | SessionStatus::Blocked
+    )
+}
+
+/// Saves the state of a session still going, and drops the state of one that is over, so the
+/// next start of Ward finds exactly the sessions it has to pick up. An unchanged session is
+/// not written again.
+fn save_session_state(session: &mut Session, root: &Path) {
+    let Some(path) = resume::path(root, &session.assignment.session_id) else {
+        return;
+    };
+    if session.is_done() {
+        if session.saved_state.take().is_some() {
+            resume::remove(&path);
+        }
+        return;
+    }
+    let state = session.saved();
+    let Ok(text) = serde_json::to_string(&state) else {
+        return;
+    };
+    if session.saved_state.as_deref() == Some(text.as_str()) {
+        return;
+    }
+    match resume::write(&path, &state) {
+        Ok(()) => session.saved_state = Some(text),
+        Err(err) => log::warn!(
+            "Ward agents: could not save the state of session {}: {err}",
+            session.assignment.session_id
+        ),
+    }
+}
+
+/// The pid the runner left in `dir`, when it is there and readable.
+fn read_runner_pid(dir: &Path) -> Option<u32> {
+    std::fs::read_to_string(dir.join(launch::RUNNER_PID_FILE))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// The exit code the runner left in `dir`, when it is there and readable.

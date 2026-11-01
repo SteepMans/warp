@@ -437,6 +437,11 @@ pub const REASON_PREPARE_FAILED: &str = "prepare_failed";
 /// `reason` of a `failed` status after the owner refused the plan.
 pub const REASON_PLAN_REJECTED: &str = "plan_rejected";
 
+/// `reason` of a `failed` status for a session whose agent did not survive a restart of Ward.
+/// It tells the card that the work was cut in the middle, which is neither a session that
+/// never started nor one that finished.
+pub const REASON_WARD_RESTARTED: &str = "ward_restarted";
+
 /// `POST /sessions/{sessionId}/status`. Every field is sent, unknown ones as `null`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
