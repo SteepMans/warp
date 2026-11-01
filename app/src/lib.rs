@@ -2805,7 +2805,8 @@ pub(crate) fn app_callbacks(
             #[cfg(all(feature = "local_tty", windows))]
             terminal::local_tty::shutdown_all_pty_event_loops(ctx);
 
-            // Reports the agent sessions this Ward still runs as ended (bounded wait).
+            // Saves the agent sessions this Ward still runs, so the next start picks them up,
+            // and tells the service they go on (bounded wait).
             ward::agents::on_will_terminate(ctx);
             // Records the clean exit and sends the final metrics push (bounded wait).
             ward::metrics::on_will_terminate(ctx);

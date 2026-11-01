@@ -6,6 +6,10 @@
 //! Codex) in its own tab and reports the transcript and the statuses back. There is no separate
 //! daemon: the worker lives as long as Ward runs. See [`worker`] for the loops.
 //!
+//! The sessions do outlive a restart of Ward, an update above all: the state of every session
+//! still going is saved beside its files on disk ([`resume`]) and read again at the start of
+//! the worker, which picks up an agent that survived and closes one that did not.
+//!
 //! An assignment may come without a prompt: Ward then first runs the orchestrator session in
 //! the vault of the machine profile, which leaves the plan of the task, and only then the
 //! executor ([`prepare`], [`plan`]). The machine profile itself (MCP servers, the agent's
@@ -34,6 +38,7 @@ pub mod plan;
 pub mod prepare;
 pub mod profile;
 pub mod provider;
+pub mod resume;
 pub mod worker;
 
 use std::path::PathBuf;
@@ -490,7 +495,8 @@ pub fn init(ctx: &mut AppContext) {
 /// How long quitting waits for the last statuses.
 const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Tells the service that the sessions still going end with Ward.
+/// Saves the state of the sessions still going, so the next start of Ward picks them up, and
+/// tells the service they are not over. See [`worker::Worker::shutdown_report`].
 pub fn on_will_terminate(app: &mut AppContext) {
     let Some(report) = model(app)
         .and_then(|model| model.worker.as_ref())

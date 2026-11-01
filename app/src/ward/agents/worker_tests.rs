@@ -1833,3 +1833,332 @@ fn a_launch_without_a_transcript_still_fails_as_not_started() {
     assert!(message.contains("не начал работу"), "{message}");
     assert_eq!(*machine.stopped.lock(), vec![RUNNER_PID]);
 }
+
+/// Takes everything the journal has for the service, the way the delivery would, and gives
+/// back `(seq, text)` of every chunk.
+fn take_journal(session: &mut Session) -> Vec<(u64, String)> {
+    let mut chunks = Vec::new();
+    while let Some(chunk) = session.journal.next_pending().cloned() {
+        chunks.push((
+            chunk.seq,
+            String::from_utf8_lossy(&chunk.bytes).into_owned(),
+        ));
+        session.journal.mark_sent(chunk.seq);
+    }
+    chunks
+}
+
+/// The sessions a worker picked up at its start, taken out of its state for the asserts.
+fn restored_sessions(worker: &Arc<Worker>) -> Vec<Session> {
+    futures::executor::block_on(worker.restore_sessions());
+    std::mem::take(&mut worker.state.lock().sessions)
+}
+
+/// Ward restarted while the agent was working and the process survived: the session comes back
+/// out of its state file, the agent is picked up where it was and nothing of it is stopped.
+#[test]
+fn a_restart_picks_up_a_live_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("agents-work");
+    let transcript = dir.path().join("executor.jsonl");
+    std::fs::write(&transcript, PROMPT_LINE).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let worker = offline_worker(dir.path(), machine.clone(), idle_timing());
+    let mut session = launched_session(&root, Some(transcript.as_path()));
+    session.role = Some(ROLE_EXECUTOR);
+
+    // The run before: the first lines of the transcript reached the service, and the state of
+    // the session went to disk with them.
+    futures::executor::block_on(worker.advance(&mut session));
+    take_journal(&mut session);
+    save_session_state(&mut session, &root);
+    let position = session.journal.sent_position();
+    assert_eq!(position.0, PROMPT_LINE.len() as u64);
+    drop(session);
+
+    // Ward starts again: the session is its own again, with its agent, its worktree and its
+    // place in the transcript.
+    let after = offline_worker(dir.path(), machine.clone(), idle_timing());
+    let mut sessions = restored_sessions(&after);
+    assert_eq!(sessions.len(), 1);
+    let session = &mut sessions[0];
+    assert_eq!(session.assignment.session_id, "s-idle");
+    assert_eq!(session.assignment.branch, "fix/4654-demo");
+    assert!(matches!(session.phase, Phase::Launched { .. }));
+    assert_eq!(session.status, SessionStatus::Running);
+    assert_eq!(session.worktree, Some(root.join("worktree")));
+    assert_eq!(
+        session.found.as_ref().map(|found| found.pid),
+        Some(Some(EXECUTOR_PID))
+    );
+    assert_eq!(session.journal.sent_position(), position);
+    let message = session.message.clone().unwrap_or_default();
+    assert!(message.contains("подхвачена"), "{message}");
+    let running = session.outbox.back().unwrap();
+    assert_eq!(running.status, SessionStatus::Running);
+    assert_eq!(running.reason, None);
+    assert_eq!(running.agent_session_id.as_deref(), Some(AGENT_SESSION_ID));
+    // The agent was left alone, and the session holds the slot of the machine again.
+    assert!(machine.stopped.lock().is_empty());
+    assert_eq!(after.state.lock().known_ids.len(), 1);
+
+    // It goes on being watched: the agent writes, the session stays running.
+    let answer = assistant_line("{\"type\":\"text\",\"text\":\"Готово\"}");
+    std::fs::write(&transcript, format!("{PROMPT_LINE}{answer}")).unwrap();
+    futures::executor::block_on(after.advance(session));
+    assert!(!session.is_done());
+    assert_eq!(session.status, SessionStatus::Running);
+}
+
+/// The journal of a session picked up again goes on where the service stopped taking it: the
+/// chunk it never confirmed is cut from the transcript once more under its own number, the
+/// lines written while Ward was away go with it, and nothing already taken is sent twice.
+#[test]
+fn a_restart_goes_on_with_the_journal_without_losing_or_repeating_chunks() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("agents-work");
+    let transcript = dir.path().join("executor.jsonl");
+    let answer = assistant_line("{\"type\":\"text\",\"text\":\"первый ход\"}");
+    std::fs::write(&transcript, format!("{PROMPT_LINE}{answer}")).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let worker = offline_worker(dir.path(), machine.clone(), idle_timing());
+    let mut session = launched_session(&root, Some(transcript.as_path()));
+    let marker = role_marker(ROLE_EXECUTOR, &session.assignment.session_id);
+    session.journal.start_part(&marker);
+    session.role = Some(ROLE_EXECUTOR);
+
+    // The run before: only the line that marks the role got through; the transcript behind it
+    // was still waiting when Ward went away.
+    futures::executor::block_on(worker.advance(&mut session));
+    let first = session.journal.next_pending().unwrap().seq;
+    assert_eq!(first, 1);
+    session.journal.mark_sent(first);
+    save_session_state(&mut session, &root);
+    drop(session);
+
+    // One more line lands while Ward is down.
+    let more = assistant_line("{\"type\":\"text\",\"text\":\"второй ход\"}");
+    std::fs::write(&transcript, format!("{PROMPT_LINE}{answer}{more}")).unwrap();
+    let after = offline_worker(dir.path(), machine.clone(), idle_timing());
+    let mut sessions = restored_sessions(&after);
+    let session = &mut sessions[0];
+    futures::executor::block_on(after.advance(session));
+    let chunks = take_journal(session);
+
+    let seqs: Vec<u64> = chunks.iter().map(|(seq, _)| *seq).collect();
+    assert_eq!(seqs, [2, 3], "{chunks:?}");
+    assert!(chunks[0].1.contains("ward.restart"), "{}", chunks[0].1);
+    assert!(chunks[0].1.contains(AGENT_SESSION_ID), "{}", chunks[0].1);
+    assert_eq!(chunks[1].1, format!("{PROMPT_LINE}{answer}{more}"));
+
+    // And from here on every line goes out once.
+    let last = assistant_line("{\"type\":\"text\",\"text\":\"третий ход\"}");
+    std::fs::write(&transcript, format!("{PROMPT_LINE}{answer}{more}{last}")).unwrap();
+    futures::executor::block_on(after.advance(session));
+    assert_eq!(take_journal(session), [(4, last)]);
+}
+
+/// Ward restarted and the agent did not survive: the session is closed saying exactly that,
+/// instead of a `failed` that reads like an agent which never started or a `review` nobody
+/// earned.
+#[test]
+fn a_restart_closes_a_session_whose_agent_is_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("agents-work");
+    let transcript = dir.path().join("executor.jsonl");
+    let answer = assistant_line("{\"type\":\"text\",\"text\":\"правлю worker.rs\"}");
+    std::fs::write(&transcript, format!("{PROMPT_LINE}{answer}")).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let worker = offline_worker(dir.path(), machine.clone(), idle_timing());
+    let mut session = launched_session(&root, Some(transcript.as_path()));
+    session.role = Some(ROLE_EXECUTOR);
+    futures::executor::block_on(worker.advance(&mut session));
+    take_journal(&mut session);
+    save_session_state(&mut session, &root);
+    drop(session);
+
+    // The processes of the session went with Ward and no exit code was left behind.
+    *machine.alive.lock() = false;
+    let timing = Timing {
+        session_start_grace: Duration::from_millis(100),
+        ..idle_timing()
+    };
+    let after = offline_worker(dir.path(), machine.clone(), timing);
+    let mut sessions = restored_sessions(&after);
+    assert_eq!(sessions.len(), 1);
+    let session = &mut sessions[0];
+
+    // An update relaunch brings the agent back with the tab of the session, so it is waited
+    // for before the session is given up.
+    assert!(!session.is_done());
+    assert_eq!(session.status, SessionStatus::Running);
+    let waiting = session.message.clone().unwrap_or_default();
+    assert!(waiting.contains("ждём"), "{waiting}");
+    futures::executor::block_on(after.advance(session));
+    assert!(!session.is_done());
+
+    // Nothing comes back: the session is closed for what it is.
+    std::thread::sleep(Duration::from_millis(150));
+    futures::executor::block_on(after.advance(session));
+    assert!(session.is_done());
+    assert_eq!(session.status, SessionStatus::Failed);
+    let failed = session.outbox.back().unwrap();
+    assert_eq!(failed.status, SessionStatus::Failed);
+    assert_eq!(failed.reason.as_deref(), Some(REASON_WARD_RESTARTED));
+    assert_eq!(failed.exit_code, None);
+    let message = failed.message.clone().unwrap_or_default();
+    assert!(message.contains("перезапустился"), "{message}");
+    assert!(message.contains("не выжил"), "{message}");
+    // What the agent had written still reaches the service.
+    assert!(
+        session.journal.tail().contains("правлю worker.rs"),
+        "{}",
+        session.journal.tail()
+    );
+    // The state of a session that is over leaves the disk, so the next start finds nothing.
+    save_session_state(session, &root);
+    assert!(resume::scan(&root).is_empty());
+}
+
+/// The agent finished while Ward was away: its exit code is the end of the session, not the
+/// restart.
+#[test]
+fn a_session_that_finished_while_ward_was_away_keeps_its_exit_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("agents-work");
+    let transcript = dir.path().join("executor.jsonl");
+    std::fs::write(&transcript, PROMPT_LINE).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let worker = offline_worker(dir.path(), machine.clone(), idle_timing());
+    let mut session = launched_session(&root, Some(transcript.as_path()));
+    session.role = Some(ROLE_EXECUTOR);
+    save_session_state(&mut session, &root);
+    drop(session);
+
+    let agents = launch::agents_dir(&root.join("worktree"));
+    std::fs::create_dir_all(&agents).unwrap();
+    std::fs::write(agents.join(launch::EXIT_CODE_FILE), "0").unwrap();
+    *machine.alive.lock() = false;
+    let after = offline_worker(dir.path(), machine.clone(), idle_timing());
+    let mut sessions = restored_sessions(&after);
+    let session = &mut sessions[0];
+    assert!(session.is_done());
+    assert_eq!(session.status, SessionStatus::Review);
+    let review = session.outbox.back().unwrap();
+    assert_eq!(review.exit_code, Some(0));
+    assert_eq!(review.reason, None);
+}
+
+/// Ward restarted during the preparation phase: an orchestrator that survived goes on working,
+/// and one that did not takes the session with it — with a message about the restart, not about
+/// a plan it never got the chance to write.
+#[test]
+fn a_restart_during_the_preparation_keeps_the_orchestrator() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("agents-work");
+    let transcript = dir.path().join("orchestrator.jsonl");
+    std::fs::write(&transcript, "{\"type\":\"user\",\"n\":1}\n").unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let worker = offline_worker(dir.path(), machine.clone(), Timing::default());
+    let mut session = preparing_session(&root, &transcript, false);
+    session.role = Some(ROLE_ORCHESTRATOR);
+    let prepare_dir = session.prepare.as_ref().unwrap().dir.clone();
+    futures::executor::block_on(worker.advance(&mut session));
+    take_journal(&mut session);
+    save_session_state(&mut session, &root);
+    drop(session);
+
+    // The orchestrator is still there: the phase goes on where it was.
+    let after = offline_worker(dir.path(), machine.clone(), Timing::default());
+    let mut sessions = restored_sessions(&after);
+    assert_eq!(sessions.len(), 1);
+    let session = &mut sessions[0];
+    assert!(matches!(session.phase, Phase::Prepare { .. }));
+    assert_eq!(session.status, SessionStatus::Preparing);
+    assert_eq!(
+        session
+            .prepare
+            .as_ref()
+            .map(|prepare| prepare.plan_path.clone()),
+        Some(prepare_dir.join(plan::PLAN_FILE))
+    );
+    let message = session.message.clone().unwrap_or_default();
+    assert!(message.contains("оркестратор жив"), "{message}");
+    assert!(machine.stopped.lock().is_empty());
+
+    // Its plan still ends the phase, as it did before the restart.
+    std::fs::write(prepare_dir.join(plan::PLAN_FILE), demo_plan()).unwrap();
+    futures::executor::block_on(after.advance(session));
+    assert!(matches!(session.phase, Phase::PrepareExit { .. }));
+    assert_eq!(session.assignment.branch, "feature/4650-demo");
+
+    // Had the orchestrator not survived, with no plan behind it, the preparation would end
+    // saying so — once the wait for it is over.
+    std::fs::remove_file(prepare_dir.join(plan::PLAN_FILE)).unwrap();
+    *machine.alive.lock() = false;
+    let timing = Timing {
+        session_start_grace: Duration::from_millis(100),
+        ..Timing::default()
+    };
+    let gone = offline_worker(dir.path(), machine.clone(), timing);
+    let mut sessions = restored_sessions(&gone);
+    let session = &mut sessions[0];
+    assert!(!session.is_done());
+    let waiting = session.message.clone().unwrap_or_default();
+    assert!(waiting.contains("ждём"), "{waiting}");
+    std::thread::sleep(Duration::from_millis(150));
+    futures::executor::block_on(gone.advance(session));
+    assert!(session.is_done());
+    assert_eq!(session.status, SessionStatus::Failed);
+    let failed = session.outbox.back().unwrap();
+    assert_eq!(failed.reason.as_deref(), Some(REASON_PREPARE_FAILED));
+    let message = failed.message.clone().unwrap_or_default();
+    assert!(message.contains("перезапустился"), "{message}");
+}
+
+/// Quitting Ward — an update above all — no longer reports the sessions as failed: the state
+/// goes to disk and the service hears the status the session is in with a word about the
+/// restart, so the next start can pick the session up.
+#[test]
+fn quitting_leaves_the_sessions_to_the_next_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("agents-work");
+    let transcript = dir.path().join("executor.jsonl");
+    std::fs::write(&transcript, PROMPT_LINE).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let worker = offline_worker(dir.path(), machine.clone(), idle_timing());
+    let mut session = launched_session(&root, Some(transcript.as_path()));
+    session.role = Some(ROLE_EXECUTOR);
+    futures::executor::block_on(worker.advance(&mut session));
+    take_journal(&mut session);
+    worker.state.lock().sessions.push(session);
+
+    // Not registered: there is nobody to tell, but the state is saved all the same.
+    assert!(worker.shutdown_report().is_none());
+    let saved = resume::read(&resume::path(&root, "s-idle").unwrap()).unwrap();
+    assert_eq!(saved.status, SessionStatus::Running);
+    assert_eq!(saved.phase, resume::SavedPhase::Launched);
+    assert_eq!(saved.runner_pid, Some(RUNNER_PID));
+    assert_eq!(
+        saved
+            .agent
+            .as_ref()
+            .map(|agent| agent.agent_session_id.clone()),
+        Some(AGENT_SESSION_ID.to_owned())
+    );
+    assert!(saved.journal.offset > 0);
+
+    worker.state.lock().registration = Some(Registration {
+        fingerprint: "f".to_owned(),
+        worker_id: "w-1".to_owned(),
+        token: "agw_token".to_owned(),
+        repos: None,
+    });
+    let report = worker.shutdown_report().unwrap();
+    assert_eq!(report.sessions.len(), 1);
+    let (session_id, request) = &report.sessions[0];
+    assert_eq!(session_id, "s-idle");
+    assert_eq!(request.status, SessionStatus::Running);
+    let message = request.message.clone().unwrap_or_default();
+    assert!(message.contains("продолжится"), "{message}");
+}
