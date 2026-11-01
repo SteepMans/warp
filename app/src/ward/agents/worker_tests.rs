@@ -334,7 +334,7 @@ fn full_cycle_against_a_fake_service() {
     {
         let registrations = registrations.clone();
         server
-            .mock("POST", &format!("{base}/register"))
+            .mock("POST", format!("{base}/register").as_str())
             .match_body(Matcher::PartialJson(serde_json::json!({
                 "key": "agk_test",
                 "name": "test-pc",
@@ -637,7 +637,7 @@ fn the_preparation_phase_runs_before_the_executor() {
         })
         .to_string();
         server
-            .mock("POST", &format!("{base}/register"))
+            .mock("POST", format!("{base}/register").as_str())
             .with_body_from_request(move |_| body.clone().into_bytes())
             .create();
     }
@@ -1006,7 +1006,7 @@ fn a_preparation_without_a_plan_fails_with_its_own_reason() {
         })
         .to_string();
         server
-            .mock("POST", &format!("{base}/register"))
+            .mock("POST", format!("{base}/register").as_str())
             .with_body_from_request(move |_| body.clone().into_bytes())
             .create();
     }
@@ -1201,7 +1201,7 @@ fn a_tab_that_never_starts_the_agent_ends_as_failed() {
     let log: Log = Arc::default();
     let base = "/agents/t-silent/api/v1/worker";
     server
-        .mock("POST", &format!("{base}/register"))
+        .mock("POST", format!("{base}/register").as_str())
         .with_body(r#"{"workerId":"w-1","token":"agw_token","heartbeatSec":1}"#)
         .create();
     record(
