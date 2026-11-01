@@ -98,6 +98,16 @@ impl Machine for FakeMachine {
     }
 }
 
+/// An open tab as the fake UI holds it: what the real host reads off a pane to tell whose tab
+/// it is (see `find_pane_of_session`).
+#[derive(Clone, Debug)]
+struct FakePane {
+    uuid: String,
+    /// The agent session running in the tab; `None` for a tab without an agent.
+    agent_session_id: Option<String>,
+    cwd: PathBuf,
+}
+
 /// Plays the UI and the agent: opening the tab "starts" a Claude session in its directory.
 /// Every tab gets its own pid and session id, so the orchestrator of the preparation phase and
 /// the executor after it are told apart the way the real agent files tell them apart.
@@ -109,6 +119,8 @@ struct FakeHost {
     silent: bool,
     registration: Mutex<Option<Registration>>,
     tabs: Mutex<Vec<TabSpec>>,
+    /// The tabs that are open now; closing one takes it out of here.
+    panes: Mutex<Vec<FakePane>>,
     typed: Mutex<Vec<(String, String)>>,
     snapshot: Mutex<Snapshot>,
     /// What the orchestrator "writes" as its plan when its tab opens.
@@ -123,6 +135,7 @@ impl FakeHost {
             silent: false,
             registration: Mutex::new(None),
             tabs: Mutex::new(Vec::new()),
+            panes: Mutex::new(Vec::new()),
             typed: Mutex::new(Vec::new()),
             snapshot: Mutex::new(Snapshot::default()),
             plan: Mutex::new(None),
@@ -132,6 +145,17 @@ impl FakeHost {
     /// The tab opens and nothing else happens.
     fn silent(mut self) -> Self {
         self.silent = true;
+        self
+    }
+
+    /// A tab that is already open, as an update relaunch leaves it: the pane keeps its UUID
+    /// and the agent of the session is running in it again.
+    fn with_open_pane(self, uuid: &str, agent_session_id: Option<&str>, cwd: &Path) -> Self {
+        self.panes.lock().push(FakePane {
+            uuid: uuid.to_owned(),
+            agent_session_id: agent_session_id.map(str::to_owned),
+            cwd: cwd.to_path_buf(),
+        });
         self
     }
 
@@ -169,8 +193,14 @@ impl Host for FakeHost {
             tabs.push(tab.clone());
             tabs.len() - 1
         };
+        let uuid = format!("pane-{}", index + 1);
         if self.silent {
-            return Ok(Some(format!("pane-{}", index + 1)));
+            self.panes.lock().push(FakePane {
+                uuid: uuid.clone(),
+                agent_session_id: None,
+                cwd: tab.cwd.clone(),
+            });
+            return Ok(Some(uuid));
         }
         let session_id = Self::agent_session_id(index);
         let pid = 4242 + index as u32;
@@ -206,10 +236,39 @@ impl Host for FakeHost {
             }
             std::fs::write(path, text).unwrap();
         }
-        Ok(Some(format!("pane-{}", index + 1)))
+        self.panes.lock().push(FakePane {
+            uuid: uuid.clone(),
+            agent_session_id: Some(session_id),
+            cwd: tab.cwd.clone(),
+        });
+        Ok(Some(uuid))
+    }
+
+    /// The same order the real host looks a tab up in: the pane of the session, the pane
+    /// running its agent session, the pane whose agent works in its directory.
+    async fn find_pane(&self, query: PaneQuery) -> Option<String> {
+        let panes = self.panes.lock().clone();
+        if let Some(wanted) = query.pane_uuid.as_deref()
+            && panes.iter().any(|pane| pane.uuid == wanted)
+        {
+            return Some(wanted.to_owned());
+        }
+        let by_agent = panes.iter().find(|pane| {
+            pane.agent_session_id.is_some() && pane.agent_session_id == query.agent_session_id
+        });
+        let by_cwd = panes.iter().find(|pane| {
+            query
+                .cwd
+                .as_deref()
+                .is_some_and(|cwd| super::provider::same_path(&pane.cwd.to_string_lossy(), cwd))
+        });
+        by_agent.or(by_cwd).map(|pane| pane.uuid.clone())
     }
 
     async fn send_text(&self, pane_uuid: &str, text: &str) -> Result<(), String> {
+        if !self.panes.lock().iter().any(|pane| pane.uuid == pane_uuid) {
+            return Err("the session's tab is closed".to_owned());
+        }
         self.typed
             .lock()
             .push((pane_uuid.to_owned(), text.to_owned()));
@@ -1408,6 +1467,17 @@ impl Machine for WatchedMachine {
 /// A worker with no service and no loops behind it: the tests of the preparation phase move a
 /// session by hand with [`Worker::advance`].
 fn offline_worker(dir: &Path, machine: Arc<dyn Machine>, timing: Timing) -> Arc<Worker> {
+    offline_worker_with_host(dir, machine, timing, |host| host).0
+}
+
+/// The same worker with its fake UI in hand, and a chance to set the tabs that are already
+/// open before the worker sees them.
+fn offline_worker_with_host(
+    dir: &Path,
+    machine: Arc<dyn Machine>,
+    timing: Timing,
+    prepare: impl FnOnce(FakeHost) -> FakeHost,
+) -> (Arc<Worker>, Arc<FakeHost>) {
     let homes = Homes {
         claude_dir: dir.join("home").join(".claude"),
         claude_json: dir.join("home").join(".claude.json"),
@@ -1422,9 +1492,9 @@ fn offline_worker(dir: &Path, machine: Arc<dyn Machine>, timing: Timing) -> Arc<
         clone_search: Vec::new(),
         paused: false,
     };
-    let host = Arc::new(FakeHost::new(config.clone(), homes.clone()));
+    let host = Arc::new(prepare(FakeHost::new(config.clone(), homes.clone())));
     let worker = Worker::new(
-        host,
+        host.clone(),
         machine,
         http_client::Client::new_for_test(),
         homes.clone(),
@@ -1433,7 +1503,7 @@ fn offline_worker(dir: &Path, machine: Arc<dyn Machine>, timing: Timing) -> Arc<
         "test".to_owned(),
     );
     worker.state.lock().config = Some(config);
-    worker
+    (worker, host)
 }
 
 /// A session in the preparation phase: the orchestrator's directory, the agent session Ward
@@ -1908,6 +1978,174 @@ fn a_restart_picks_up_a_live_agent() {
     futures::executor::block_on(after.advance(session));
     assert!(!session.is_done());
     assert_eq!(session.status, SessionStatus::Running);
+}
+
+/// Reads the journal every tick and leaves the idle watch far away, so a message is the only
+/// thing a tick does.
+fn message_timing() -> Timing {
+    Timing {
+        journal_every: Duration::ZERO,
+        ..Timing::default()
+    }
+}
+
+/// A session of the run before, saved with the pane of its tab, and the worker that picks it
+/// up with the tabs `panes` holds open.
+fn picked_up_with_panes(
+    dir: &Path,
+    machine: Arc<WatchedMachine>,
+    transcript: &Path,
+    saved_pane: Option<&str>,
+    panes: Vec<(String, Option<String>, PathBuf)>,
+) -> (Arc<Worker>, Arc<FakeHost>, Vec<Session>) {
+    let root = dir.join("agents-work");
+    let worker = offline_worker(dir, machine.clone(), message_timing());
+    let mut session = launched_session(&root, Some(transcript));
+    session.role = Some(ROLE_EXECUTOR);
+    session.pane_uuid = saved_pane.map(str::to_owned);
+    futures::executor::block_on(worker.advance(&mut session));
+    save_session_state(&mut session, &root);
+    drop(session);
+
+    let (after, host) =
+        offline_worker_with_host(dir, machine, message_timing(), move |mut host| {
+            for (uuid, agent, cwd) in &panes {
+                host = host.with_open_pane(uuid, agent.as_deref(), cwd);
+            }
+            host
+        });
+    let sessions = restored_sessions(&after);
+    (after, host, sessions)
+}
+
+/// The owner's message for a picked up session.
+fn message_command(text: &str) -> Command {
+    Command::Message {
+        session_id: "s-idle".to_owned(),
+        text: text.to_owned(),
+    }
+}
+
+/// The tab of a session picked up after a restart of Ward: the pane went to disk with the rest
+/// of the state, the update relaunch reopened that very tab under the same UUID, and the
+/// owner's `message` is typed into it instead of being lost.
+#[test]
+fn a_picked_up_session_types_into_the_pane_it_had() {
+    let dir = tempfile::tempdir().unwrap();
+    let worktree = dir.path().join("agents-work").join("worktree");
+    let transcript = dir.path().join("executor.jsonl");
+    std::fs::write(&transcript, PROMPT_LINE).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let (after, host, mut sessions) = picked_up_with_panes(
+        dir.path(),
+        machine,
+        &transcript,
+        Some("pane-7"),
+        vec![(
+            "pane-7".to_owned(),
+            Some(AGENT_SESSION_ID.to_owned()),
+            worktree.clone(),
+        )],
+    );
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].pane_uuid.as_deref(), Some("pane-7"));
+
+    apply_command(&mut sessions, message_command("допиши тесты"));
+    futures::executor::block_on(after.advance(&mut sessions[0]));
+    assert_eq!(
+        *host.typed.lock(),
+        [("pane-7".to_owned(), "допиши тесты".to_owned())]
+    );
+    assert_eq!(sessions[0].status, SessionStatus::Running);
+    assert!(
+        sessions[0]
+            .outbox
+            .iter()
+            .all(|request| request.message.as_deref() != Some(MESSAGE_NO_TAB)),
+        "{:?}",
+        sessions[0].outbox
+    );
+}
+
+/// The pane the session had is gone, but its agent runs in another tab: that tab is the
+/// session's tab again, whatever pane it sits in, and the session remembers the new one.
+#[test]
+fn a_picked_up_session_finds_the_tab_of_its_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let worktree = dir.path().join("agents-work").join("worktree");
+    let transcript = dir.path().join("executor.jsonl");
+    std::fs::write(&transcript, PROMPT_LINE).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let (after, host, mut sessions) = picked_up_with_panes(
+        dir.path(),
+        machine,
+        &transcript,
+        Some("pane-7"),
+        vec![
+            ("pane-1".to_owned(), None, dir.path().to_path_buf()),
+            (
+                "pane-3".to_owned(),
+                Some(AGENT_SESSION_ID.to_owned()),
+                worktree.clone(),
+            ),
+        ],
+    );
+    apply_command(&mut sessions, message_command("ответь владельцу"));
+    futures::executor::block_on(after.advance(&mut sessions[0]));
+    assert_eq!(
+        *host.typed.lock(),
+        [("pane-3".to_owned(), "ответь владельцу".to_owned())]
+    );
+    assert_eq!(sessions[0].pane_uuid.as_deref(), Some("pane-3"));
+}
+
+/// Neither the pane nor the agent session matches any open tab, but one tab's agent works in
+/// the worktree of the session: the last resort of the lookup, for a session whose agent id
+/// Ward never got hold of.
+#[test]
+fn a_picked_up_session_falls_back_to_the_tab_of_its_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    let worktree = dir.path().join("agents-work").join("worktree");
+    let transcript = dir.path().join("executor.jsonl");
+    std::fs::write(&transcript, PROMPT_LINE).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let (after, host, mut sessions) = picked_up_with_panes(
+        dir.path(),
+        machine,
+        &transcript,
+        None,
+        vec![(
+            "pane-9".to_owned(),
+            Some("другая-сессия-агента".to_owned()),
+            worktree.clone(),
+        )],
+    );
+    apply_command(&mut sessions, message_command("продолжай"));
+    futures::executor::block_on(after.advance(&mut sessions[0]));
+    assert_eq!(
+        *host.typed.lock(),
+        [("pane-9".to_owned(), "продолжай".to_owned())]
+    );
+    assert_eq!(sessions[0].pane_uuid.as_deref(), Some("pane-9"));
+}
+
+/// No open tab is the session's: the message is not swallowed, the card says it was not
+/// delivered, and the pane the session used to know is forgotten.
+#[test]
+fn a_message_without_any_tab_is_reported_as_undelivered() {
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("executor.jsonl");
+    std::fs::write(&transcript, PROMPT_LINE).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let (after, host, mut sessions) =
+        picked_up_with_panes(dir.path(), machine, &transcript, Some("pane-7"), Vec::new());
+    apply_command(&mut sessions, message_command("есть кто живой"));
+    futures::executor::block_on(after.advance(&mut sessions[0]));
+    assert!(host.typed.lock().is_empty());
+    assert_eq!(sessions[0].pane_uuid, None);
+    let last = sessions[0].outbox.back().unwrap();
+    assert_eq!(last.status, SessionStatus::Running);
+    assert_eq!(last.message.as_deref(), Some(MESSAGE_NO_TAB));
 }
 
 /// The journal of a session picked up again goes on where the service stopped taking it: the

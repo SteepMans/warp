@@ -10,10 +10,11 @@
 //! ends, so a start of Ward finds exactly the sessions that were still going.
 //!
 //! Saved is only what cannot be found again: the assignment, the phase, the status, the agent
-//! session with its process, the transcript being read and the position the service has
-//! confirmed ([`super::journal::Journal::sent_position`]). Everything else is read off the
-//! disk again (`prompt.md`, `runner.pid`, `exit-code`, `plan.json`, the worktree) or taken
-//! from the service again.
+//! session with its process, the transcript being read, the position the service has confirmed
+//! ([`super::journal::Journal::sent_position`]) and the pane of the session's tab, which an
+//! update relaunch reopens under the same UUID. Everything else is read off the disk again
+//! (`prompt.md`, `runner.pid`, `exit-code`, `plan.json`, the worktree) or taken from the
+//! service again.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -105,6 +106,11 @@ pub struct SavedSession {
     pub agent: Option<SavedAgent>,
     #[serde(default)]
     pub transcript: Option<String>,
+    /// The pane of the session's tab: an update relaunch reopens that tab under the same
+    /// persistent UUID, so this is how the picked up session finds its tab again and the
+    /// owner's `message` still has somewhere to go.
+    #[serde(default)]
+    pub pane_uuid: Option<String>,
     /// Whose transcript the journal was reading (`orchestrator`, `executor`).
     #[serde(default)]
     pub role: Option<String>,

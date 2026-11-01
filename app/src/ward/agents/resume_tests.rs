@@ -24,6 +24,7 @@ fn demo(session_id: &str, started_at_ms: i64) -> SavedSession {
             remote_control_url: Some("https://claude.ai/code/session_1".to_owned()),
         }),
         transcript: Some("C:/home/.claude/projects/p/a-1.jsonl".to_owned()),
+        pane_uuid: Some("a1b2c3d4".to_owned()),
         role: Some("executor".to_owned()),
         journal: SavedJournal {
             offset: 1234,
@@ -42,6 +43,16 @@ fn a_state_file_comes_back_as_it_was_written() {
     write(&path, &state).unwrap();
     assert!(path.ends_with("session.json"));
     assert_eq!(read(&path).unwrap(), state);
+
+    // The pane of the session's tab comes back with it: that is how the picked up session
+    // finds the tab an update relaunch reopened.
+    assert_eq!(read(&path).unwrap().pane_uuid.as_deref(), Some("a1b2c3d4"));
+
+    // A state file of an older Ward, written before the pane was saved, is still read.
+    let mut without_pane = serde_json::to_value(&state).unwrap();
+    without_pane.as_object_mut().unwrap().remove("paneUuid");
+    std::fs::write(&path, without_pane.to_string()).unwrap();
+    assert_eq!(read(&path).unwrap().pane_uuid, None);
 
     // The temporary file of the write is gone, and the state of a session that ended too.
     assert!(!path.with_extension("json.tmp").exists());
