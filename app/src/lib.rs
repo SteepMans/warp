@@ -2764,6 +2764,10 @@ pub(crate) fn app_callbacks(
             );
         })),
         on_will_terminate: Some(Box::new(move |ctx| {
+            // Saves the open tabs when Ward is terminating to install an update, while the
+            // windows are still around.
+            ward::session_handoff::on_will_terminate(ctx);
+
             NotebookManager::handle(ctx).update(ctx, |manager, ctx| {
                 // Notebooks are only saved periodically, so ensure that any pending changes have
                 // been sent to the writer thread before terminating.
@@ -3192,6 +3196,10 @@ fn launch(ctx: &mut warpui::AppContext, app_state: Option<AppState>, launch_mode
             // Attempt to restore windows from the persisted application state.
             let arg = OpenFromRestoredArg { app_state };
             ctx.dispatch_global_action("root_view:open_from_restored", &arg);
+
+            // Reopens the tabs Ward saved before relaunching for an update, unless session
+            // restoration above already brought the windows back.
+            ward::session_handoff::restore_after_update(ctx);
 
             // Process any URLs that were provided on the command line (which may be
             // file:// URLs or ones using our custom URL scheme).
