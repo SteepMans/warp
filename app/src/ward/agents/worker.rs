@@ -1603,8 +1603,9 @@ impl Worker {
         finish(session, request);
     }
 
-    /// The plan is there: it fills the assignment, goes to the service, and the orchestrator
-    /// session ends, because the plan was its last action.
+    /// The plan is there: it fills the assignment, goes to the service, and the session waits
+    /// for the orchestrator to end itself ([`Self::watch_prepare_exit`]), because the plan was
+    /// its last action.
     async fn accept_plan(&self, session: &mut Session, plan: Plan) {
         if let Err(err) = plan::apply(&plan, &mut session.assignment) {
             if let Some(prepare) = session.prepare.as_mut() {
