@@ -171,16 +171,28 @@ Settings → Third party CLI agents → Agents worker:
   вкладка Ward в worktree. Раннер убирает из окружения `CLAUDE*`, ставит
   `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1`, передаёт промпт из файла первым сообщением и
   пишет код выхода агента в `<worktree>/.agents/exit-code`.
-  - Claude: `claude --remote-control <имя> --dangerously-skip-permissions [--model <m>]`; id
-    сессии и `bridgeSessionId` — из `~/.claude/sessions/<pid>.json`, транскрипт —
+  - Claude: `claude --remote-control <имя> --dangerously-skip-permissions [--model <m>]`,
+    промпт — позиционным аргументом после `--`; id сессии и `bridgeSessionId` — из
+    `~/.claude/sessions/<pid>.json`, транскрипт —
     `~/.claude/projects/<slug>/<sessionId>.jsonl`, ссылка `https://claude.ai/code/<bridge>`.
+  - Доверие к каталогу: перед вкладкой Ward пишет в `~/.claude.json` запись
+    `projects[<каталог агента>]` с `hasTrustDialogAccepted: true` и отметкой, что
+    предупреждение о внешних включениях CLAUDE.md показано. В незнакомом каталоге Claude Code
+    спрашивает «Do you trust the files in this folder?» и ждёт ответа, которого в
+    неинтерактивной вкладке никто не даст; флага и переменной для этого нет, и сам Claude Code
+    советует ставить это поле. Файл читается целиком, меняется одна запись и пишется через
+    временный файл с переименованием: чужие записи и поля остаются как были, а файл, который не
+    разбирается, Ward не трогает вовсе.
   - Codex: `codex --dangerously-bypass-approvals-and-sandbox [-m <m>]`; id — из нового
     `rollout-*.jsonl` с `cwd` worktree, ссылки удалённого управления нет.
   - `model: null` — без флага модели.
 - Статусы: `preparing` и `plan-review` на фазе подготовки, `running` (с id сессии агента и
   ссылкой), `blocked` с `reason: usage_limit` и
   `resetsAt`, когда агент упёрся в лимит подписки (по записи об ошибке в транскрипте),
-  `review` при коде 0, иначе `failed` с `exitCode`.
+  `review` при коде 0, иначе `failed` с `exitCode`. Если за 3 минуты после запуска не появилось
+  ни сессии агента, ни строки транскрипта, сессия не остаётся в `running`: Ward останавливает
+  процесс и отправляет `failed` «Агент не начал работу: ждёт ответа в терминале» (на фазе
+  подготовки — с `reason: prepare_failed`).
 - Транскрипт отправляется раз в 10 секунд кусками целых строк с растущим `seq`; не
   отправленное копится и уходит позже. Статусы тоже ждут связи и уходят по порядку.
 - `stop` останавливает процесс агента (на Windows `taskkill /T /F`), статус `failed`
