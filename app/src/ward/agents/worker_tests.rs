@@ -97,6 +97,9 @@ impl Machine for FakeMachine {
 struct FakeHost {
     config: WorkerConfig,
     homes: Homes,
+    /// The tab opens but no agent session appears: what a question left on the screen of the
+    /// tab looks like from the outside.
+    silent: bool,
     registration: Mutex<Option<Registration>>,
     tabs: Mutex<Vec<TabSpec>>,
     typed: Mutex<Vec<(String, String)>>,
@@ -110,12 +113,19 @@ impl FakeHost {
         Self {
             config,
             homes,
+            silent: false,
             registration: Mutex::new(None),
             tabs: Mutex::new(Vec::new()),
             typed: Mutex::new(Vec::new()),
             snapshot: Mutex::new(Snapshot::default()),
             plan: Mutex::new(None),
         }
+    }
+
+    /// The tab opens and nothing else happens.
+    fn silent(mut self) -> Self {
+        self.silent = true;
+        self
     }
 
     /// The agent session id of the tab opened as number `index`.
@@ -152,6 +162,9 @@ impl Host for FakeHost {
             tabs.push(tab.clone());
             tabs.len() - 1
         };
+        if self.silent {
+            return Ok(Some(format!("pane-{}", index + 1)));
+        }
         let session_id = Self::agent_session_id(index);
         let pid = 4242 + index as u32;
         let sessions = self.homes.claude_dir.join("sessions");
@@ -412,6 +425,7 @@ fn full_cycle_against_a_fake_service() {
         config_every: Duration::from_millis(100),
         inbox_wait_secs: 0,
         session_lookup_grace: Duration::from_secs(30),
+        session_start_grace: Duration::from_secs(300),
         exit_grace: Duration::from_secs(30),
         stop_grace: Duration::from_secs(30),
         usage_every: Duration::from_secs(60),
@@ -741,6 +755,7 @@ fn the_preparation_phase_runs_before_the_executor() {
         config_every: Duration::from_millis(100),
         inbox_wait_secs: 0,
         session_lookup_grace: Duration::from_secs(30),
+        session_start_grace: Duration::from_secs(300),
         exit_grace: Duration::from_secs(30),
         stop_grace: Duration::from_secs(30),
         usage_every: Duration::from_secs(60),
@@ -1071,6 +1086,7 @@ fn a_preparation_without_a_plan_fails_with_its_own_reason() {
         config_every: Duration::from_millis(100),
         inbox_wait_secs: 0,
         session_lookup_grace: Duration::from_secs(30),
+        session_start_grace: Duration::from_secs(300),
         exit_grace: Duration::from_millis(100),
         stop_grace: Duration::from_millis(100),
         usage_every: Duration::from_secs(60),
@@ -1122,4 +1138,196 @@ fn a_preparation_without_a_plan_fails_with_its_own_reason() {
     );
     // No worktree was made: the executor never started.
     assert!(!root.join("SteepMans").exists());
+}
+
+/// What the watch takes for an agent that never started: no session of its own, not a line of
+/// transcript and the grace over.
+#[test]
+fn a_launch_is_silent_without_a_session_and_without_transcript() {
+    let mut session = Session::new(
+        Assignment::default(),
+        provider::by_id("claude").unwrap(),
+        Phase::Done,
+    );
+    let grace = Duration::from_secs(180);
+    assert!(!is_silent(&session, Duration::from_secs(30), grace));
+    assert!(is_silent(&session, grace, grace));
+    // A line of the transcript is enough to tell a working agent from a waiting one.
+    session.journal.ingest(b"{\"type\":\"user\"}\n");
+    assert!(!is_silent(&session, grace, grace));
+    let mut session = Session::new(
+        Assignment::default(),
+        provider::by_id("claude").unwrap(),
+        Phase::Done,
+    );
+    session.found = Some(FoundSession {
+        agent_session_id: AGENT_SESSION_ID.to_owned(),
+        pid: Some(4242),
+        remote_control_url: None,
+        transcript: None,
+    });
+    assert!(!is_silent(&session, grace, grace));
+}
+
+/// A tab that opens and then nothing: the agent waits for an answer nobody gives. The session
+/// ends as `failed` with a message that names it, and the folder trust Claude Code asks about
+/// is in `~/.claude.json` before the tab starts.
+#[test]
+fn a_tab_that_never_starts_the_agent_ends_as_failed() {
+    if machine::which("git").is_none() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo_url = remote(dir.path());
+    let root = dir.path().join("agents-work");
+    let homes = Homes {
+        claude_dir: dir.path().join("home").join(".claude"),
+        claude_json: dir.path().join("home").join(".claude.json"),
+        codex_dir: dir.path().join("home").join(".codex"),
+    };
+    std::fs::create_dir_all(dir.path().join("home")).unwrap();
+    std::fs::write(
+        &homes.claude_json,
+        r#"{"oauthAccount":{"accountUuid":"u-1"},"projects":{"C:/work/other/bot":{"hasTrustDialogAccepted":true}}}"#,
+    )
+    .unwrap();
+
+    let mut server = Server::new();
+    let log: Log = Arc::default();
+    server
+        .mock("POST", "/agents/api/v1/worker/register")
+        .with_body(r#"{"workerId":"w-1","token":"agw_token","heartbeatSec":1}"#)
+        .create();
+    let base = "/agents/api/v1/worker";
+    record(
+        &mut server,
+        "POST",
+        &format!("{base}/heartbeat"),
+        &log,
+        |_| b"{}".to_vec(),
+    );
+    let assignment = serde_json::json!({
+        "sessionId": "s-silent",
+        "taskRef": {"boardId": 5, "taskId": 5028, "taskNumber": 4643},
+        "attempt": 1,
+        "title": "Молчащая вкладка",
+        "repo": repo_url,
+        "baseBranch": "main",
+        "branch": "fix/4643-demo",
+        "prompt": "Сделай демо",
+        "provider": "claude",
+        "model": null,
+        "maxDurationMin": 0,
+    });
+    {
+        let first = serde_json::json!({"assignments": [assignment]}).to_string();
+        let calls = Arc::new(AtomicUsize::new(0));
+        record(
+            &mut server,
+            "GET",
+            &format!("{base}/inbox"),
+            &log,
+            move |_| {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    first.clone().into_bytes()
+                } else {
+                    b"-".to_vec()
+                }
+            },
+        );
+    }
+    record(
+        &mut server,
+        "POST",
+        &format!("{base}/assignments/"),
+        &log,
+        |_| Vec::new(),
+    );
+    record(
+        &mut server,
+        "POST",
+        &format!("{base}/sessions/"),
+        &log,
+        |_| Vec::new(),
+    );
+
+    let host = Arc::new(
+        FakeHost::new(
+            WorkerConfig {
+                base_url: format!("{}/agents", server.url()),
+                key: "agk_test".to_owned(),
+                name: "test-pc".to_owned(),
+                root: root.clone(),
+                paused: false,
+            },
+            homes.clone(),
+        )
+        .silent(),
+    );
+    let timing = Timing {
+        tick: Duration::from_millis(100),
+        journal_every: Duration::from_millis(100),
+        config_every: Duration::from_millis(100),
+        inbox_wait_secs: 0,
+        session_lookup_grace: Duration::from_millis(100),
+        session_start_grace: Duration::from_millis(300),
+        exit_grace: Duration::from_secs(30),
+        stop_grace: Duration::from_secs(30),
+        usage_every: Duration::from_secs(60),
+        profile_every: Duration::from_millis(100),
+        proxy_every: Duration::from_secs(60),
+        min_backoff: Duration::from_millis(100),
+        max_backoff: Duration::from_secs(1),
+    };
+    let worker = Worker::new(
+        host.clone(),
+        Arc::new(FakeMachine),
+        http_client::Client::new_for_test(),
+        homes.clone(),
+        profile_target(dir.path(), &homes),
+        timing,
+        "test".to_owned(),
+    );
+    let runner = worker.clone();
+    std::thread::spawn(move || futures::executor::block_on(runner.run()));
+
+    wait_for("failed", || {
+        log.lock()
+            .iter()
+            .any(|(path, body)| path.contains("/s-silent/status") && body.contains("\"failed\""))
+    });
+    let (_, failed) = log
+        .lock()
+        .iter()
+        .find(|(path, body)| path.contains("/s-silent/status") && body.contains("\"failed\""))
+        .cloned()
+        .unwrap();
+    let failed: serde_json::Value = serde_json::from_str(&failed).unwrap();
+    assert!(
+        failed["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("не начал работу"),
+        "{failed}"
+    );
+
+    // The trust of the worktree was written before the tab, and the owner's own file is whole.
+    let worktree = root
+        .join("SteepMans")
+        .join("demo")
+        .join(".worktrees")
+        .join("s-silent");
+    let claude_json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&homes.claude_json).unwrap()).unwrap();
+    assert_eq!(claude_json["oauthAccount"]["accountUuid"], "u-1");
+    assert_eq!(
+        claude_json["projects"]["C:/work/other/bot"]["hasTrustDialogAccepted"],
+        true
+    );
+    for key in provider::claude::project_keys(&worktree) {
+        assert_eq!(
+            claude_json["projects"][&key]["hasTrustDialogAccepted"], true,
+            "{key} missing in {claude_json}"
+        );
+    }
 }
