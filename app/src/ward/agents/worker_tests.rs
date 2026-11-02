@@ -1531,6 +1531,8 @@ fn preparing_session(root: &Path, transcript: &Path, plan_approval: bool) -> Ses
         vault_dir: root.join("vault"),
         limit: Duration::from_secs(600),
         last_error: None,
+        waited: Duration::ZERO,
+        asked_at: None,
     });
     session.status = SessionStatus::Preparing;
     session.runner_pid = Some(RUNNER_PID);
@@ -1899,6 +1901,49 @@ fn an_executor_waiting_for_a_tool_is_left_alone() {
     assert_eq!(session.status, SessionStatus::Running);
     assert!(machine.stopped.lock().is_empty());
     assert!(session.outbox.is_empty());
+}
+
+/// The orchestrator ended its turn with questions in plain text and no plan: the session calls
+/// the owner, the clock of the preparation stands while it waits, and the owner's answer puts it
+/// back to preparing, the only status the service takes a plan in.
+#[test]
+fn an_orchestrator_with_questions_waits_for_the_owner_without_the_clock() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("agents-work");
+    let transcript = dir.path().join("orchestrator.jsonl");
+    let questions = assistant_line(
+        "{\"type\":\"text\",\"text\":\"Перед планом нужны ответы: 1. Какая база? 2. Нужен ли тест?\"}",
+    );
+    std::fs::write(&transcript, format!("{PROMPT_LINE}{questions}")).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let worker = offline_worker(dir.path(), machine.clone(), idle_timing());
+    let mut session = preparing_session(&root, &transcript, false);
+    session.prepare.as_mut().unwrap().limit = Duration::from_millis(1000);
+
+    futures::executor::block_on(worker.advance(&mut session));
+    std::thread::sleep(Duration::from_millis(300));
+    futures::executor::block_on(worker.advance(&mut session));
+    assert_eq!(session.status, SessionStatus::Blocked);
+    let blocked = session.outbox.back().unwrap();
+    assert_eq!(blocked.reason.as_deref(), Some(REASON_OWNER_QUESTION));
+    assert!(machine.stopped.lock().is_empty());
+
+    // The owner takes longer than the whole limit: the preparation does not fail meanwhile.
+    std::thread::sleep(Duration::from_millis(1200));
+    futures::executor::block_on(worker.advance(&mut session));
+    assert!(!session.is_done(), "{:?}", session.message);
+    assert_eq!(session.status, SessionStatus::Blocked);
+
+    // The answer comes: back to preparing, with the waiting left out of the limit.
+    std::fs::write(
+        &transcript,
+        format!("{PROMPT_LINE}{questions}{PROMPT_LINE}"),
+    )
+    .unwrap();
+    futures::executor::block_on(worker.advance(&mut session));
+    assert!(!session.is_done(), "{:?}", session.message);
+    assert_eq!(session.status, SessionStatus::Preparing);
+    assert!(session.prepare.as_ref().unwrap().waited >= Duration::from_millis(1200));
 }
 
 /// The agent asked the owner something and waits: the session calls the owner instead of being

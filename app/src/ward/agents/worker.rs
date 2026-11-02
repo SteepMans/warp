@@ -426,6 +426,10 @@ struct PrepareRun {
     limit: Duration,
     /// Why the last `plan.json` could not be read, for the message of a failed preparation.
     last_error: Option<String>,
+    /// The time the orchestrator stood waiting for the owner's answer: the limit measures work.
+    waited: Duration,
+    /// Since when it waits now, while its question is open.
+    asked_at: Option<Instant>,
 }
 
 struct Session {
@@ -1281,7 +1285,7 @@ impl Worker {
             self.start_resumed(assignment, provider, resume).await;
             return;
         }
-        if prepare::is_needed(&assignment) {
+        if prepare::runs(&assignment, decision.vault.is_some()) {
             let Some(vault) = decision.vault.clone() else {
                 log::warn!("Ward agents: no vault for the preparation of {session_id}");
                 return;
@@ -1434,6 +1438,8 @@ impl Worker {
             vault_dir: vault.dir(),
             limit,
             last_error: None,
+            waited: Duration::ZERO,
+            asked_at: None,
         });
         match self.launch_orchestrator(&mut session, &vault).await {
             Ok(pane_uuid) => {
@@ -1702,6 +1708,8 @@ impl Worker {
             vault_dir: PathBuf::from(&prepare.vault_dir),
             limit: Duration::from_secs(prepare.limit_secs),
             last_error: None,
+            waited: Duration::ZERO,
+            asked_at: None,
         });
         // There is a state file for this session; the tick that finds the session over removes
         // it, whether this run ever wrote it or not.
@@ -2253,9 +2261,36 @@ impl Worker {
             self.fail_preparation(session, MESSAGE_NOT_STARTED);
             return;
         }
-        if launched_at.elapsed() >= limit {
+        // A question to the owner stops the clock of the preparation until the answer comes.
+        let waiting = session.status == SessionStatus::Blocked;
+        let waited = session.prepare.as_mut().map_or(Duration::ZERO, |prepare| {
+            match (waiting, prepare.asked_at) {
+                (true, None) => prepare.asked_at = Some(Instant::now()),
+                (false, Some(at)) => {
+                    prepare.waited += at.elapsed();
+                    prepare.asked_at = None;
+                }
+                _ => {}
+            }
+            prepare.waited
+        });
+        if !waiting && launched_at.elapsed().saturating_sub(waited) >= limit {
             self.fail_preparation(session, MESSAGE_PREPARE_TOO_LONG);
             return;
+        }
+        // The orchestrator ended its turn without a plan and is still there: its last words are
+        // questions for the owner, written as text or with the question tool alike.
+        if self.gone_quiet(session) {
+            self.read_journal(session);
+            if self.gone_quiet(session)
+                && session.provider.last_turn(&session.journal.tail()) != LastTurn::Working
+                && session.status != SessionStatus::Blocked
+            {
+                self.ask_owner(session);
+                if let Some(prepare) = session.prepare.as_mut() {
+                    prepare.asked_at = Some(Instant::now());
+                }
+            }
         }
         let gone = session
             .runner_pid
@@ -2828,6 +2863,15 @@ impl Worker {
                 request.reason = Some(REASON_USAGE_LIMIT.to_owned());
                 request.resets_at = hit.resets_at.map(provider::rfc3339);
                 request.message = Some(MESSAGE_USAGE_LIMIT.to_owned());
+                session.set_status(request);
+            }
+            // An orchestrator that got its answer goes back to preparing: the service takes
+            // the plan only from there.
+            (SessionStatus::Blocked | SessionStatus::Review, None)
+                if matches!(session.phase, Phase::Prepare { .. }) =>
+            {
+                let mut request = session.status_request(SessionStatus::Preparing);
+                request.message = Some(MESSAGE_PREPARING.to_owned());
                 session.set_status(request);
             }
             (SessionStatus::Blocked | SessionStatus::Review, None) => {

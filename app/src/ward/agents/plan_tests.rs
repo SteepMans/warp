@@ -40,8 +40,10 @@ fn a_full_plan_fills_an_empty_assignment() {
     assert!(summary(&plan).contains("run-20261031-001"));
 }
 
+/// The repository, the branch and the model given with the assignment stay; the prompt is the
+/// orchestrator's, written from the owner's brief, and so is a base branch it checked.
 #[test]
-fn the_assignment_wins_over_the_plan() {
+fn the_assignment_wins_over_the_plan_but_the_prompt_is_the_plan_s() {
     let plan = parse(
         r#"{"repo":"https://github.com/SteepMans/other.git","baseBranch":"main",
             "branch":"feature/plan","prompt":"промпт плана","provider":"codex",
@@ -59,10 +61,25 @@ fn the_assignment_wins_over_the_plan() {
     apply(&plan, &mut assignment).unwrap();
     assert_eq!(assignment.repo, "https://github.com/SteepMans/warp.git");
     assert_eq!(assignment.branch, "feature/4639-given");
-    assert_eq!(assignment.prompt, "промпт назначения");
+    assert_eq!(assignment.prompt, "промпт плана");
     assert_eq!(assignment.model.as_deref(), Some("claude-opus-5-5"));
     // The base branch was not in the assignment, so it comes from the plan.
     assert_eq!(assignment.base_branch, "main");
+
+    // A given base branch the repository does not have is corrected by the plan; an empty
+    // field of the plan leaves the given one.
+    let mut assignment = Assignment {
+        base_branch: "main".to_owned(),
+        prompt: "постановка".to_owned(),
+        ..blank()
+    };
+    let plan = parse(r#"{"baseBranch":"master"}"#).unwrap();
+    apply(&plan, &mut assignment).unwrap_err();
+    assert_eq!(assignment.base_branch, "master");
+    assert_eq!(assignment.prompt, "постановка");
+    let plan = parse(r#"{"baseBranch":"  "}"#).unwrap();
+    apply(&plan, &mut assignment).unwrap_err();
+    assert_eq!(assignment.base_branch, "master");
     // The agent of the plan is not Ward's business: the service picks it.
     assert_eq!(assignment.provider, "claude");
 }

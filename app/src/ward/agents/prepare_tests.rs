@@ -50,6 +50,22 @@ fn preparation_is_needed_without_a_prompt_a_repository_or_a_branch() {
 }
 
 #[test]
+fn a_machine_with_a_vault_always_prepares() {
+    let full = Assignment {
+        repo: "https://github.com/SteepMans/warp.git".to_owned(),
+        branch: "feature/4639-x".to_owned(),
+        prompt: "сделай".to_owned(),
+        ..assignment()
+    };
+    // The owner's text goes through the orchestrator whenever there is a vault for it.
+    assert!(runs(&full, true));
+    assert!(runs(&assignment(), true));
+    // Without a vault a complete assignment starts the executor as it is.
+    assert!(!runs(&full, false));
+    assert!(runs(&assignment(), false));
+}
+
+#[test]
 fn the_time_limit_comes_from_the_assignment() {
     // An older service says nothing, and zero is not a limit anyone meant.
     assert_eq!(max_duration_min(&assignment()), DEFAULT_MAX_DURATION_MIN);
@@ -153,13 +169,22 @@ fn what_the_assignment_fixed_is_in_the_prompt_as_given() {
     assert!(prompt.contains("- репозиторий: https://github.com/SteepMans/warp.git"));
     assert!(prompt.contains("- базовая ветка: master"));
     assert!(prompt.contains("- модель: claude-opus-5-5"));
-    assert!(prompt.contains("промпт исполнителя уже есть"));
     assert!(prompt.contains("Заданное не переопределять"));
+    assert!(prompt.contains("базовая ветка, которой нет в репозитории"));
     assert!(!prompt.contains("определяешь ты"));
+    // What the owner wrote is a brief to write the prompt from, quoted in full, not a prompt
+    // to pass on.
+    assert!(prompt.contains("## Постановка владельца"));
+    assert!(prompt.contains("```text\nГотовый промпт от менеджера\n```"));
+    assert!(prompt.contains("копировать её в `prompt` как есть нельзя"));
+    assert!(!prompt.contains("не переписывай"));
+    // The orchestrator asks the owner when the answer changes the work.
+    assert!(prompt.contains("спроси его"));
     // The example of the plan repeats what is given, and `auto` is not a provider for it.
     assert!(prompt.contains("\"repo\": \"https://github.com/SteepMans/warp.git\""));
     assert!(prompt.contains("\"baseBranch\": \"master\""));
-    assert!(prompt.contains("\"prompt\": \"Готовый промпт от менеджера\""));
+    assert!(prompt.contains("\"prompt\": \"<полный промпт исполнителю>\""));
+    assert!(!prompt.contains("\"prompt\": \"Готовый промпт от менеджера\""));
     assert!(!prompt.contains("\"provider\": \"auto\""), "{prompt}");
     assert!(prompt.contains("\"provider\": \"claude\""));
     assert!(prompt.contains("15 минут"));
