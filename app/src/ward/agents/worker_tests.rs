@@ -2400,3 +2400,32 @@ fn quitting_leaves_the_sessions_to_the_next_start() {
     let message = request.message.clone().unwrap_or_default();
     assert!(message.contains("продолжится"), "{message}");
 }
+
+#[test]
+fn a_saved_registration_still_reads_the_installed_agents() {
+    let dir = tempfile::tempdir().unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let (worker, host) = offline_worker_with_host(dir.path(), machine, idle_timing(), |host| {
+        *host.registration.lock() = Some(Registration {
+            fingerprint: host.config.fingerprint(),
+            worker_id: "w-1".to_owned(),
+            token: "agw_token".to_owned(),
+            repos: Some(Vec::new()),
+        });
+        host
+    });
+    let config = host.config.clone();
+
+    // The saved registration is reused without a call to the service, and the agents of the
+    // machine are known all the same: without them admission refuses every assignment.
+    futures::executor::block_on(worker.ensure_registered(&config)).unwrap();
+    let state = worker.state.lock();
+    assert!(state.registration.is_some());
+    for provider in provider::all() {
+        assert!(
+            state.agents.contains_key(provider.id()),
+            "{} is missing",
+            provider.id()
+        );
+    }
+}

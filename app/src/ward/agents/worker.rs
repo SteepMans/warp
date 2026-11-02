@@ -1023,6 +1023,10 @@ impl Worker {
             return Ok(());
         }
         let repos = Self::repos(config);
+        // The installed agents are read on every start, saved registration or not: admission
+        // checks them, and an empty list refuses every assignment as "not installed".
+        let passport = self.passport(config, repos.clone());
+        self.state.lock().agents = passport.agents.clone();
         if let Some(saved) = self.host.load_registration().await
             && saved.fingerprint == fingerprint
             && saved.repos.as_ref() == Some(&repos)
@@ -1031,8 +1035,6 @@ impl Worker {
             state.registration = Some(saved);
             return Ok(());
         }
-        let passport = self.passport(config, repos);
-        self.state.lock().agents = passport.agents.clone();
         let request = RegisterRequest {
             key: config.key.clone(),
             name: config.name.clone(),
