@@ -115,7 +115,13 @@ fn the_orchestrator_prompt_carries_the_card_the_playbook_and_the_plan() {
     ] {
         assert!(prompt.contains(field), "{field} is missing from {prompt}");
     }
-    assert!(prompt.contains("feature/4639-<короткий-слаг>"));
+    assert!(prompt.contains("feature/4639-<тема-по-английски>"));
+    // The branch is named by an English topic, never a transliterated card title.
+    assert!(prompt.contains("`<тип>/4639-<тема>`"), "{prompt}");
+    assert!(prompt.contains("2-4 слова в kebab-case"));
+    assert!(prompt.contains("Транслитерировать русские слова"));
+    assert!(prompt.contains("`feature/4639-restart-tech-channel-notify`"));
+    assert!(!prompt.contains("слаг"));
     // Nothing is given, so the orchestrator decides everything.
     assert!(prompt.contains("определяешь ты"));
     // The boundaries.
