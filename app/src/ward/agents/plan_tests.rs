@@ -65,6 +65,8 @@ fn the_assignment_wins_over_the_plan_but_the_prompt_is_the_plan_s() {
     assert_eq!(assignment.model.as_deref(), Some("claude-opus-5-5"));
     // The base branch was not in the assignment, so it comes from the plan.
     assert_eq!(assignment.base_branch, "main");
+    // The agent of the plan is not Ward's business: the service picks it.
+    assert_eq!(assignment.provider, "claude");
 
     // A given base branch the repository does not have is corrected by the plan; an empty
     // field of the plan leaves the given one.
@@ -80,8 +82,6 @@ fn the_assignment_wins_over_the_plan_but_the_prompt_is_the_plan_s() {
     let plan = parse(r#"{"baseBranch":"  "}"#).unwrap();
     apply(&plan, &mut assignment).unwrap_err();
     assert_eq!(assignment.base_branch, "master");
-    // The agent of the plan is not Ward's business: the service picks it.
-    assert_eq!(assignment.provider, "claude");
 }
 
 #[test]
