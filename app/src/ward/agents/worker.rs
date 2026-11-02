@@ -338,8 +338,7 @@ const MESSAGE_NO_SESSION_ID: &str = "Сессия запущена, id сесс�
 const MESSAGE_NOT_STARTED: &str =
     "Агент не начал работу: ждёт ответа в терминале (вопрос о доверии к папке?)";
 const MESSAGE_USAGE_LIMIT: &str = "Агент упёрся в лимит подписки";
-const MESSAGE_IDLE_ANSWER: &str =
-    "Работа готова: агент выдал финальный ответ и замолчал, Ward закрыл его сессию";
+const MESSAGE_IDLE_ANSWER: &str = "Работа готова: агент выдал финальный ответ и ждёт вас. Сессия открыта: можно написать в неё или остановить";
 const MESSAGE_OWNER_QUESTION: &str = "Агент задал вопрос и ждёт ответа владельца";
 const MESSAGE_PREPARING: &str = "Подготовка: оркестратор собирает досье и промпт";
 const MESSAGE_PREPARE_TOO_LONG: &str = "Подготовка не уложилась в prepareMaxDurationMin";
@@ -1505,7 +1504,9 @@ impl Worker {
         let active_sessions = state
             .sessions
             .iter()
-            .filter(|session| !session.is_done())
+            // A session that answered waits for the owner with an idle agent: it keeps its tab,
+            // but not the slot, or two finished sessions would block the machine for good.
+            .filter(|session| !session.is_done() && session.status != SessionStatus::Review)
             .count()
             + state
                 .beats
@@ -2561,19 +2562,23 @@ impl Worker {
                 .is_some_and(|at| at.elapsed() >= self.timing.idle_after_answer)
     }
 
-    /// The agent gave its closing answer and went quiet without ending its process: the work is
-    /// done, so Ward ends the processes and reports the session as ready for review, instead of
-    /// holding the slot of the machine until `maxDurationMin` runs out. Not a failure and not a
-    /// stop of the owner's: the message says the result is there to look at.
-    fn finish_answered(&self, session: &mut Session) {
+    /// The agent gave its closing answer and went quiet without ending its process. The work
+    /// looks done, but the session is not over: only the owner ends it. The agent and its tab
+    /// stay as they are, so a `message` command still reaches the tab, the agent can go on by
+    /// itself (a background job it was waiting for), and the next lines of the transcript put
+    /// the session back to `running` (see [`Self::read_journal`]). The slot of the machine is
+    /// free meanwhile: a session waiting for the owner does not hold one.
+    fn answered(&self, session: &mut Session) {
+        if session.status == SessionStatus::Review {
+            return;
+        }
         log::info!(
-            "Ward agents: session {} answered and went quiet, taking the work for done",
+            "Ward agents: session {} answered and waits for the owner",
             session.assignment.session_id
         );
-        self.stop_agent(session);
         let mut request = session.status_request(SessionStatus::Review);
         request.message = Some(MESSAGE_IDLE_ANSWER.to_owned());
-        finish(session, request);
+        session.set_status(request);
     }
 
     /// The agent ended its turn with a question for the owner: the session is not over, it
@@ -2642,7 +2647,14 @@ impl Worker {
         }
 
         let max_duration = Duration::from_secs(session.assignment.max_duration_min * 60);
+        // The limit measures work, not waiting: a session that answered or asked the owner
+        // stands still until the owner comes, and ending it by the clock loses that answer.
+        let waits_for_owner = matches!(
+            session.status,
+            SessionStatus::Review | SessionStatus::Blocked
+        );
         if session.stop.is_none()
+            && !waits_for_owner
             && session.assignment.max_duration_min > 0
             && session.started.elapsed() >= max_duration
         {
@@ -2690,10 +2702,7 @@ impl Worker {
             let turn = session.provider.last_turn(&session.journal.tail());
             if self.gone_quiet(session) {
                 match turn {
-                    LastTurn::Answered => {
-                        self.finish_answered(session);
-                        return;
-                    }
+                    LastTurn::Answered => self.answered(session),
                     LastTurn::Asked => self.ask_owner(session),
                     LastTurn::Working => {}
                 }
@@ -2747,7 +2756,7 @@ impl Worker {
                 request.message = Some(MESSAGE_USAGE_LIMIT.to_owned());
                 session.set_status(request);
             }
-            (SessionStatus::Blocked, None) => {
+            (SessionStatus::Blocked | SessionStatus::Review, None) => {
                 let mut request = session.status_request(SessionStatus::Running);
                 request.message = Some(MESSAGE_RUNNING.to_owned());
                 session.set_status(request);

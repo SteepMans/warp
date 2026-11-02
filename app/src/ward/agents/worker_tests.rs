@@ -1744,11 +1744,11 @@ fn assistant_line(blocks: &str) -> String {
 const PROMPT_LINE: &str =
     "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"сделай\"}}\n";
 
-/// The agent answered and went quiet without ending its process: the work is done, so the
-/// session is closed as ready for review, the processes go and the slot of the machine is free
-/// long before `maxDurationMin`.
+/// The agent answered and went quiet without ending its process: the work waits for the owner.
+/// The session is reported as review, but it is not over — the agent, its tab and the ability
+/// to write into it stay, and only the owner ends it.
 #[test]
-fn an_executor_that_answered_and_went_quiet_ends_as_review() {
+fn an_executor_that_answered_and_went_quiet_waits_for_the_owner() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("agents-work");
     let transcript = dir.path().join("executor.jsonl");
@@ -1766,22 +1766,39 @@ fn an_executor_that_answered_and_went_quiet_ends_as_review() {
 
     std::thread::sleep(Duration::from_millis(300));
     futures::executor::block_on(worker.advance(&mut session));
-    assert!(session.is_done());
+    assert!(
+        !session.is_done(),
+        "the owner ends the session, not the clock"
+    );
     assert_eq!(session.status, SessionStatus::Review);
     let message = session.message.clone().unwrap_or_default();
     assert!(message.contains("Работа готова"), "{message}");
-    // Neither a failure nor a stop of the owner's, and no exit code was invented.
+    // Neither a failure nor a stop of the owner's, and the agent is left running.
     let request = session.outbox.back().unwrap();
     assert_eq!(request.status, SessionStatus::Review);
     assert_eq!(request.reason, None);
     assert_eq!(request.exit_code, None);
-    assert_eq!(*machine.stopped.lock(), vec![EXECUTOR_PID]);
+    assert!(machine.stopped.lock().is_empty());
     // The journal was read to the end: the closing answer reaches the service.
     assert!(
         session.journal.tail().contains("PR открыт"),
         "{}",
         session.journal.tail()
     );
+
+    // The status is reported once, however long the agent stays quiet.
+    let reported = session.outbox.len();
+    std::thread::sleep(Duration::from_millis(300));
+    futures::executor::block_on(worker.advance(&mut session));
+    assert_eq!(session.outbox.len(), reported);
+    assert_eq!(session.status, SessionStatus::Review);
+
+    // The agent went on by itself (a background job it was waiting for): the session runs again.
+    let more = assistant_line("{\"type\":\"text\",\"text\":\"Заливка закончилась\"}");
+    std::fs::write(&transcript, format!("{PROMPT_LINE}{answer}{more}")).unwrap();
+    futures::executor::block_on(worker.advance(&mut session));
+    assert_eq!(session.status, SessionStatus::Running);
+    assert!(!session.is_done());
 }
 
 /// The transcript stands still in the middle of a turn: the agent called a tool and waits for
