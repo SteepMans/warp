@@ -74,3 +74,59 @@ fn same_path_ignores_slashes_and_case_on_windows() {
         assert!(!same_path("/A/b", Path::new("/a/b")));
     }
 }
+
+/// What a line of the chat keeps of a long reply and of the arguments of a tool call.
+#[test]
+fn a_line_of_the_chat_is_cut_and_collapsed() {
+    assert_eq!(cut("коротко", 10), "коротко");
+    // The cut is counted in characters, so it never lands inside one.
+    assert_eq!(cut("абвгд", 3), "абв…");
+    assert_eq!(one_line("  две\n\tстроки  ", 40), "две строки");
+    assert_eq!(one_line("абвгде", 3), "абв…");
+
+    // The field that says what a tool did wins over the whole arguments object.
+    let input = serde_json::json!({"command": "cargo  test\n--lib", "timeout": 600});
+    assert_eq!(preview(&input), "cargo test --lib");
+    // Nothing to single out: the arguments themselves, on one line.
+    let other = serde_json::json!({"a": 1});
+    assert_eq!(preview(&other), "{\"a\":1}");
+    assert_eq!(preview(&serde_json::Value::Null), "");
+
+    let said = tool_said("  Bash  ", Some(&input));
+    assert_eq!(said.voice, Voice::Tool);
+    assert_eq!(said.text, "Bash: cargo test --lib");
+    assert_eq!(tool_said("Read", None).text, "Read");
+
+    // A reply longer than one line of the chat may hold is cut, not dropped.
+    let long = "а".repeat(MAX_SAID_CHARS + 5);
+    let said = Said::new(Voice::Agent, &long);
+    assert_eq!(said.text.chars().count(), MAX_SAID_CHARS + 1);
+    assert!(said.text.ends_with('…'));
+}
+
+/// Ward's own markers of a journal are told from the replies of the agent, whichever provider
+/// wrote the transcript around them.
+#[test]
+fn wards_own_markers_are_not_replies() {
+    let journal = concat!(
+        "{\"type\":\"ward.role\",\"role\":\"orchestrator\",\"sessionId\":\"s-1\"}\n",
+        "{\"type\":\"ward.restart\",\"role\":\"executor\",\"sessionId\":\"s-1\"}\n",
+        "{\"type\":\"ward.something-new\"}\n",
+    );
+    for provider in all() {
+        let chat = chat(provider, journal);
+        let lines: Vec<(Voice, &str)> = chat
+            .iter()
+            .map(|said| (said.voice, said.text.as_str()))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                (Voice::Ward, "Дальше транскрипт: orchestrator"),
+                (Voice::Ward, "Ward перезапустился и подхватил сессию"),
+            ],
+            "{}",
+            provider.id()
+        );
+    }
+}

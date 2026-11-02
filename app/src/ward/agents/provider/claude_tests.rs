@@ -378,3 +378,47 @@ fn the_last_turn_tells_an_answer_from_a_tool_call_and_from_a_question() {
     assert_eq!(parse_last_turn(""), LastTurn::Working);
     assert_eq!(parse_last_turn("not json\n"), LastTurn::Working);
 }
+
+/// The same entries the last turn is read from, read as the chat: the owner, the agent, one
+/// line per tool call, and an error of the API as Ward's line instead of an answer.
+#[test]
+fn the_chat_reads_the_owner_the_agent_and_its_tools() {
+    let said = |line: &str| {
+        parse_said(&serde_json::from_str(line).unwrap())
+            .into_iter()
+            .map(|said| (said.voice, said.text))
+            .collect::<Vec<_>>()
+    };
+
+    // The owner's own message is one string, not blocks.
+    assert_eq!(
+        said(r#"{"type":"user","message":{"role":"user","content":"сделай"}}"#),
+        [(Voice::Owner, "сделай".to_owned())]
+    );
+    // Text and a tool call in one message: two lines, in the order they were written.
+    assert_eq!(
+        said(&assistant(
+            r#"{"type":"thinking","thinking":"..."},{"type":"text","text":"Сейчас проверю"},{"type":"tool_use","name":"Bash","input":{"command":"cargo test"}}"#
+        )),
+        [
+            (Voice::Agent, "Сейчас проверю".to_owned()),
+            (Voice::Tool, "Bash: cargo test".to_owned()),
+        ]
+    );
+    // A tool result, a summary and a system line say nothing to a reader.
+    assert!(
+        said(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1"}]}}"#
+        )
+        .is_empty()
+    );
+    assert!(said(r#"{"type":"summary","summary":"итог"}"#).is_empty());
+    assert!(said(r#"{"type":"system","content":"hook"}"#).is_empty());
+    // An error of the API is Ward's line: the agent answered nothing.
+    assert_eq!(
+        said(
+            r#"{"type":"assistant","isApiErrorMessage":true,"message":{"content":[{"type":"text","text":"Overloaded"}]}}"#
+        ),
+        [(Voice::Ward, "Ошибка API агента: Overloaded".to_owned())]
+    );
+}

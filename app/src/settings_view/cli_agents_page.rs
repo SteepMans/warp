@@ -19,6 +19,7 @@ use warpui::elements::{
     ParentElement, Radius, Shrinkable,
 };
 use warpui::keymap::ContextPredicate;
+use warpui::ui_components::button::ButtonVariant;
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
 use warpui::ui_components::switch::SwitchStateHandle;
 use warpui::{
@@ -50,6 +51,7 @@ use crate::util::bindings;
 use crate::view_components::dropdown::DropdownAction;
 use crate::view_components::{Dropdown, SubmittableTextInput, SubmittableTextInputEvent};
 use crate::ward::agents as ward_agents;
+use crate::ward::agents::sessions as ward_sessions;
 use crate::ward::chimney as ward_chimney;
 use crate::ward::claude_launch as ward_claude_launch;
 use crate::ward::claude_usage as ward_claude_usage;
@@ -82,6 +84,12 @@ pub struct CLIAgentsPageView {
     agents_remove_key_mouse_state: MouseStateHandle,
     /// One per session row link (Remote Control).
     agents_link_mouse_states: Vec<MouseStateHandle>,
+    /// Ward (OSS build) session screen: what to type into the open session.
+    agents_chat_editor: ViewHandle<SubmittableTextInput>,
+    /// One per session row of the screen ("Open").
+    agents_session_mouse_states: Vec<MouseStateHandle>,
+    agents_session_back_mouse_state: MouseStateHandle,
+    agents_session_refresh_mouse_state: MouseStateHandle,
 }
 
 impl CLIAgentsPageView {
@@ -154,6 +162,16 @@ impl CLIAgentsPageView {
                 ctx.notify()
             });
         }
+        let agents_chat_editor = Self::create_agents_chat_editor(ctx);
+        if ctx.has_singleton_model::<ward_sessions::SessionsModel>() {
+            // The list, the chat and the state of a message all come from fetches.
+            ctx.subscribe_to_model(
+                &ward_sessions::SessionsModel::handle(ctx),
+                |_, _, _, ctx| ctx.notify(),
+            );
+            // The list is there when the page opens, without waiting for a click.
+            ward_sessions::refresh(ctx);
+        }
 
         Self {
             page: Self::build_page(),
@@ -178,7 +196,34 @@ impl CLIAgentsPageView {
             agents_link_mouse_states: (0..AGENTS_MAX_SESSION_ROWS)
                 .map(|_| Default::default())
                 .collect(),
+            agents_chat_editor,
+            agents_session_mouse_states: (0..AGENTS_MAX_SESSION_ROWS)
+                .map(|_| Default::default())
+                .collect(),
+            agents_session_back_mouse_state: Default::default(),
+            agents_session_refresh_mouse_state: Default::default(),
         }
+    }
+
+    /// What to type into the open session. Enter sends it; the text goes out as a `message`
+    /// command, which the service hands to the worker of that session, which types it into the
+    /// tab of its agent.
+    fn create_agents_chat_editor(ctx: &mut ViewContext<Self>) -> ViewHandle<SubmittableTextInput> {
+        let editor = ctx.add_typed_action_view(|ctx| {
+            let mut input = SubmittableTextInput::new(ctx);
+            input.set_placeholder_text("message for the agent of this session", ctx);
+            input
+        });
+        update_editor_interaction_state(editor.as_ref(ctx).editor().clone(), true, ctx);
+        ctx.subscribe_to_view(&editor, |_, _, event, ctx| match event {
+            // The input clears itself on submit, so the next message starts empty.
+            SubmittableTextInputEvent::Submit(text) => {
+                ward_sessions::send(text, ctx);
+                ctx.notify();
+            }
+            SubmittableTextInputEvent::Escape => ctx.emit(CLIAgentsPageEvent::FocusModal),
+        });
+        editor
     }
 
     /// Address, key, worker name, root and clone search inputs of the agents worker. Each saves
@@ -385,6 +430,7 @@ impl CLIAgentsPageView {
             Box::new(ClaudeNoFlickerWidget::default()),
             Box::new(ChimneyWidget::default()),
             Box::new(AgentsWorkerWidget::default()),
+            Box::new(AgentsSessionsWidget),
         ];
         PageType::new_uncategorized(widgets, Some(PageTitle::new(PAGE_TITLE)))
     }
@@ -509,6 +555,12 @@ pub enum CLIAgentsPageAction {
     ToggleAgentsTakeTasks,
     /// Ward: removes the agents connection key (and the worker token) from the secure storage.
     RemoveAgentsKey,
+    /// Ward: fetches the list of sessions of every machine again.
+    RefreshAgentsSessions,
+    /// Ward: opens the chat of a session, by its id in the service.
+    OpenAgentsSession(String),
+    /// Ward: back from the chat of a session to the list.
+    CloseAgentsSession,
 }
 
 impl TypedActionView for CLIAgentsPageView {
@@ -613,6 +665,18 @@ impl TypedActionView for CLIAgentsPageView {
             }
             CLIAgentsPageAction::RemoveAgentsKey => {
                 ward_agents::set_key("", ctx);
+                ctx.notify();
+            }
+            CLIAgentsPageAction::RefreshAgentsSessions => {
+                ward_sessions::refresh(ctx);
+                ctx.notify();
+            }
+            CLIAgentsPageAction::OpenAgentsSession(session_id) => {
+                ward_sessions::open(session_id, ctx);
+                ctx.notify();
+            }
+            CLIAgentsPageAction::CloseAgentsSession => {
+                ward_sessions::close(ctx);
                 ctx.notify();
             }
         }
@@ -1308,30 +1372,8 @@ impl SettingsWidget for ChimneyWidget {
         if !self.should_render(app) {
             return Empty::new().finish();
         }
-        let label = |text: String| {
-            appearance
-                .ui_builder()
-                .span(text)
-                .with_style(UiComponentStyles {
-                    font_size: Some(CONTENT_FONT_SIZE),
-                    ..Default::default()
-                })
-                .build()
-                .finish()
-        };
-        let description = |text: String| {
-            appearance
-                .ui_builder()
-                .paragraph(text)
-                .with_style(UiComponentStyles {
-                    font_size: Some(appearance.ui_font_size()),
-                    font_color: Some(styles::description_font_color(true, app).into()),
-                    margin: Some(Coords::default().top(2.).bottom(8.)),
-                    ..Default::default()
-                })
-                .build()
-                .finish()
-        };
+        let label = |text: String| agents_label(text, appearance);
+        let description = |text: String| agents_description(text, appearance, app);
 
         let board_id = ward_chimney::board_id(app);
         let token_source = ward_chimney::token_source(app);
@@ -1342,10 +1384,13 @@ impl SettingsWidget for ChimneyWidget {
                 "Ward signs in with these, like chimney-mcp, and renews the session itself. \
                  CHIMNEY_EMAIL and CHIMNEY_PASSWORD work as fallbacks."
             }
-            (ward_chimney::TokenSource::SecureStorage, ward_chimney::TokenSource::SecureStorage) => {
-                "The email and password are saved in the secure storage."
+            (
+                ward_chimney::TokenSource::SecureStorage,
+                ward_chimney::TokenSource::SecureStorage,
+            ) => "The email and password are saved in the secure storage.",
+            _ => {
+                "Using CHIMNEY_EMAIL / CHIMNEY_PASSWORD from the environment where not saved here."
             }
-            _ => "Using CHIMNEY_EMAIL / CHIMNEY_PASSWORD from the environment where not saved here.",
         };
         let token_status = match token_source {
             ward_chimney::TokenSource::SecureStorage => {
@@ -1387,27 +1432,28 @@ impl SettingsWidget for ChimneyWidget {
                 })
                 .map(|err| format!("Last request: {}.", err.message()))
                 .or_else(|| {
-                    model.board(board_id).map(|board| {
-                        format!("Connected to board \u{201c}{}\u{201d}.", board.title)
-                    })
+                    model
+                        .board(board_id)
+                        .map(|board| format!("Connected to board \u{201c}{}\u{201d}.", board.title))
                 })
         });
-        let remove_row = |text: &str, mouse_state: MouseStateHandle, action: CLIAgentsPageAction| {
-            let button = appearance
-                .ui_builder()
-                .close_button(16., mouse_state)
-                .build()
-                .on_click(move |ctx, _, _| {
-                    ctx.dispatch_typed_action(action.clone());
-                })
-                .finish();
-            Flex::row()
-                .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                .with_spacing(6.)
-                .with_child(label(text.to_owned()))
-                .with_child(button)
-                .finish()
-        };
+        let remove_row =
+            |text: &str, mouse_state: MouseStateHandle, action: CLIAgentsPageAction| {
+                let button = appearance
+                    .ui_builder()
+                    .close_button(16., mouse_state)
+                    .build()
+                    .on_click(move |ctx, _, _| {
+                        ctx.dispatch_typed_action(action.clone());
+                    })
+                    .finish();
+                Flex::row()
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_spacing(6.)
+                    .with_child(label(text.to_owned()))
+                    .with_child(button)
+                    .finish()
+            };
 
         let mut column = Flex::column()
             .with_child(label("Chimney".to_owned()))
@@ -1847,4 +1893,268 @@ impl SettingsWidget for AgentsWorkerWidget {
         }
         column.finish()
     }
+}
+
+/// Chat lines of the open session the screen shows; the oldest beyond this are left out.
+const AGENTS_MAX_CHAT_LINES: usize = 80;
+
+/// The session screen: the sessions of every machine and one of them open with its chat and a
+/// place to write into it.
+///
+/// It is the owner's screen, not the worker's: everything comes from the service through the
+/// Chimney gateway ([`ward_agents::gateway`]), so a session running on another Ward reads and
+/// answers here exactly like one of this machine's — including one this Ward never took.
+struct AgentsSessionsWidget;
+
+impl SettingsWidget for AgentsSessionsWidget {
+    type View = CLIAgentsPageView;
+
+    fn search_terms(&self) -> &str {
+        "agents session chat transcript message journal sessions worker ward remote open write \
+         reply answer"
+    }
+
+    fn should_render(&self, _app: &AppContext) -> bool {
+        crate::features::is_fork_oss()
+    }
+
+    fn render(
+        &self,
+        view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        if !self.should_render(app) {
+            return Empty::new().finish();
+        }
+        let label = |text: String| agents_label(text, appearance);
+        let description = |text: String| agents_description(text, appearance, app);
+        let mut column = Flex::column().with_child(label("Session chat".to_owned()));
+        let Some(model) = ward_sessions::model(app) else {
+            column.add_child(description(
+                "The session screen is off in this build.".to_owned(),
+            ));
+            return column.finish();
+        };
+        column.add_child(description(
+            "Every session of every machine, as the Agents screen of Chimney sees them: the \
+             chat is the journal of the session and a message is typed into the agent by the \
+             worker that runs it. Needs the Chimney credentials above."
+                .to_owned(),
+        ));
+        match model.open_session() {
+            Some(open) => render_open_session(view, open, &mut column, appearance, app),
+            None => render_session_list(view, model, &mut column, appearance, app),
+        }
+        column.finish()
+    }
+}
+
+/// The list: one row per session, newest first, each with a button that opens its chat.
+fn render_session_list(
+    view: &CLIAgentsPageView,
+    model: &ward_sessions::SessionsModel,
+    column: &mut Flex,
+    appearance: &Appearance,
+    app: &AppContext,
+) {
+    column.add_child(agents_text_button(
+        if model.is_listing() {
+            "Refreshing...".to_owned()
+        } else {
+            "Refresh".to_owned()
+        },
+        view.agents_session_refresh_mouse_state.clone(),
+        CLIAgentsPageAction::RefreshAgentsSessions,
+        appearance,
+    ));
+    if let Some(err) = model.list_error() {
+        column.add_child(agents_description(
+            format!("The list of sessions is not there: {}", err.message()),
+            appearance,
+            app,
+        ));
+        return;
+    }
+    let sessions = model.sessions();
+    if sessions.is_empty() {
+        column.add_child(agents_description(
+            if model.is_listing() {
+                "Loading...".to_owned()
+            } else {
+                "No sessions yet.".to_owned()
+            },
+            appearance,
+            app,
+        ));
+        return;
+    }
+    for (session, mouse_state) in sessions
+        .iter()
+        .take(AGENTS_MAX_SESSION_ROWS)
+        .zip(view.agents_session_mouse_states.iter())
+    {
+        let mut row = format!(
+            "{} \u{2014} {}",
+            session.label(),
+            session.status.as_deref().unwrap_or("status unknown")
+        );
+        if let Some(worker) = session.worker.as_deref() {
+            row.push_str(&format!(", {worker}"));
+        }
+        if let Some(provider) = session.provider.as_deref() {
+            row.push_str(&format!(", {provider}"));
+        }
+        column.add_child(
+            Flex::row()
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_spacing(8.)
+                .with_child(agents_text_button(
+                    "Open".to_owned(),
+                    mouse_state.clone(),
+                    CLIAgentsPageAction::OpenAgentsSession(session.id.clone()),
+                    appearance,
+                ))
+                .with_child(agents_label(row, appearance))
+                .finish(),
+        );
+    }
+}
+
+/// The open session: its header, its chat and the field that writes into it.
+fn render_open_session(
+    view: &CLIAgentsPageView,
+    open: &ward_sessions::Open,
+    column: &mut Flex,
+    appearance: &Appearance,
+    app: &AppContext,
+) {
+    column.add_child(agents_text_button(
+        "Back to the sessions".to_owned(),
+        view.agents_session_back_mouse_state.clone(),
+        CLIAgentsPageAction::CloseAgentsSession,
+        appearance,
+    ));
+    let summary = &open.summary;
+    let mut header = format!(
+        "{} \u{2014} {}",
+        summary.label(),
+        summary.status.as_deref().unwrap_or("status unknown")
+    );
+    if let Some(worker) = summary.worker.as_deref() {
+        header.push_str(&format!(", {worker}"));
+    }
+    if let Some(branch) = summary
+        .branch
+        .as_deref()
+        .filter(|branch| !branch.is_empty())
+    {
+        header.push_str(&format!(", {branch}"));
+    }
+    column.add_child(agents_label(header, appearance));
+    if let Some(message) = summary.message.as_deref().filter(|text| !text.is_empty()) {
+        column.add_child(agents_description(message.to_owned(), appearance, app));
+    }
+    if let Some(err) = &open.error {
+        column.add_child(agents_description(
+            format!("The chat is not fresh: {}", err.message()),
+            appearance,
+            app,
+        ));
+    }
+
+    let lines: Vec<&ward_agents::provider::Said> = open.chat().collect();
+    if lines.is_empty() {
+        column.add_child(agents_description(
+            if open.loaded {
+                "Nothing in the journal of this session yet.".to_owned()
+            } else {
+                "Loading the chat...".to_owned()
+            },
+            appearance,
+            app,
+        ));
+    }
+    let skipped = lines.len().saturating_sub(AGENTS_MAX_CHAT_LINES);
+    if skipped > 0 {
+        column.add_child(agents_description(
+            format!("{skipped} earlier line(s) are not shown."),
+            appearance,
+            app,
+        ));
+    }
+    for said in lines.into_iter().skip(skipped) {
+        column.add_child(agents_label(said.voice.label().to_owned(), appearance));
+        column.add_child(agents_description(said.text.clone(), appearance, app));
+    }
+
+    if summary.is_live() {
+        column.add_child(agents_label(
+            "Write into the session".to_owned(),
+            appearance,
+        ));
+        column.add_child(ChildView::new(&view.agents_chat_editor).finish());
+        if open.sending {
+            column.add_child(agents_description("Sending...".to_owned(), appearance, app));
+        }
+        if let Some(err) = &open.send_error {
+            column.add_child(agents_description(
+                format!("The message did not go out: {}", err.message()),
+                appearance,
+                app,
+            ));
+        }
+    } else {
+        column.add_child(agents_description(
+            "This session is over: it has no worker to type a message into.".to_owned(),
+            appearance,
+            app,
+        ));
+    }
+}
+
+/// A label line of the Ward sections, the same one every widget there uses.
+fn agents_label(text: String, appearance: &Appearance) -> Box<dyn Element> {
+    appearance
+        .ui_builder()
+        .span(text)
+        .with_style(UiComponentStyles {
+            font_size: Some(CONTENT_FONT_SIZE),
+            ..Default::default()
+        })
+        .build()
+        .finish()
+}
+
+/// A description paragraph of the Ward sections.
+fn agents_description(text: String, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
+    appearance
+        .ui_builder()
+        .paragraph(text)
+        .with_style(UiComponentStyles {
+            font_size: Some(appearance.ui_font_size()),
+            font_color: Some(styles::description_font_color(true, app).into()),
+            margin: Some(Coords::default().top(2.).bottom(8.)),
+            ..Default::default()
+        })
+        .build()
+        .finish()
+}
+
+/// A small text button that dispatches one action of the page.
+fn agents_text_button(
+    text: String,
+    mouse_state: MouseStateHandle,
+    action: CLIAgentsPageAction,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    appearance
+        .ui_builder()
+        .button(ButtonVariant::Secondary, mouse_state)
+        .with_text_label(text)
+        .build()
+        .on_click(move |ctx, _, _| {
+            ctx.dispatch_typed_action(action.clone());
+        })
+        .finish()
 }

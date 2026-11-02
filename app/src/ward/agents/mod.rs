@@ -26,10 +26,16 @@
 //!
 //! Neither the key nor the token is ever logged, and the contents of the machine profile are
 //! not logged either: they carry the secrets of this machine.
+//!
+//! Reading and answering a session is not the worker's business but the owner's, and it is not
+//! limited to this machine: the session screen ([`sessions`]) goes through the owner's own view
+//! of the service ([`gateway`]), so the chat of a session running on another Ward is read and
+//! written the same way as a local one.
 
 pub mod admission;
 pub mod client;
 pub mod contract;
+pub mod gateway;
 pub mod git;
 pub mod journal;
 pub mod launch;
@@ -39,6 +45,7 @@ pub mod prepare;
 pub mod profile;
 pub mod provider;
 pub mod resume;
+pub mod sessions;
 pub mod worker;
 
 use std::path::PathBuf;
@@ -517,6 +524,9 @@ pub fn init(ctx: &mut AppContext) {
     if !crate::features::is_fork_oss() || cfg!(target_family = "wasm") {
         return;
     }
+    // The session screen is the owner's view of every machine's sessions, not of this
+    // worker's, so it is registered whether this Ward takes tasks or not.
+    sessions::init(ctx);
     let Some(homes) = Homes::of_user() else {
         log::warn!("Ward agents: no home directory; the worker is off");
         return;

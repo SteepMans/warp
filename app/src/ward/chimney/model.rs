@@ -106,6 +106,13 @@ pub fn model(app: &AppContext) -> Option<&ChimneyModel> {
         .then(|| ChimneyModel::as_ref(app))
 }
 
+/// The token state every Chimney request of the app shares. A second model with an [`Auth`]
+/// of its own would sign the service account in a second time, so whoever talks to Chimney
+/// takes this one.
+pub fn shared_auth(app: &AppContext) -> Option<Arc<Auth>> {
+    model(app).map(|model| model.auth.clone())
+}
+
 /// Starts polling if a live tab is bound and polling is not running yet.
 pub fn ensure_polling(app: &mut AppContext) {
     if !app.has_singleton_model::<ChimneyModel>() {
