@@ -1970,8 +1970,9 @@ fn an_executor_that_is_still_writing_keeps_its_session() {
     // Now it is quiet after that line too.
     std::thread::sleep(Duration::from_millis(300));
     futures::executor::block_on(worker.advance(&mut session));
-    assert!(session.is_done());
+    assert!(!session.is_done());
     assert_eq!(session.status, SessionStatus::Review);
+    assert!(machine.stopped.lock().is_empty());
 }
 
 /// A launch that never wrote a line is not a finished one: it keeps the old way out, `failed`
