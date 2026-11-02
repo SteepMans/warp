@@ -1,12 +1,23 @@
 # Runs the unit tests of the fork's own modules (`app/src/ward`) on a hosted runner, so the
 # fork does not depend on the upstream `Warp CI`, which is skipped here. The toolchain steps
 # match `fork_windows.yml`.
+#
+# The dependency cache is saved only from master: a cache saved by a pull request is visible to
+# that pull request alone, so every new one started cold and compiled all 1300 crates (about
+# 10 minutes of the 21 of the test build), while the per-PR caches of 1.7 GB pushed the
+# repository over its 10 GB cache limit. Pushes to master keep the shared cache warm; pull
+# requests only restore it. Tests and clippy run as two parallel jobs.
 name: Fork tests
 
 on:
   pull_request:
     branches:
       - master
+  push:
+    branches:
+      - master
+    paths-ignore:
+      - '**.md'
   workflow_dispatch:
 
 concurrency:
@@ -16,15 +27,16 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_BUILD_JOBS: "4"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  RUST_BACKTRACE: "1"
+
 jobs:
   test:
     runs-on: windows-latest
     timeout-minutes: 180
-    env:
-      CARGO_INCREMENTAL: "0"
-      CARGO_BUILD_JOBS: "4"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      RUST_BACKTRACE: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -32,13 +44,13 @@ jobs:
         shell: pwsh
         run: |
           rustup toolchain install 1.92.0 --profile minimal --target x86_64-pc-windows-msvc
-          rustup component add clippy --toolchain 1.92.0
           rustup default 1.92.0
 
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: fork-tests
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install protoc
         shell: pwsh
@@ -62,6 +74,38 @@ jobs:
       - name: Test the Ward modules
         shell: pwsh
         run: "cargo test -p warp --lib -- ward::"
+
+  # Clippy compiles in check mode and shares nothing with the test build: as a step after the
+  # tests it added 12 minutes to every run, as a job of its own it runs alongside them.
+  clippy:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.92.0 --profile minimal --target x86_64-pc-windows-msvc
+          rustup component add clippy --toolchain 1.92.0
+          rustup default 1.92.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fork-clippy
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Install protoc
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'protoc.zip'
+          $dir = Join-Path $env:RUNNER_TEMP 'protoc'
+          Invoke-WebRequest -Uri 'https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-win64.zip' -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $dir
+          "PROTOC=$dir\bin\protoc.exe" >> $env:GITHUB_ENV
+          & "$dir\bin\protoc.exe" --version
 
       - name: Clippy on the Ward modules
         shell: pwsh

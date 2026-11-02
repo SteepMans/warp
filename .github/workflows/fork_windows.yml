@@ -1,13 +1,26 @@
 # Builds the fork's OSS channel for Windows. Pushes to master also publish the installer and
 # the update manifest to the chimney MinIO (bucket warp-fork, prefix windows); installed builds
 # poll https://chimney.steep-man.ru/warp-fork/windows/stable/manifest.json for updates.
+#
+# Pull requests build the installer too, alongside the tests, and keep it as an artifact named
+# after the tree of the merge preview. When the merge to master produces the same tree — master
+# did not move meanwhile — the push publishes that installer instead of building it again: the
+# release is out a couple of minutes after the merge instead of 25. Any other push builds.
 name: Fork Windows build
 
 on:
   push:
     branches:
       - master
-    # Documentation-only pushes would publish a release identical to the previous one.
+    # Documentation-only and workflow-only pushes would publish a release identical to the
+    # previous one, and every release asks the owner to confirm the update. A build setting
+    # that does change the binary is released with workflow_dispatch.
+    paths-ignore:
+      - '**.md'
+      - '.github/**'
+  pull_request:
+    branches:
+      - master
     paths-ignore:
       - '**.md'
   workflow_dispatch:
@@ -18,6 +31,8 @@ concurrency:
 
 permissions:
   contents: read
+  # Finding and downloading the installer a pull request built.
+  actions: read
 
 jobs:
   build:
@@ -35,19 +50,81 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The tree, not the commit: the merge preview of a pull request and the merge commit on
+      # master are different commits with the same content when master did not move.
+      - name: Tree of the build
+        id: tree
+        shell: pwsh
+        run: |
+          $tree = git rev-parse 'HEAD^{tree}'
+          "tree=$tree" >> $env:GITHUB_OUTPUT
+          Write-Output "Tree $tree"
+
+      # A push to master looks for the installer the pull request already built for this tree.
+      # It is reused only when its version is newer than the published one, so the manifest
+      # never goes back in time.
+      - name: Find the installer of the pull request
+        id: reuse
+        if: github.event_name == 'push'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $name = "installer-${{ steps.tree.outputs.tree }}"
+          $found = gh api "repos/${{ github.repository }}/actions/artifacts?name=$name&per_page=5" |
+            ConvertFrom-Json
+          $artifact = $found.artifacts | Where-Object { -not $_.expired } | Select-Object -First 1
+          if (-not $artifact) {
+            Write-Output "No installer for this tree: building"
+            "found=false" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          $dir = Join-Path $env:RUNNER_TEMP 'reused'
+          gh run download $artifact.workflow_run.id --repo ${{ github.repository }} --name $name --dir $dir
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "Download failed: building"
+            "found=false" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          $version = (Get-Content (Join-Path $dir 'version.txt') -Raw).Trim()
+          $published = ''
+          try {
+            $published = (Invoke-RestMethod -Uri "$env:WARP_FORK_RELEASES_URL/stable/manifest.json?r=$([guid]::NewGuid().ToString('N'))" -TimeoutSec 30).version
+          } catch {
+            Write-Output "No published manifest: $($_.Exception.Message)"
+          }
+          # The version format sorts as text: v0.yyyy.MM.dd.HH.mm.oss_00.
+          if ($published -and [string]::CompareOrdinal($version, $published) -le 0) {
+            Write-Output "Installer $version is not newer than the published $published: building"
+            "found=false" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          $output = Join-Path $env:GITHUB_WORKSPACE 'script\windows\Output'
+          New-Item -ItemType Directory -Force $output | Out-Null
+          Copy-Item (Join-Path $dir 'WarpOssSetup.exe') $output
+          Write-Output "Reusing installer $version from run $($artifact.workflow_run.id)"
+          "found=true" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+
       - name: Install Rust toolchain
+        if: steps.reuse.outputs.found != 'true'
         shell: pwsh
         run: |
           rustup toolchain install 1.92.0 --profile minimal --target x86_64-pc-windows-msvc
           rustup default 1.92.0
 
+      # Saved only from master, as in `fork_tests.yml`: a pull request's cache is visible to it
+      # alone and would only push the shared one out of the repository's 10 GB.
       - uses: Swatinem/rust-cache@v2
+        if: steps.reuse.outputs.found != 'true'
         with:
           shared-key: fork-windows-rlto
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       # cargo-about output only changes with the dependency set.
       - uses: actions/cache@v4
+        if: steps.reuse.outputs.found != 'true'
         with:
           path: .licenses-cache
           key: cargo-about-${{ hashFiles('Cargo.lock', 'about.toml', 'about.hbs') }}
@@ -55,11 +132,13 @@ jobs:
       # Third-party license attribution for the bundle; version pinned as in
       # script/install_cargo_release_deps.
       - uses: taiki-e/install-action@v2
+        if: steps.reuse.outputs.found != 'true'
         with:
           tool: cargo-about@0.8.4
 
       # Inno Setup and the AWS CLI come preinstalled on windows-latest.
       - name: Install protoc
+        if: steps.reuse.outputs.found != 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -75,22 +154,43 @@ jobs:
         id: version
         shell: pwsh
         run: |
-          $v = 'v0.' + (Get-Date).ToUniversalTime().ToString('yyyy.MM.dd.HH.mm') + '.oss_00'
+          $v = '${{ steps.reuse.outputs.version }}'
+          if (-not $v) {
+            $v = 'v0.' + (Get-Date).ToUniversalTime().ToString('yyyy.MM.dd.HH.mm') + '.oss_00'
+          }
           "version=$v" >> $env:GITHUB_OUTPUT
           Write-Output "Version $v"
 
       # WARD_METRICS_TOKEN is baked into the binary (option_env!); without it the build sends
       # no metrics.
       - name: Build installer
+        if: steps.reuse.outputs.found != 'true'
         shell: pwsh
         env:
           WARD_METRICS_TOKEN: ${{ secrets.WARD_METRICS_TOKEN }}
         run: .\script\windows\publish_s3.ps1 -Bucket warp-fork -Prefix windows -Version ${{ steps.version.outputs.version }} -DryRun
 
+      - name: Keep the version next to the installer
+        if: steps.reuse.outputs.found != 'true'
+        shell: pwsh
+        run: Set-Content -Path script/windows/Output/version.txt -Value '${{ steps.version.outputs.version }}' -NoNewline
+
       - uses: actions/upload-artifact@v4
+        if: steps.reuse.outputs.found != 'true'
         with:
           name: WarpOssSetup-${{ steps.version.outputs.version }}
           path: script/windows/Output/WarpOssSetup.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      # What the push to master looks for after the merge.
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'pull_request'
+        with:
+          name: installer-${{ steps.tree.outputs.tree }}
+          path: |
+            script/windows/Output/WarpOssSetup.exe
+            script/windows/Output/version.txt
           if-no-files-found: error
           retention-days: 14
 
