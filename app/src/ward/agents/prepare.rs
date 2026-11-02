@@ -31,6 +31,14 @@ pub fn is_needed(assignment: &Assignment) -> bool {
         || assignment.branch.trim().is_empty()
 }
 
+/// Whether this machine runs the preparation. With a vault it always does: what the owner
+/// wrote is a brief for the orchestrator, which checks it against the repository and the vault
+/// and writes the executor's prompt from it, not a finished prompt to hand on as it is. Without
+/// a vault only an assignment that cannot start an executor as it is goes through it.
+pub fn runs(assignment: &Assignment, has_vault: bool) -> bool {
+    has_vault || is_needed(assignment)
+}
+
 /// How long the preparation may take. The limit belongs to the service and comes with the
 /// assignment; Ward invents none of its own. The count runs while there is no plan: waiting for
 /// the owner's approval afterwards does not end the session.
@@ -87,9 +95,9 @@ pub fn orchestrator_prompt(ctx: &PromptContext<'_>) -> String {
 
     text.push_str("# Подготовка задания для исполнителя\n\n");
     text.push_str(&format!(
-        "Ты агент-оркестратор на машине {}. Задача пришла из сервиса агентов без готового \
-         задания: твоя работа — собрать контекст в волте и подготовить задание исполнителю. \
-         Код ты не пишешь и рабочие репозитории не трогаешь.\n\n",
+        "Ты агент-оркестратор на машине {}. Задача пришла из сервиса агентов: твоя работа — \
+         собрать контекст в волте и подготовить задание исполнителю. Код ты не пишешь и рабочие \
+         репозитории не меняешь, читать их можно.\n\n",
         ctx.worker_name
     ));
 
@@ -127,10 +135,30 @@ pub fn orchestrator_prompt(ctx: &PromptContext<'_>) -> String {
          `feature/` для фич и `fix/` для багов.\n\n"
     ));
     text.push_str(&format!(
-        "Волт на этой машине: {}. Личные проекты идут автономно: промпт владельцу на \
-         согласование не показываешь, развилки решаешь сам и записываешь решение в досье.\n\n",
+        "Волт на этой машине: {}. Промпт владельцу на согласование не показываешь. Развилки, \
+         от которых суть работы не меняется, решаешь сам и записываешь решение в досье.\n\n",
         vault.root()
     ));
+    text.push_str(
+        "Если от ответа владельца зависит, что и как делать исполнителю (постановка допускает \
+         разные прочтения, не хватает данных, которых нет ни в карточке, ни в волте, ни в \
+         репозитории), спроси его: все вопросы одним сообщением, коротко и по пунктам, и \
+         закончи ход, не записывая план. Владелец ответит в чате этой сессии; время ожидания \
+         ответа в лимит подготовки не входит. После ответа продолжай с того же места.\n\n",
+    );
+    if !assignment.prompt.trim().is_empty() {
+        text.push_str("## Постановка владельца\n\n");
+        text.push_str(
+            "Владелец написал задачу сам. Это постановка, а не готовый промпт: разбери её, \
+             сверь с карточкой, досье и репозиторием (есть ли упомянутые ветки, пути, файлы, \
+             команды) и напиши по ней полный промпт исполнителю по шаблону — с паспортом \
+             запуска, путями и проверками. Всё существенное из постановки сохрани; копировать \
+             её в `prompt` как есть нельзя.\n\n",
+        );
+        text.push_str("```text\n");
+        text.push_str(assignment.prompt.trim());
+        text.push_str("\n```\n\n");
+    }
 
     text.push_str("## Что уже задано\n\n");
     let mut given = Vec::new();
@@ -146,13 +174,6 @@ pub fn orchestrator_prompt(ctx: &PromptContext<'_>) -> String {
     if !assignment.branch.trim().is_empty() {
         given.push(format!("- ветка: {}", assignment.branch.trim()));
     }
-    if !assignment.prompt.trim().is_empty() {
-        given.push(
-            "- промпт исполнителя уже есть: его не переписывай, определи только репозиторий и \
-             ветку, досье не выдумывай"
-                .to_owned(),
-        );
-    }
     if let Some(model) = assignment
         .model
         .as_deref()
@@ -162,14 +183,13 @@ pub fn orchestrator_prompt(ctx: &PromptContext<'_>) -> String {
         given.push(format!("- модель: {model}"));
     }
     if given.is_empty() {
-        text.push_str(
-            "Ничего: репозиторий, базовую ветку, ветку, промпт и модель определяешь ты.\n\n",
-        );
+        text.push_str("Ничего: репозиторий, базовую ветку, ветку и модель определяешь ты.\n\n");
     } else {
         text.push_str(&given.join("\n"));
         text.push_str(
-            "\n\nЗаданное не переопределять: в плане повтори его как есть или \
-                       оставь поле пустым.\n\n",
+            "\n\nЗаданное не переопределять: в плане повтори его как есть. Исключение — \
+             базовая ветка, которой нет в репозитории: укажи существующую и напиши об этом в \
+             `summary`.\n\n",
         );
     }
 
@@ -221,7 +241,7 @@ fn plan_example(assignment: &Assignment, number: u64) -> String {
             &assignment.branch,
             &format!("feature/{number}-<тема-по-английски>"),
         ),
-        prompt: field(&assignment.prompt, "<полный промпт исполнителю>"),
+        prompt: "<полный промпт исполнителю>".to_owned(),
         dossier_path: "11-Задачи/Активные/<Проект>/<префикс>. <Задача>.md".to_owned(),
         run_id: "run-ГГГГММДД-NNN".to_owned(),
         provider: field(&assignment.provider, "claude"),

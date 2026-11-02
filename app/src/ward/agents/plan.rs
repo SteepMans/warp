@@ -109,9 +109,12 @@ fn unfence(text: &str) -> &str {
 /// left out comes from the plan. The error says what is still missing.
 pub fn apply(plan: &Plan, assignment: &mut Assignment) -> Result<(), String> {
     fill(&mut assignment.repo, &plan.repo);
-    fill(&mut assignment.base_branch, &plan.base_branch);
+    // The orchestrator checked the base branch against the repository: one it names replaces
+    // a given one that does not exist there.
+    replace(&mut assignment.base_branch, &plan.base_branch);
     fill(&mut assignment.branch, &plan.branch);
-    fill(&mut assignment.prompt, &plan.prompt);
+    // What the owner wrote is the brief the orchestrator wrote the executor's prompt from.
+    replace(&mut assignment.prompt, &plan.prompt);
     if assignment
         .model
         .as_deref()
@@ -145,6 +148,12 @@ pub fn apply(plan: &Plan, assignment: &mut Assignment) -> Result<(), String> {
 
 fn fill(target: &mut String, value: &str) {
     if target.trim().is_empty() {
+        *target = value.trim().to_owned();
+    }
+}
+
+fn replace(target: &mut String, value: &str) {
+    if !value.trim().is_empty() {
         *target = value.trim().to_owned();
     }
 }
