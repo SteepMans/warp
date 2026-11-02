@@ -60,12 +60,12 @@ jobs:
           "tree=$tree" >> $env:GITHUB_OUTPUT
           Write-Output "Tree $tree"
 
-      # A push to master looks for the installer the pull request already built for this tree.
+      # A push or a manual run on master looks for the installer the pull request already built for this tree.
       # It is reused only when its version is newer than the published one, so the manifest
       # never goes back in time.
       - name: Find the installer of the pull request
         id: reuse
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -95,7 +95,7 @@ jobs:
           }
           # The version format sorts as text: v0.yyyy.MM.dd.HH.mm.oss_00.
           if ($published -and [string]::CompareOrdinal($version, $published) -le 0) {
-            Write-Output "Installer $version is not newer than the published $published: building"
+            Write-Output "Installer $version is not newer than the published ${published}: building"
             "found=false" >> $env:GITHUB_OUTPUT
             exit 0
           }
@@ -195,7 +195,7 @@ jobs:
           retention-days: 14
 
       - name: Publish to MinIO
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
         shell: pwsh
         env:
           WARP_FORK_S3_ENDPOINT: https://chimney.steep-man.ru
