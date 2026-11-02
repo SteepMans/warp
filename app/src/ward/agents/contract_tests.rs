@@ -282,6 +282,30 @@ fn approve_and_reject_commands_are_parsed() {
 }
 
 #[test]
+fn show_commands_are_parsed() {
+    let response = parse_heartbeat(
+        r#"{"commands":[{"type":"show","sessionId":"s1"},
+            {"type":"show","sessionId":"s2","remote":true}]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        response.commands,
+        vec![
+            // The owner is at the machine itself: a `show` without `remote`.
+            Command::Show {
+                session_id: "s1".to_owned(),
+                remote: false
+            },
+            Command::Show {
+                session_id: "s2".to_owned(),
+                remote: true
+            },
+        ]
+    );
+    assert_eq!(response.commands[1].session_id(), "s2");
+}
+
+#[test]
 fn inbox_parses_assignments_with_providers() {
     let inbox = parse_inbox(
         r#"{"assignments":[{

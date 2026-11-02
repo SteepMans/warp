@@ -413,6 +413,43 @@ fn send_text_to_pane(pane_uuid: &str, text: &str, ctx: &mut AppContext) -> Resul
     }
 }
 
+/// Brings the tab of `pane_uuid` forward: its window to the front of the screen, its tab in
+/// front of the others and the pane itself focused, so the owner can type into the agent at
+/// once.
+fn focus_pane_of(pane_uuid: &str, ctx: &mut AppContext) -> Result<(), String> {
+    let mut target = None;
+    'search: for (window_id, workspace) in WorkspaceRegistry::as_ref(ctx).all_workspaces(ctx) {
+        for pane_group in workspace.as_ref(ctx).tab_views() {
+            let group = pane_group.as_ref(ctx);
+            for view in group.terminal_views(ctx) {
+                let Some(uuid) = group.terminal_pane_session_uuid(view.id(), ctx) else {
+                    continue;
+                };
+                if crate::ward::chimney::bindings::uuid_hex(&uuid) != pane_uuid {
+                    continue;
+                }
+                let Some(pane_id) = group.find_pane_id_for_terminal_view(view.id(), ctx) else {
+                    continue;
+                };
+                target = Some((window_id, workspace.clone(), pane_group.clone(), pane_id));
+                break 'search;
+            }
+        }
+    }
+    let Some((window_id, workspace, pane_group, pane_id)) = target else {
+        return Err("the session's tab is closed".to_owned());
+    };
+    let group_id = pane_group.id();
+    workspace.update(ctx, |workspace, ctx| {
+        workspace.activate_tab_by_pane_group_id(group_id, ctx);
+    });
+    pane_group.update(ctx, |group, ctx| {
+        group.reveal_and_focus_pane(pane_id, ctx);
+    });
+    ctx.windows().show_window_and_focus_app(window_id);
+    Ok(())
+}
+
 fn open_tab(spec: TabSpec, ctx: &mut AppContext) -> Result<Option<String>, String> {
     if !spec.cwd.is_dir() {
         return Err("the worktree is not a directory".to_owned());
@@ -501,6 +538,14 @@ impl Host for UiHost {
         let text = text.to_owned();
         self.spawner
             .spawn(move |_, ctx| send_text_to_pane(&pane_uuid, &text, ctx))
+            .await
+            .map_err(|_| "Ward is shutting down".to_owned())?
+    }
+
+    async fn focus_pane(&self, pane_uuid: &str) -> Result<(), String> {
+        let pane_uuid = pane_uuid.to_owned();
+        self.spawner
+            .spawn(move |_, ctx| focus_pane_of(&pane_uuid, ctx))
             .await
             .map_err(|_| "Ward is shutting down".to_owned())?
     }

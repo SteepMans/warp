@@ -122,6 +122,8 @@ struct FakeHost {
     /// The tabs that are open now; closing one takes it out of here.
     panes: Mutex<Vec<FakePane>>,
     typed: Mutex<Vec<(String, String)>>,
+    /// The panes brought forward, in the order the owner asked for them.
+    focused: Mutex<Vec<String>>,
     snapshot: Mutex<Snapshot>,
     /// What the orchestrator "writes" as its plan when its tab opens.
     plan: Mutex<Option<(PathBuf, String)>>,
@@ -137,6 +139,7 @@ impl FakeHost {
             tabs: Mutex::new(Vec::new()),
             panes: Mutex::new(Vec::new()),
             typed: Mutex::new(Vec::new()),
+            focused: Mutex::new(Vec::new()),
             snapshot: Mutex::new(Snapshot::default()),
             plan: Mutex::new(None),
         }
@@ -272,6 +275,14 @@ impl Host for FakeHost {
         self.typed
             .lock()
             .push((pane_uuid.to_owned(), text.to_owned()));
+        Ok(())
+    }
+
+    async fn focus_pane(&self, pane_uuid: &str) -> Result<(), String> {
+        if !self.panes.lock().iter().any(|pane| pane.uuid == pane_uuid) {
+            return Err("the session's tab is closed".to_owned());
+        }
+        self.focused.lock().push(pane_uuid.to_owned());
         Ok(())
     }
 
@@ -2268,6 +2279,92 @@ fn a_picked_up_session_falls_back_to_the_tab_of_its_worktree() {
         [("pane-9".to_owned(), "продолжай".to_owned())]
     );
     assert_eq!(sessions[0].pane_uuid.as_deref(), Some("pane-9"));
+}
+
+/// The owner pressed «Открыть в Варде»: the tab of the session comes forward on the machine
+/// he is at, and nothing else about the session changes.
+#[test]
+fn show_brings_the_tab_of_the_session_forward() {
+    let dir = tempfile::tempdir().unwrap();
+    let worktree = dir.path().join("agents-work").join("worktree");
+    let transcript = dir.path().join("executor.jsonl");
+    std::fs::write(&transcript, PROMPT_LINE).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let (after, host, mut sessions) = picked_up_with_panes(
+        dir.path(),
+        machine,
+        &transcript,
+        Some("pane-7"),
+        vec![(
+            "pane-7".to_owned(),
+            Some(AGENT_SESSION_ID.to_owned()),
+            worktree,
+        )],
+    );
+    apply_command(&mut sessions, show_command(false));
+    futures::executor::block_on(after.show_session(&mut sessions[0]));
+    assert_eq!(*host.focused.lock(), ["pane-7".to_owned()]);
+    // No second tab for a session that has one.
+    assert!(host.tabs.lock().is_empty());
+    assert_eq!(sessions[0].status, SessionStatus::Running);
+}
+
+/// The session has no tab any more — Ward was restarted and the agent is gone. «Открыть в
+/// Варде» opens it again, resuming the agent where it stopped and without the task prompt, and
+/// brings the new tab forward.
+#[test]
+fn show_opens_a_session_that_lost_its_tab_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let worktree = dir.path().join("agents-work").join("worktree");
+    std::fs::create_dir_all(&worktree).unwrap();
+    let transcript = dir.path().join("executor.jsonl");
+    std::fs::write(&transcript, PROMPT_LINE).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let (after, host, mut sessions) =
+        picked_up_with_panes(dir.path(), machine, &transcript, Some("pane-7"), Vec::new());
+    apply_command(&mut sessions, show_command(false));
+    futures::executor::block_on(after.show_session(&mut sessions[0]));
+
+    let tabs = host.tabs.lock().clone();
+    assert_eq!(tabs.len(), 1, "{tabs:?}");
+    assert_eq!(tabs[0].cwd, worktree);
+    let runner = worktree.join(".agents").join("run.ps1");
+    let script = std::fs::read_to_string(&runner).unwrap_or_default();
+    assert!(
+        script.contains(&format!("'--resume' '{AGENT_SESSION_ID}'")),
+        "{script}"
+    );
+    assert!(!script.contains("prompt.md"), "{script}");
+    assert_eq!(sessions[0].pane_uuid.as_deref(), Some("pane-1"));
+    assert_eq!(*host.focused.lock(), ["pane-1".to_owned()]);
+}
+
+/// From another machine nothing is brought forward here: the owner cannot see this screen. The
+/// session is only put back on its feet, and the agent found again reports the link to it.
+#[test]
+fn show_from_another_machine_opens_the_session_without_taking_the_screen() {
+    let dir = tempfile::tempdir().unwrap();
+    let worktree = dir.path().join("agents-work").join("worktree");
+    std::fs::create_dir_all(&worktree).unwrap();
+    let transcript = dir.path().join("executor.jsonl");
+    std::fs::write(&transcript, PROMPT_LINE).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let (after, host, mut sessions) =
+        picked_up_with_panes(dir.path(), machine, &transcript, Some("pane-7"), Vec::new());
+    apply_command(&mut sessions, show_command(true));
+    futures::executor::block_on(after.show_session(&mut sessions[0]));
+    assert_eq!(host.tabs.lock().len(), 1);
+    assert!(host.focused.lock().is_empty());
+    // The resumed agent is another process: the next tick looks it up again.
+    assert!(sessions[0].found.is_none());
+}
+
+/// The owner's «Открыть в Варде» for a session.
+fn show_command(remote: bool) -> Command {
+    Command::Show {
+        session_id: "s-idle".to_owned(),
+        remote,
+    }
 }
 
 /// No open tab is the session's: the message is not swallowed, the card says it was not

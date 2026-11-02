@@ -208,7 +208,17 @@ pub fn forward_slashes(path: &Path) -> String {
 /// code, `cwd` is the directory the agent starts in. For an executor both are the worktree and
 /// its `.agents`; for the orchestrator of the preparation phase the files are under the
 /// repository root and the directory is the vault, so nothing of Ward is written inside it.
-pub fn runner_script(kind: RunnerKind, files: &Path, cwd: &Path, command: &AgentCommand) -> String {
+///
+/// `prompt`: the agent gets the prompt of the file as its first message. A resumed agent does
+/// not — it has the whole task in its own history, and sending it again would start the work
+/// from the beginning.
+pub fn runner_script(
+    kind: RunnerKind,
+    files: &Path,
+    cwd: &Path,
+    command: &AgentCommand,
+    prompt: bool,
+) -> String {
     let file = |name: &str| forward_slashes(&files.join(name));
     let worktree = forward_slashes(cwd);
     match kind {
@@ -235,16 +245,19 @@ pub fn runner_script(kind: RunnerKind, files: &Path, cwd: &Path, command: &Agent
                 ));
             }
             lines.push(format!("Set-Location -LiteralPath {}", q(&worktree)));
-            lines.push(format!(
-                "$prompt = Get-Content -Raw -Encoding UTF8 -LiteralPath {}",
-                q(&file(PROMPT_FILE))
-            ));
+            if prompt {
+                lines.push(format!(
+                    "$prompt = Get-Content -Raw -Encoding UTF8 -LiteralPath {}",
+                    q(&file(PROMPT_FILE))
+                ));
+            }
             let args: Vec<String> = command.args.iter().map(|arg| q(arg)).collect();
             lines.push("$LASTEXITCODE = $null".to_owned());
             lines.push(format!(
-                "try {{ & {} {} -- $prompt }} catch {{ Write-Host $_; $LASTEXITCODE = 127 }}",
+                "try {{ & {} {}{} }} catch {{ Write-Host $_; $LASTEXITCODE = 127 }}",
                 q(&command.program),
-                args.join(" ")
+                args.join(" "),
+                if prompt { " -- $prompt" } else { "" }
             ));
             lines.push("$code = $LASTEXITCODE".to_owned());
             lines.push("if ($null -eq $code) { $code = 1 }".to_owned());
@@ -275,12 +288,15 @@ pub fn runner_script(kind: RunnerKind, files: &Path, cwd: &Path, command: &Agent
                 lines.push(format!("export {name}={}", q(value)));
             }
             lines.push(format!("cd {} || exit 1", q(&worktree)));
-            lines.push(format!("prompt=$(cat {})", q(&file(PROMPT_FILE))));
+            if prompt {
+                lines.push(format!("prompt=$(cat {})", q(&file(PROMPT_FILE))));
+            }
             let args: Vec<String> = command.args.iter().map(|arg| q(arg)).collect();
             lines.push(format!(
-                "{} {} -- \"$prompt\"",
+                "{} {}{}",
                 q(&command.program),
-                args.join(" ")
+                args.join(" "),
+                if prompt { " -- \"$prompt\"" } else { "" }
             ));
             lines.push("code=$?".to_owned());
             lines.push(format!(

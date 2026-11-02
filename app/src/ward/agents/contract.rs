@@ -374,6 +374,16 @@ pub enum Command {
         #[serde(default)]
         reason: String,
     },
+    /// The owner wants the session in front of him. Ward brings its tab forward and opens the
+    /// agent again when the tab is gone. `remote`: he is at another machine, so nothing comes
+    /// forward here — the session only has to run, and its remote control link reaches the
+    /// service with the next status.
+    Show {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(default)]
+        remote: bool,
+    },
 }
 
 impl Command {
@@ -382,7 +392,8 @@ impl Command {
             Self::Stop { session_id }
             | Self::Message { session_id, .. }
             | Self::Approve { session_id }
-            | Self::Reject { session_id, .. } => session_id,
+            | Self::Reject { session_id, .. }
+            | Self::Show { session_id, .. } => session_id,
         }
     }
 }
