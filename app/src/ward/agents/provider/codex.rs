@@ -352,8 +352,18 @@ impl Provider for Codex {
         "codex"
     }
 
-    fn command(&self, _session_name: &str, model: Option<&str>) -> AgentCommand {
-        let mut args = vec!["--dangerously-bypass-approvals-and-sandbox".to_owned()];
+    fn command(
+        &self,
+        _session_name: &str,
+        model: Option<&str>,
+        resume: Option<&str>,
+    ) -> AgentCommand {
+        // `resume` is a subcommand of Codex and goes before the flags.
+        let mut args = match resume {
+            Some(id) => vec!["resume".to_owned(), id.to_owned()],
+            None => Vec::new(),
+        };
+        args.push("--dangerously-bypass-approvals-and-sandbox".to_owned());
         if let Some(model) = model {
             args.push("-m".to_owned());
             args.push(model.to_owned());

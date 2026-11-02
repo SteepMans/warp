@@ -1801,6 +1801,84 @@ fn an_executor_that_answered_and_went_quiet_waits_for_the_owner() {
     assert!(!session.is_done());
 }
 
+/// The owner brought a session back from the archive: the worktree is on the machine and the
+/// agent session is known, so Ward clones nothing, writes no prompt and opens the tab with the
+/// resume flag. Without a worktree there is nothing to restore and the session fails.
+#[test]
+fn a_restored_session_resumes_the_agent_in_its_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    let worktree = dir.path().join("agents-work").join("wt-4672");
+    std::fs::create_dir_all(&worktree).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let (worker, host) = offline_worker_with_host(dir.path(), machine, idle_timing(), |host| host);
+    let assignment = Assignment {
+        session_id: "s-restored".to_owned(),
+        title: "Восстановленная".to_owned(),
+        prompt: "первоначальное задание".to_owned(),
+        max_duration_min: 60,
+        ..Assignment::default()
+    };
+    let resume = contract::Resume {
+        worktree: worktree.to_string_lossy().into_owned(),
+        agent_session_id: AGENT_SESSION_ID.to_owned(),
+    };
+
+    futures::executor::block_on(worker.start_resumed(
+        assignment.clone(),
+        provider::by_id("claude").unwrap(),
+        resume.clone(),
+    ));
+
+    let state = worker.state.lock();
+    let session = state.sessions.last().unwrap();
+    assert!(!session.is_done());
+    assert_eq!(session.status, SessionStatus::Running);
+    assert_eq!(session.worktree.as_deref(), Some(worktree.as_path()));
+    // The agent session is known in advance: the transcript is found by its id.
+    assert_eq!(
+        session
+            .found
+            .as_ref()
+            .map(|found| found.agent_session_id.clone()),
+        Some(AGENT_SESSION_ID.to_owned())
+    );
+    let runner = std::fs::read_to_string(
+        launch::agents_dir(&worktree).join(worker.machine.runner().unwrap().0.file_name()),
+    )
+    .unwrap();
+    assert!(runner.contains("--resume"), "{runner}");
+    assert!(runner.contains(AGENT_SESSION_ID), "{runner}");
+    // The prompt of the first run is not written again: the agent has it in its history.
+    assert!(
+        !launch::agents_dir(&worktree)
+            .join(launch::PROMPT_FILE)
+            .exists()
+    );
+    assert_eq!(host.tabs.lock().len(), 1);
+    drop(state);
+
+    // The worktree is gone: there is nothing to restore.
+    let mut missing = resume.clone();
+    missing.worktree = dir
+        .path()
+        .join("no-such-worktree")
+        .to_string_lossy()
+        .into_owned();
+    let mut other = assignment;
+    other.session_id = "s-restored-2".to_owned();
+    futures::executor::block_on(worker.start_resumed(
+        other,
+        provider::by_id("claude").unwrap(),
+        missing,
+    ));
+    let state = worker.state.lock();
+    let failed = state.sessions.last().unwrap();
+    assert!(failed.is_done());
+    assert_eq!(failed.status, SessionStatus::Failed);
+    let message = failed.message.clone().unwrap_or_default();
+    assert!(message.contains("Восстановить не из чего"), "{message}");
+}
+
 /// The transcript stands still in the middle of a turn: the agent called a tool and waits for
 /// its result. Nothing is over, so the session goes on.
 #[test]

@@ -326,6 +326,18 @@ pub struct Assignment {
     pub plan_approval: bool,
     /// `None`: [`super::prepare::DEFAULT_MAX_DURATION_MIN`].
     pub prepare_max_duration_min: Option<u64>,
+    /// Set when the owner brought the session back from the archive: nothing is cloned and no
+    /// prompt is written, the agent is resumed where it stopped.
+    pub resume: Option<Resume>,
+}
+
+/// A session restored from the archive: the worktree it left behind and the agent session to
+/// resume in it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Resume {
+    pub worktree: String,
+    pub agent_session_id: String,
 }
 
 /// A field the service may send as `null`: an empty string then.
