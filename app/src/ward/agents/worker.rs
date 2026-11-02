@@ -50,7 +50,7 @@ use sha2::Digest as _;
 use super::admission::{self, MachineState};
 use super::client::{Api, ApiError};
 use super::contract::{
-    AckRequest, AgentInfo, AppliedRequest, Assignment, Command, HeartbeatRequest, Limits,
+    self, AckRequest, AgentInfo, AppliedRequest, Assignment, Command, HeartbeatRequest, Limits,
     PartReport, Passport, ProfileBeat, ProfileBody, ProxyCheck, REASON_OWNER_QUESTION,
     REASON_PLAN_REJECTED, REASON_PREPARE_FAILED, REASON_USAGE_LIMIT, REASON_WARD_RESTARTED,
     RegisterRequest, Resources, SessionBeat, SessionStatus, StatusRequest, Tools, UsageReport,
@@ -338,8 +338,7 @@ const MESSAGE_NO_SESSION_ID: &str = "Сессия запущена, id сесс�
 const MESSAGE_NOT_STARTED: &str =
     "Агент не начал работу: ждёт ответа в терминале (вопрос о доверии к папке?)";
 const MESSAGE_USAGE_LIMIT: &str = "Агент упёрся в лимит подписки";
-const MESSAGE_IDLE_ANSWER: &str =
-    "Работа готова: агент выдал финальный ответ и замолчал, Ward закрыл его сессию";
+const MESSAGE_IDLE_ANSWER: &str = "Работа готова: агент выдал финальный ответ и ждёт вас. Сессия открыта: можно написать в неё или остановить";
 const MESSAGE_OWNER_QUESTION: &str = "Агент задал вопрос и ждёт ответа владельца";
 const MESSAGE_PREPARING: &str = "Подготовка: оркестратор собирает досье и промпт";
 const MESSAGE_PREPARE_TOO_LONG: &str = "Подготовка не уложилась в prepareMaxDurationMin";
@@ -349,6 +348,9 @@ const MESSAGE_PLAN_REJECTED: &str = "План отклонён владельц�
 const MESSAGE_SHUTDOWN: &str =
     "Ward закрывается (обновление или выход), сессия продолжится после запуска";
 const MESSAGE_RESUMED: &str = "Ward перезапустился, сессия подхвачена: процесс агента жив";
+const MESSAGE_RESTORED: &str = "Сессия восстановлена владельцем: агент продолжает с того же места";
+const MESSAGE_RESTORE_NO_WORKTREE: &str =
+    "Восстановить не из чего: рабочей копии сессии на машине уже нет";
 const MESSAGE_RESUMED_PREPARING: &str =
     "Ward перезапустился, подготовка подхвачена: оркестратор жив";
 const MESSAGE_RESUMED_PLAN_REVIEW: &str = "Ward перезапустился, план по-прежнему ждёт согласования";
@@ -1271,6 +1273,14 @@ impl Worker {
             }
         };
         let provider = decision.provider;
+        if let Some(resume) = assignment.resume.clone() {
+            log::info!(
+                "Ward agents: took session {session_id} ({}, resumed by the owner)",
+                provider.id()
+            );
+            self.start_resumed(assignment, provider, resume).await;
+            return;
+        }
         if prepare::is_needed(&assignment) {
             let Some(vault) = decision.vault.clone() else {
                 log::warn!("Ward agents: no vault for the preparation of {session_id}");
@@ -1294,6 +1304,61 @@ impl Worker {
         // The phase is set right away by `start_worktree`.
         let mut session = Session::new(assignment, provider, Phase::Done);
         self.start_worktree(&mut session, &decision.root, &repo);
+        let mut state = self.state.lock();
+        state.known_ids.insert(session_id);
+        state.sessions.push(session);
+    }
+
+    /// A session the owner brought back from the archive: the worktree is on the machine and
+    /// the agent session is known, so nothing is cloned and no prompt is written — the agent
+    /// opens in its own tab with the resume flag and goes on from where it stopped. Its
+    /// transcript is shipped as a new part of the journal: Ward does not know what of it the
+    /// service already has.
+    async fn start_resumed(
+        &self,
+        assignment: Assignment,
+        provider: &'static dyn Provider,
+        resume: contract::Resume,
+    ) {
+        let session_id = assignment.session_id.clone();
+        let worktree = PathBuf::from(&resume.worktree);
+        let mut session = Session::new(assignment, provider, Phase::Done);
+        if resume.agent_session_id.is_empty() || !worktree.is_dir() {
+            let mut request = session.status_request(SessionStatus::Failed);
+            request.message = Some(MESSAGE_RESTORE_NO_WORKTREE.to_owned());
+            finish(&mut session, request);
+        } else {
+            session.worktree = Some(worktree.clone());
+            // The agent session is known from the service: the transcript is found by its id,
+            // and nothing has to be guessed from the time of the launch.
+            session.found = Some(FoundSession {
+                agent_session_id: resume.agent_session_id.clone(),
+                pid: None,
+                remote_control_url: None,
+                transcript: None,
+            });
+            match self
+                .launch(&session, &worktree, Some(&resume.agent_session_id))
+                .await
+            {
+                Ok(pane_uuid) => {
+                    session.pane_uuid = pane_uuid;
+                    session.phase = Phase::Launched {
+                        launched_at_ms: now_ms(),
+                        at: Instant::now(),
+                    };
+                    let mut request = session.status_request(SessionStatus::Running);
+                    request.message = Some(MESSAGE_RESTORED.to_owned());
+                    session.set_status(request);
+                }
+                Err(err) => {
+                    log::warn!("Ward agents: could not restore the session: {err}");
+                    let mut request = session.status_request(SessionStatus::Failed);
+                    request.message = Some(format!("Не удалось открыть вкладку: {err}"));
+                    finish(&mut session, request);
+                }
+            }
+        }
         let mut state = self.state.lock();
         state.known_ids.insert(session_id);
         state.sessions.push(session);
@@ -1442,7 +1507,7 @@ impl Worker {
             .map(str::trim)
             .filter(|model| !model.is_empty());
         let name = prepare::session_name(&session.assignment.task_ref, &session.assignment.title);
-        let command = orchestrator.command(&name, model);
+        let command = orchestrator.command(&name, model, None);
         let script = launch::runner_script(kind, &dir, &vault_dir, &command);
         let runner = dir.join(kind.file_name());
         std::fs::write(&runner, script).map_err(|err| err.to_string())?;
@@ -1505,7 +1570,9 @@ impl Worker {
         let active_sessions = state
             .sessions
             .iter()
-            .filter(|session| !session.is_done())
+            // A session that answered waits for the owner with an idle agent: it keeps its tab,
+            // but not the slot, or two finished sessions would block the machine for good.
+            .filter(|session| !session.is_done() && session.status != SessionStatus::Review)
             .count()
             + state
                 .beats
@@ -2030,7 +2097,7 @@ impl Worker {
                             finish(session, request);
                             return;
                         }
-                        match self.launch(session, &worktree).await {
+                        match self.launch(session, &worktree, None).await {
                             Ok(pane_uuid) => {
                                 session.pane_uuid = pane_uuid;
                                 session.phase = Phase::Launched {
@@ -2069,16 +2136,24 @@ impl Worker {
         }
     }
 
-    /// Writes the session files and opens its tab.
-    async fn launch(&self, session: &Session, worktree: &Path) -> Result<Option<String>, String> {
+    /// Writes the session files and opens its tab. `resume`: the agent session to continue
+    /// instead of a new one — then the prompt is not written, the agent has it in its history.
+    async fn launch(
+        &self,
+        session: &Session,
+        worktree: &Path,
+        resume: Option<&str>,
+    ) -> Result<Option<String>, String> {
         let (kind, bash) = self
             .machine
             .runner()
             .ok_or_else(|| "no pwsh or Git Bash".to_owned())?;
         let agents = launch::agents_dir(worktree);
         std::fs::create_dir_all(&agents).map_err(|err| err.to_string())?;
-        std::fs::write(agents.join(launch::PROMPT_FILE), &session.assignment.prompt)
-            .map_err(|err| err.to_string())?;
+        if resume.is_none() {
+            std::fs::write(agents.join(launch::PROMPT_FILE), &session.assignment.prompt)
+                .map_err(|err| err.to_string())?;
+        }
         let _ = std::fs::remove_file(agents.join(launch::EXIT_CODE_FILE));
         let _ = std::fs::remove_file(agents.join(launch::RUNNER_PID_FILE));
         let name = launch::session_name(&session.assignment.task_ref, &session.assignment.title);
@@ -2088,7 +2163,7 @@ impl Worker {
             .as_deref()
             .map(str::trim)
             .filter(|model| !model.is_empty());
-        let command = session.provider.command(&name, model);
+        let command = session.provider.command(&name, model, resume);
         let script = launch::runner_script(kind, &agents, worktree, &command);
         let runner = agents.join(kind.file_name());
         std::fs::write(&runner, script).map_err(|err| err.to_string())?;
@@ -2561,19 +2636,23 @@ impl Worker {
                 .is_some_and(|at| at.elapsed() >= self.timing.idle_after_answer)
     }
 
-    /// The agent gave its closing answer and went quiet without ending its process: the work is
-    /// done, so Ward ends the processes and reports the session as ready for review, instead of
-    /// holding the slot of the machine until `maxDurationMin` runs out. Not a failure and not a
-    /// stop of the owner's: the message says the result is there to look at.
-    fn finish_answered(&self, session: &mut Session) {
+    /// The agent gave its closing answer and went quiet without ending its process. The work
+    /// looks done, but the session is not over: only the owner ends it. The agent and its tab
+    /// stay as they are, so a `message` command still reaches the tab, the agent can go on by
+    /// itself (a background job it was waiting for), and the next lines of the transcript put
+    /// the session back to `running` (see [`Self::read_journal`]). The slot of the machine is
+    /// free meanwhile: a session waiting for the owner does not hold one.
+    fn answered(&self, session: &mut Session) {
+        if session.status == SessionStatus::Review {
+            return;
+        }
         log::info!(
-            "Ward agents: session {} answered and went quiet, taking the work for done",
+            "Ward agents: session {} answered and waits for the owner",
             session.assignment.session_id
         );
-        self.stop_agent(session);
         let mut request = session.status_request(SessionStatus::Review);
         request.message = Some(MESSAGE_IDLE_ANSWER.to_owned());
-        finish(session, request);
+        session.set_status(request);
     }
 
     /// The agent ended its turn with a question for the owner: the session is not over, it
@@ -2642,7 +2721,14 @@ impl Worker {
         }
 
         let max_duration = Duration::from_secs(session.assignment.max_duration_min * 60);
+        // The limit measures work, not waiting: a session that answered or asked the owner
+        // stands still until the owner comes, and ending it by the clock loses that answer.
+        let waits_for_owner = matches!(
+            session.status,
+            SessionStatus::Review | SessionStatus::Blocked
+        );
         if session.stop.is_none()
+            && !waits_for_owner
             && session.assignment.max_duration_min > 0
             && session.started.elapsed() >= max_duration
         {
@@ -2690,10 +2776,7 @@ impl Worker {
             let turn = session.provider.last_turn(&session.journal.tail());
             if self.gone_quiet(session) {
                 match turn {
-                    LastTurn::Answered => {
-                        self.finish_answered(session);
-                        return;
-                    }
+                    LastTurn::Answered => self.answered(session),
                     LastTurn::Asked => self.ask_owner(session),
                     LastTurn::Working => {}
                 }
@@ -2747,7 +2830,7 @@ impl Worker {
                 request.message = Some(MESSAGE_USAGE_LIMIT.to_owned());
                 session.set_status(request);
             }
-            (SessionStatus::Blocked, None) => {
+            (SessionStatus::Blocked | SessionStatus::Review, None) => {
                 let mut request = session.status_request(SessionStatus::Running);
                 request.message = Some(MESSAGE_RUNNING.to_owned());
                 session.set_status(request);

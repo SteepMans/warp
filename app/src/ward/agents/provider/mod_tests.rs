@@ -18,7 +18,7 @@ fn providers_are_found_by_id() {
 fn command_depends_on_provider_and_model() {
     let claude = by_id("claude")
         .unwrap()
-        .command("4623 Встречи", Some("claude-opus-5-5"));
+        .command("4623 Встречи", Some("claude-opus-5-5"), None);
     assert_eq!(claude.program, "claude");
     assert_eq!(
         claude.args,
@@ -39,12 +39,12 @@ fn command_depends_on_provider_and_model() {
         )]
     );
 
-    let claude_default = by_id("claude").unwrap().command("1 x", None);
+    let claude_default = by_id("claude").unwrap().command("1 x", None, None);
     assert!(!claude_default.args.iter().any(|arg| arg == "--model"));
 
     let codex = by_id("codex")
         .unwrap()
-        .command("4623 Встречи", Some("gpt-5.5"));
+        .command("4623 Встречи", Some("gpt-5.5"), None);
     assert_eq!(codex.program, "codex");
     assert_eq!(
         codex.args,
@@ -55,7 +55,31 @@ fn command_depends_on_provider_and_model() {
         ]
     );
     assert!(codex.remove_env_prefixes.contains(&"CLAUDE"));
-    let codex_default = by_id("codex").unwrap().command("1 x", None);
+    // A restored session resumes the agent session instead of starting a new one.
+    let resumed = by_id("claude")
+        .unwrap()
+        .command("4623 Встречи", None, Some("a7f0-session"));
+    assert_eq!(
+        resumed.args,
+        [
+            "--remote-control",
+            "4623 Встречи",
+            "--dangerously-skip-permissions",
+            "--resume",
+            "a7f0-session"
+        ]
+    );
+    let codex_resumed = by_id("codex").unwrap().command("1 x", None, Some("th-42"));
+    assert_eq!(
+        codex_resumed.args,
+        [
+            "resume",
+            "th-42",
+            "--dangerously-bypass-approvals-and-sandbox"
+        ]
+    );
+
+    let codex_default = by_id("codex").unwrap().command("1 x", None, None);
     assert_eq!(
         codex_default.args,
         ["--dangerously-bypass-approvals-and-sandbox"]

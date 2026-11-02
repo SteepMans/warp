@@ -127,9 +127,10 @@ fn quoting() {
 
 #[test]
 fn pwsh_runner_clears_env_and_writes_the_exit_code() {
-    let command = provider::by_id("claude")
-        .unwrap()
-        .command("4623 O'Neil", Some("claude-opus-5-5"));
+    let command =
+        provider::by_id("claude")
+            .unwrap()
+            .command("4623 O'Neil", Some("claude-opus-5-5"), None);
     let script = runner_script(
         RunnerKind::Pwsh,
         Path::new("C:/w/t/.agents"),
@@ -158,7 +159,7 @@ fn pwsh_runner_clears_env_and_writes_the_exit_code() {
 
 #[test]
 fn sh_runner_for_codex() {
-    let command = provider::by_id("codex").unwrap().command("1 x", None);
+    let command = provider::by_id("codex").unwrap().command("1 x", None, None);
     let script = runner_script(
         RunnerKind::Sh,
         Path::new("/w/t/.agents"),

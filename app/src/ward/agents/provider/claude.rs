@@ -419,7 +419,12 @@ impl Provider for Claude {
         "claude"
     }
 
-    fn command(&self, session_name: &str, model: Option<&str>) -> AgentCommand {
+    fn command(
+        &self,
+        session_name: &str,
+        model: Option<&str>,
+        resume: Option<&str>,
+    ) -> AgentCommand {
         let mut args = vec![
             "--remote-control".to_owned(),
             session_name.to_owned(),
@@ -428,6 +433,10 @@ impl Provider for Claude {
         if let Some(model) = model {
             args.push("--model".to_owned());
             args.push(model.to_owned());
+        }
+        if let Some(id) = resume {
+            args.push("--resume".to_owned());
+            args.push(id.to_owned());
         }
         AgentCommand {
             program: "claude".to_owned(),

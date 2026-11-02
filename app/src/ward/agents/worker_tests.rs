@@ -1744,11 +1744,11 @@ fn assistant_line(blocks: &str) -> String {
 const PROMPT_LINE: &str =
     "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"сделай\"}}\n";
 
-/// The agent answered and went quiet without ending its process: the work is done, so the
-/// session is closed as ready for review, the processes go and the slot of the machine is free
-/// long before `maxDurationMin`.
+/// The agent answered and went quiet without ending its process: the work waits for the owner.
+/// The session is reported as review, but it is not over — the agent, its tab and the ability
+/// to write into it stay, and only the owner ends it.
 #[test]
-fn an_executor_that_answered_and_went_quiet_ends_as_review() {
+fn an_executor_that_answered_and_went_quiet_waits_for_the_owner() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("agents-work");
     let transcript = dir.path().join("executor.jsonl");
@@ -1766,22 +1766,117 @@ fn an_executor_that_answered_and_went_quiet_ends_as_review() {
 
     std::thread::sleep(Duration::from_millis(300));
     futures::executor::block_on(worker.advance(&mut session));
-    assert!(session.is_done());
+    assert!(
+        !session.is_done(),
+        "the owner ends the session, not the clock"
+    );
     assert_eq!(session.status, SessionStatus::Review);
     let message = session.message.clone().unwrap_or_default();
     assert!(message.contains("Работа готова"), "{message}");
-    // Neither a failure nor a stop of the owner's, and no exit code was invented.
+    // Neither a failure nor a stop of the owner's, and the agent is left running.
     let request = session.outbox.back().unwrap();
     assert_eq!(request.status, SessionStatus::Review);
     assert_eq!(request.reason, None);
     assert_eq!(request.exit_code, None);
-    assert_eq!(*machine.stopped.lock(), vec![EXECUTOR_PID]);
+    assert!(machine.stopped.lock().is_empty());
     // The journal was read to the end: the closing answer reaches the service.
     assert!(
         session.journal.tail().contains("PR открыт"),
         "{}",
         session.journal.tail()
     );
+
+    // The status is reported once, however long the agent stays quiet.
+    let reported = session.outbox.len();
+    std::thread::sleep(Duration::from_millis(300));
+    futures::executor::block_on(worker.advance(&mut session));
+    assert_eq!(session.outbox.len(), reported);
+    assert_eq!(session.status, SessionStatus::Review);
+
+    // The agent went on by itself (a background job it was waiting for): the session runs again.
+    let more = assistant_line("{\"type\":\"text\",\"text\":\"Заливка закончилась\"}");
+    std::fs::write(&transcript, format!("{PROMPT_LINE}{answer}{more}")).unwrap();
+    futures::executor::block_on(worker.advance(&mut session));
+    assert_eq!(session.status, SessionStatus::Running);
+    assert!(!session.is_done());
+}
+
+/// The owner brought a session back from the archive: the worktree is on the machine and the
+/// agent session is known, so Ward clones nothing, writes no prompt and opens the tab with the
+/// resume flag. Without a worktree there is nothing to restore and the session fails.
+#[test]
+fn a_restored_session_resumes_the_agent_in_its_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    let worktree = dir.path().join("agents-work").join("wt-4672");
+    std::fs::create_dir_all(&worktree).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let (worker, host) = offline_worker_with_host(dir.path(), machine, idle_timing(), |host| host);
+    let assignment = Assignment {
+        session_id: "s-restored".to_owned(),
+        title: "Восстановленная".to_owned(),
+        prompt: "первоначальное задание".to_owned(),
+        max_duration_min: 60,
+        ..Assignment::default()
+    };
+    let resume = contract::Resume {
+        worktree: worktree.to_string_lossy().into_owned(),
+        agent_session_id: AGENT_SESSION_ID.to_owned(),
+    };
+
+    futures::executor::block_on(worker.start_resumed(
+        assignment.clone(),
+        provider::by_id("claude").unwrap(),
+        resume.clone(),
+    ));
+
+    let state = worker.state.lock();
+    let session = state.sessions.last().unwrap();
+    assert!(!session.is_done());
+    assert_eq!(session.status, SessionStatus::Running);
+    assert_eq!(session.worktree.as_deref(), Some(worktree.as_path()));
+    // The agent session is known in advance: the transcript is found by its id.
+    assert_eq!(
+        session
+            .found
+            .as_ref()
+            .map(|found| found.agent_session_id.clone()),
+        Some(AGENT_SESSION_ID.to_owned())
+    );
+    let runner = std::fs::read_to_string(
+        launch::agents_dir(&worktree).join(worker.machine.runner().unwrap().0.file_name()),
+    )
+    .unwrap();
+    assert!(runner.contains("--resume"), "{runner}");
+    assert!(runner.contains(AGENT_SESSION_ID), "{runner}");
+    // The prompt of the first run is not written again: the agent has it in its history.
+    assert!(
+        !launch::agents_dir(&worktree)
+            .join(launch::PROMPT_FILE)
+            .exists()
+    );
+    assert_eq!(host.tabs.lock().len(), 1);
+    drop(state);
+
+    // The worktree is gone: there is nothing to restore.
+    let mut missing = resume.clone();
+    missing.worktree = dir
+        .path()
+        .join("no-such-worktree")
+        .to_string_lossy()
+        .into_owned();
+    let mut other = assignment;
+    other.session_id = "s-restored-2".to_owned();
+    futures::executor::block_on(worker.start_resumed(
+        other,
+        provider::by_id("claude").unwrap(),
+        missing,
+    ));
+    let state = worker.state.lock();
+    let failed = state.sessions.last().unwrap();
+    assert!(failed.is_done());
+    assert_eq!(failed.status, SessionStatus::Failed);
+    let message = failed.message.clone().unwrap_or_default();
+    assert!(message.contains("Восстановить не из чего"), "{message}");
 }
 
 /// The transcript stands still in the middle of a turn: the agent called a tool and waits for
@@ -1875,8 +1970,9 @@ fn an_executor_that_is_still_writing_keeps_its_session() {
     // Now it is quiet after that line too.
     std::thread::sleep(Duration::from_millis(300));
     futures::executor::block_on(worker.advance(&mut session));
-    assert!(session.is_done());
+    assert!(!session.is_done());
     assert_eq!(session.status, SessionStatus::Review);
+    assert!(machine.stopped.lock().is_empty());
 }
 
 /// A launch that never wrote a line is not a finished one: it keeps the old way out, `failed`

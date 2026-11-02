@@ -242,8 +242,14 @@ pub trait Provider: Send + Sync {
     /// The executable looked up in `PATH`.
     fn binary(&self) -> &'static str;
 
-    /// `session_name`: `<taskNumber> <title>`; `model`: `None` for the agent's default.
-    fn command(&self, session_name: &str, model: Option<&str>) -> AgentCommand;
+    /// `session_name`: `<taskNumber> <title>`; `model`: `None` for the agent's default;
+    /// `resume`: the agent session to continue instead of starting a new one.
+    fn command(
+        &self,
+        session_name: &str,
+        model: Option<&str>,
+        resume: Option<&str>,
+    ) -> AgentCommand;
 
     /// Answers in the agent's own files, before its tab starts, whatever it would otherwise ask
     /// the owner about a working directory it does not know: nobody is watching that tab, and a
