@@ -110,13 +110,21 @@ pub fn orchestrator_prompt(ctx: &PromptContext<'_>) -> String {
         "Работай по плейбуку {}: прочитай его целиком и следуй ему. Коротко: прочитать \
          карточку и связанные заметки, решить, нужно ли досье, завести или обновить его в \
          {}/<Проект>/, проверить, не стоит ли рядом ещё несколько таких же мелких задач того \
-         же репозитория (группировка), выбрать репозиторий, базовую ветку и имя ветки по \
-         соглашению самого репозитория (`git branch -a`), собрать промпт по шаблону {} и \
-         выбрать модель по правилу шаблона. Блок «Контекст» карточки — по {}.\n\n",
+         же репозитория (группировка), выбрать репозиторий, базовую ветку и имя ветки, \
+         собрать промпт по шаблону {} и выбрать модель по правилу шаблона. Блок «Контекст» \
+         карточки — по {}.\n\n",
         vault.inside(vault.playbook()),
         vault.inside(vault.dossier_dir()),
         vault.inside(vault.prompt_template()),
         vault.inside(vault.context_playbook()),
+    ));
+    text.push_str(&format!(
+        "Имя ветки: `<тип>/{number}-<тема>`. Тема — суть задачи коротко по-английски, 2-4 \
+         слова в kebab-case, а не пересказ заголовка карточки. Транслитерировать русские слова \
+         в имени ветки нельзя: не `feature/{number}-uvedomlenie-o-restarte`, а \
+         `feature/{number}-restart-tech-channel-notify`. Тип — по соглашению самого \
+         репозитория, если оно видно в `git branch -a` (`feature/`, `fix/` и т.п.); иначе \
+         `feature/` для фич и `fix/` для багов.\n\n"
     ));
     text.push_str(&format!(
         "Волт на этой машине: {}. Личные проекты идут автономно: промпт владельцу на \
@@ -211,7 +219,7 @@ fn plan_example(assignment: &Assignment, number: u64) -> String {
         base_branch: field(&assignment.base_branch, "<база, например main>"),
         branch: field(
             &assignment.branch,
-            &format!("feature/{number}-<короткий-слаг>"),
+            &format!("feature/{number}-<тема-по-английски>"),
         ),
         prompt: field(&assignment.prompt, "<полный промпт исполнителю>"),
         dossier_path: "11-Задачи/Активные/<Проект>/<префикс>. <Задача>.md".to_owned(),
