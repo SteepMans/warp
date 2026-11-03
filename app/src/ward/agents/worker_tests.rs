@@ -124,6 +124,10 @@ struct FakeHost {
     typed: Mutex<Vec<(String, String)>>,
     /// The panes brought forward, in the order the owner asked for them.
     focused: Mutex<Vec<String>>,
+    /// The panes whose output Ward keeps.
+    tapped: Mutex<Vec<String>>,
+    /// The streams opened: the pane, the address and the token.
+    streamed: Mutex<Vec<(String, String, String)>>,
     snapshot: Mutex<Snapshot>,
     /// What the orchestrator "writes" as its plan when its tab opens.
     plan: Mutex<Option<(PathBuf, String)>>,
@@ -140,6 +144,8 @@ impl FakeHost {
             panes: Mutex::new(Vec::new()),
             typed: Mutex::new(Vec::new()),
             focused: Mutex::new(Vec::new()),
+            tapped: Mutex::new(Vec::new()),
+            streamed: Mutex::new(Vec::new()),
             snapshot: Mutex::new(Snapshot::default()),
             plan: Mutex::new(None),
         }
@@ -283,6 +289,23 @@ impl Host for FakeHost {
             return Err("the session's tab is closed".to_owned());
         }
         self.focused.lock().push(pane_uuid.to_owned());
+        Ok(())
+    }
+
+    async fn tap_pane(&self, pane_uuid: &str) {
+        let mut tapped = self.tapped.lock();
+        if !tapped.iter().any(|pane| pane == pane_uuid) {
+            tapped.push(pane_uuid.to_owned());
+        }
+    }
+
+    async fn stream_pane(&self, pane_uuid: &str, url: &str, token: &str) -> Result<(), String> {
+        if !self.panes.lock().iter().any(|pane| pane.uuid == pane_uuid) {
+            return Err("the session's tab is closed".to_owned());
+        }
+        self.streamed
+            .lock()
+            .push((pane_uuid.to_owned(), url.to_owned(), token.to_owned()));
         Ok(())
     }
 
@@ -2360,6 +2383,85 @@ fn show_from_another_machine_opens_the_session_without_taking_the_screen() {
 }
 
 /// The owner's «Открыть в Варде» for a session.
+/// The owner opened the window of the session from another machine: its tab goes to the
+/// service with the worker token, nothing comes forward on this screen.
+#[test]
+fn stream_sends_the_tab_of_the_session_to_the_service() {
+    let dir = tempfile::tempdir().unwrap();
+    let worktree = dir.path().join("agents-work").join("worktree");
+    let transcript = dir.path().join("executor.jsonl");
+    std::fs::write(&transcript, PROMPT_LINE).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let (after, host, mut sessions) = picked_up_with_panes(
+        dir.path(),
+        machine,
+        &transcript,
+        Some("pane-7"),
+        vec![(
+            "pane-7".to_owned(),
+            Some(AGENT_SESSION_ID.to_owned()),
+            worktree,
+        )],
+    );
+    after.state.lock().registration = Some(Registration {
+        fingerprint: "f".to_owned(),
+        worker_id: "w".to_owned(),
+        token: "agw_stream".to_owned(),
+        repos: None,
+    });
+    apply_command(
+        &mut sessions,
+        Command::Stream {
+            session_id: "s-idle".to_owned(),
+        },
+    );
+    futures::executor::block_on(after.stream_session(&mut sessions[0]));
+    assert_eq!(
+        *host.streamed.lock(),
+        [(
+            "pane-7".to_owned(),
+            "ws://127.0.0.1:1/agents/api/v1/worker/stream/s-idle".to_owned(),
+            "agw_stream".to_owned()
+        )]
+    );
+    assert_eq!(*host.tapped.lock(), ["pane-7".to_owned()]);
+    assert!(host.focused.lock().is_empty());
+    assert!(host.tabs.lock().is_empty());
+    // The request is taken: the next tick does not open a second stream.
+    futures::executor::block_on(after.stream_session(&mut sessions[0]));
+    assert_eq!(host.streamed.lock().len(), 1);
+}
+
+/// Without a registration there is no token to stream with: nothing is sent.
+#[test]
+fn stream_without_a_registration_sends_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let worktree = dir.path().join("agents-work").join("worktree");
+    let transcript = dir.path().join("executor.jsonl");
+    std::fs::write(&transcript, PROMPT_LINE).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let (after, host, mut sessions) = picked_up_with_panes(
+        dir.path(),
+        machine,
+        &transcript,
+        Some("pane-7"),
+        vec![(
+            "pane-7".to_owned(),
+            Some(AGENT_SESSION_ID.to_owned()),
+            worktree,
+        )],
+    );
+    after.state.lock().registration = None;
+    apply_command(
+        &mut sessions,
+        Command::Stream {
+            session_id: "s-idle".to_owned(),
+        },
+    );
+    futures::executor::block_on(after.stream_session(&mut sessions[0]));
+    assert!(host.streamed.lock().is_empty());
+}
+
 fn show_command(remote: bool) -> Command {
     Command::Show {
         session_id: "s-idle".to_owned(),

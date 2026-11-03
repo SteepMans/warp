@@ -306,6 +306,18 @@ fn show_commands_are_parsed() {
 }
 
 #[test]
+fn stream_commands_are_parsed() {
+    let response = parse_heartbeat(r#"{"commands":[{"type":"stream","sessionId":"s3"}]}"#).unwrap();
+    assert_eq!(
+        response.commands,
+        vec![Command::Stream {
+            session_id: "s3".to_owned()
+        }]
+    );
+    assert_eq!(response.commands[0].session_id(), "s3");
+}
+
+#[test]
 fn inbox_parses_assignments_with_providers() {
     let inbox = parse_inbox(
         r#"{"assignments":[{
