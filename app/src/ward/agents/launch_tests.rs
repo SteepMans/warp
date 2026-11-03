@@ -136,6 +136,7 @@ fn pwsh_runner_clears_env_and_writes_the_exit_code() {
         Path::new("C:/w/t/.agents"),
         Path::new("C:/w/t"),
         &command,
+        true,
     );
     let expected = [
         "Set-Content -LiteralPath 'C:/w/t/.agents/runner.pid' -Value $PID -NoNewline",
@@ -165,6 +166,7 @@ fn sh_runner_for_codex() {
         Path::new("/w/t/.agents"),
         Path::new("/w/t"),
         &command,
+        true,
     );
     assert!(script.starts_with("#!/bin/sh\n"));
     assert!(script.contains("echo $$ > '/w/t/.agents/runner.pid'"));
@@ -176,6 +178,41 @@ fn sh_runner_for_codex() {
     assert!(script.contains("prompt=$(cat '/w/t/.agents/prompt.md')"));
     assert!(script.contains("'codex' '--dangerously-bypass-approvals-and-sandbox' -- \"$prompt\""));
     assert!(script.contains("mv -f '/w/t/.agents/exit-code.tmp' '/w/t/.agents/exit-code'"));
+}
+
+/// A resumed agent has the task in its own history: sending the prompt again would start the
+/// work from the beginning.
+#[test]
+fn a_resumed_runner_does_not_send_the_prompt_again() {
+    let claude = provider::by_id("claude").unwrap();
+    let command = claude.command("4623 x", None, Some("1983b47a-e49e-4e93-8014-ec0cbdbdefd3"));
+    let script = runner_script(
+        RunnerKind::Pwsh,
+        Path::new("C:/w/t/.agents"),
+        Path::new("C:/w/t"),
+        &command,
+        false,
+    );
+    assert!(!script.contains("prompt.md"), "{script}");
+    assert!(!script.contains("$prompt"), "{script}");
+    assert!(
+        script.contains("'--resume' '1983b47a-e49e-4e93-8014-ec0cbdbdefd3'"),
+        "{script}"
+    );
+    assert!(script.contains("Set-Content -LiteralPath 'C:/w/t/.agents/exit-code.tmp'"));
+
+    let command = provider::by_id("codex")
+        .unwrap()
+        .command("1 x", None, Some("c-1"));
+    let script = runner_script(
+        RunnerKind::Sh,
+        Path::new("/w/t/.agents"),
+        Path::new("/w/t"),
+        &command,
+        false,
+    );
+    assert!(!script.contains("prompt"), "{script}");
+    assert!(script.contains("'codex' 'resume' 'c-1' '--dangerously-bypass-approvals-and-sandbox'"));
 }
 
 #[test]
@@ -237,7 +274,7 @@ fn pwsh_runner_end_to_end() {
     let runner = agents.join(RunnerKind::Pwsh.file_name());
     std::fs::write(
         &runner,
-        runner_script(RunnerKind::Pwsh, &agents, worktree, &command),
+        runner_script(RunnerKind::Pwsh, &agents, worktree, &command, true),
     )
     .unwrap();
     let status = command::blocking::Command::new("pwsh")

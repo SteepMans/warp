@@ -173,6 +173,9 @@ pub trait Host: Send + Sync {
     async fn find_pane(&self, query: PaneQuery) -> Option<String>;
     /// Types `text` into the agent of the pane and submits it.
     async fn send_text(&self, pane_uuid: &str, text: &str) -> Result<(), String>;
+    /// Brings the tab of the pane forward and the window with it: the owner asked for the
+    /// session on his screen.
+    async fn focus_pane(&self, pane_uuid: &str) -> Result<(), String>;
     async fn publish(&self, snapshot: Snapshot);
 }
 
@@ -474,8 +477,17 @@ struct Session {
     plan_outbox: Option<Plan>,
     /// The owner's answer in `plan-review`: `Ok` for `approve`, the reason for `reject`.
     approval: Option<Result<(), String>>,
+    /// The owner asked for the session on his screen and it is not there yet.
+    show: Option<ShowRequest>,
     /// Whose transcript the journal is reading now.
     role: Option<&'static str>,
+}
+
+/// The owner pressed «Открыть в Варде» on the card.
+#[derive(Clone, Copy, Debug)]
+struct ShowRequest {
+    /// He is at another machine: nothing comes forward here, the session only has to run.
+    remote: bool,
 }
 
 impl Session {
@@ -508,6 +520,7 @@ impl Session {
             plan: None,
             plan_outbox: None,
             approval: None,
+            show: None,
             role: None,
         }
     }
@@ -533,6 +546,34 @@ impl Session {
                 .as_ref()
                 .map(|prepare| prepare.vault_dir.clone()),
             _ => self.worktree.clone(),
+        }
+    }
+
+    /// The directory the agent of this session opened in, whatever phase the session is in
+    /// now: unlike [`Self::agent_cwd`] a session that is over keeps the answer, so its tab can
+    /// be opened again.
+    fn agent_dir(&self) -> Option<PathBuf> {
+        self.agent_cwd().or_else(|| {
+            self.prepare
+                .as_ref()
+                .map(|prepare| prepare.vault_dir.clone())
+        })
+    }
+
+    /// Where Ward keeps the files of the run: `.agents` of the worktree for the executor, the
+    /// session's own directory for the orchestrator of the preparation phase.
+    fn agent_files(&self) -> Option<PathBuf> {
+        let prepare = || {
+            self.prepare
+                .as_ref()
+                .map(|prepare: &PrepareRun| prepare.dir.clone())
+        };
+        match &self.phase {
+            Phase::Prepare { .. } | Phase::PrepareExit { .. } => prepare(),
+            _ => match &self.worktree {
+                Some(worktree) => Some(launch::agents_dir(worktree)),
+                None => prepare(),
+            },
         }
     }
 
@@ -1514,7 +1555,7 @@ impl Worker {
             .filter(|model| !model.is_empty());
         let name = prepare::session_name(&session.assignment.task_ref, &session.assignment.title);
         let command = orchestrator.command(&name, model, None);
-        let script = launch::runner_script(kind, &dir, &vault_dir, &command);
+        let script = launch::runner_script(kind, &dir, &vault_dir, &command, true);
         let runner = dir.join(kind.file_name());
         std::fs::write(&runner, script).map_err(|err| err.to_string())?;
         self.prepare_workspace(orchestrator, &vault_dir);
@@ -2022,6 +2063,7 @@ impl Worker {
                 .map(|config| config.root.clone());
             for session in &mut sessions {
                 self.advance(session).await;
+                self.show_session(session).await;
                 self.deliver(session).await;
                 // After the delivery: what is saved is the journal position the service has
                 // confirmed, so a crash of Ward costs at most this tick.
@@ -2172,7 +2214,7 @@ impl Worker {
             .map(str::trim)
             .filter(|model| !model.is_empty());
         let command = session.provider.command(&name, model, resume);
-        let script = launch::runner_script(kind, &agents, worktree, &command);
+        let script = launch::runner_script(kind, &agents, worktree, &command, resume.is_none());
         let runner = agents.join(kind.file_name());
         std::fs::write(&runner, script).map_err(|err| err.to_string())?;
         self.prepare_workspace(session.provider, worktree);
@@ -2611,6 +2653,92 @@ impl Worker {
             session.pane_uuid = found.clone();
         }
         found
+    }
+
+    /// Puts the session in front of the owner. Its own tab comes forward; a session whose tab
+    /// is gone gets the agent back in a new tab, resumed where it stopped and without the task
+    /// prompt again. From another machine (`remote`) nothing comes forward here: the session
+    /// only has to run, and the agent found again reports its remote control link.
+    async fn show_session(&self, session: &mut Session) {
+        let Some(show) = session.show.take() else {
+            return;
+        };
+        let mut pane = self.find_pane(session).await;
+        if pane.is_none() {
+            match self.reopen(session).await {
+                Ok(opened) => {
+                    log::info!(
+                        "Ward agents: session {} opened again for the owner",
+                        session.assignment.session_id
+                    );
+                    session.pane_uuid = opened.clone();
+                    pane = opened;
+                    // The resumed agent is another process with another remote control link:
+                    // the next tick looks it up again and reports it.
+                    if show.remote && !session.is_done() {
+                        session.found = None;
+                    }
+                }
+                Err(err) => log::warn!(
+                    "Ward agents: could not open session {} for the owner: {err}",
+                    session.assignment.session_id
+                ),
+            }
+        }
+        if show.remote {
+            return;
+        }
+        let Some(pane) = pane else { return };
+        if let Err(err) = self.host.focus_pane(&pane).await {
+            log::warn!("Ward agents: could not bring the session forward: {err}");
+        }
+    }
+
+    /// Opens the tab of a session that lost it, resuming the agent that ran in it. The prompt
+    /// and the plan of the run stay as they are; only the runner is written again.
+    async fn reopen(&self, session: &Session) -> Result<Option<String>, String> {
+        let agent = session
+            .found
+            .as_ref()
+            .map(|found| found.agent_session_id.clone())
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| "the session has no agent to resume".to_owned())?;
+        let cwd = session
+            .agent_dir()
+            .ok_or_else(|| "the session has no directory of its own".to_owned())?;
+        let files = session
+            .agent_files()
+            .ok_or_else(|| "the session has no files of its own".to_owned())?;
+        if !cwd.is_dir() {
+            return Err(format!("{} is not a directory", cwd.display()));
+        }
+        let (kind, bash) = self
+            .machine
+            .runner()
+            .ok_or_else(|| "no pwsh or Git Bash".to_owned())?;
+        std::fs::create_dir_all(&files).map_err(|err| err.to_string())?;
+        let _ = std::fs::remove_file(files.join(launch::EXIT_CODE_FILE));
+        let _ = std::fs::remove_file(files.join(launch::RUNNER_PID_FILE));
+        let name = launch::session_name(&session.assignment.task_ref, &session.assignment.title);
+        let model = session
+            .assignment
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty());
+        let command = session.provider.command(&name, model, Some(&agent));
+        let script = launch::runner_script(kind, &files, &cwd, &command, false);
+        let runner = files.join(kind.file_name());
+        std::fs::write(&runner, script).map_err(|err| err.to_string())?;
+        self.prepare_workspace(session.provider, &cwd);
+        self.host
+            .open_tab(TabSpec {
+                cwd,
+                title: name,
+                command: launch::tab_command(kind, &runner, bash.as_deref()),
+                shell: shell_of(kind),
+            })
+            .await
     }
 
     /// Types the owner's messages into the tab of the agent running now. The tab is looked for
@@ -3335,6 +3463,8 @@ fn apply_command(sessions: &mut [Session], command: Command) {
                 log::info!("Ward agents: reject for a session that waits for nothing");
             }
         }
+        // Also for a session that is over: its tab is what the owner goes on talking in.
+        Command::Show { remote, .. } => session.show = Some(ShowRequest { remote }),
     }
 }
 
