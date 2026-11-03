@@ -27,7 +27,6 @@ pub struct PtyRecorder {
     /// Whether the per-session recording toggle is enabled.
     is_per_session_recording_enabled: bool,
     /// Inactive receiver for PTY reads. Only `Some` for local TTY sessions.
-    #[cfg_attr(not(feature = "local_fs"), expect(dead_code))]
     pty_reads_rx: Option<InactiveReceiver<Arc<Vec<u8>>>>,
     /// Window ID used for showing toasts.
     window_id: WindowId,
@@ -81,6 +80,12 @@ impl PtyRecorder {
     #[cfg(not(feature = "local_fs"))]
     fn recording_path(_ctx: &ModelContext<Self>) -> PathBuf {
         PathBuf::new()
+    }
+
+    /// The PTY reads of the session, for another consumer than the recording (Ward streams
+    /// the tab of an agent session with it). `None` for sessions that are not local.
+    pub fn pty_reads(&self) -> Option<InactiveReceiver<Arc<Vec<u8>>>> {
+        self.pty_reads_rx.clone()
     }
 
     /// Whether recording is currently active.

@@ -64,6 +64,7 @@ use super::prepare;
 use super::profile::{self, Vault};
 use super::provider::{self, FoundSession, Homes, LastTurn, Provider, WardUsage};
 use super::resume::{self, SavedAgent, SavedJournal, SavedPhase, SavedPrepare, SavedSession};
+use super::stream;
 
 /// What the worker needs from the settings. `Debug` leaves the key out.
 #[derive(Clone, PartialEq, Eq)]
@@ -176,6 +177,13 @@ pub trait Host: Send + Sync {
     /// Brings the tab of the pane forward and the window with it: the owner asked for the
     /// session on his screen.
     async fn focus_pane(&self, pane_uuid: &str) -> Result<(), String>;
+    /// Starts keeping the recent output of the pane, so that a stream opened later starts with
+    /// what is on the screen (see [`super::stream::Tap`]). Called on every tick: a pane kept
+    /// already is left as it is.
+    async fn tap_pane(&self, pane_uuid: &str);
+    /// Streams the pane to `url` (a WebSocket of the service) with the worker `token` until the
+    /// service or the tab closes it. A pane that is streaming already is not streamed twice.
+    async fn stream_pane(&self, pane_uuid: &str, url: &str, token: &str) -> Result<(), String>;
     async fn publish(&self, snapshot: Snapshot);
 }
 
@@ -479,6 +487,8 @@ struct Session {
     approval: Option<Result<(), String>>,
     /// The owner asked for the session on his screen and it is not there yet.
     show: Option<ShowRequest>,
+    /// The owner at another machine opened the session's window: the tab goes to the service.
+    stream: bool,
     /// Whose transcript the journal is reading now.
     role: Option<&'static str>,
 }
@@ -521,6 +531,7 @@ impl Session {
             plan_outbox: None,
             approval: None,
             show: None,
+            stream: false,
             role: None,
         }
     }
@@ -2064,6 +2075,10 @@ impl Worker {
             for session in &mut sessions {
                 self.advance(session).await;
                 self.show_session(session).await;
+                self.stream_session(session).await;
+                if let Some(pane) = &session.pane_uuid {
+                    self.host.tap_pane(pane).await;
+                }
                 self.deliver(session).await;
                 // After the delivery: what is saved is the journal position the service has
                 // confirmed, so a crash of Ward costs at most this tick.
@@ -2663,27 +2678,11 @@ impl Worker {
         let Some(show) = session.show.take() else {
             return;
         };
-        let mut pane = self.find_pane(session).await;
-        if pane.is_none() {
-            match self.reopen(session).await {
-                Ok(opened) => {
-                    log::info!(
-                        "Ward agents: session {} opened again for the owner",
-                        session.assignment.session_id
-                    );
-                    session.pane_uuid = opened.clone();
-                    pane = opened;
-                    // The resumed agent is another process with another remote control link:
-                    // the next tick looks it up again and reports it.
-                    if show.remote && !session.is_done() {
-                        session.found = None;
-                    }
-                }
-                Err(err) => log::warn!(
-                    "Ward agents: could not open session {} for the owner: {err}",
-                    session.assignment.session_id
-                ),
-            }
+        let (pane, reopened) = self.pane_or_reopen(session).await;
+        // The resumed agent is another process with another remote control link: the next tick
+        // looks it up again and reports it.
+        if reopened && show.remote && !session.is_done() {
+            session.found = None;
         }
         if show.remote {
             return;
@@ -2691,6 +2690,54 @@ impl Worker {
         let Some(pane) = pane else { return };
         if let Err(err) = self.host.focus_pane(&pane).await {
             log::warn!("Ward agents: could not bring the session forward: {err}");
+        }
+    }
+
+    /// The tab of the session, opened again when it is gone; `true` when it had to be opened.
+    async fn pane_or_reopen(&self, session: &mut Session) -> (Option<String>, bool) {
+        if let Some(pane) = self.find_pane(session).await {
+            return (Some(pane), false);
+        }
+        match self.reopen(session).await {
+            Ok(opened) => {
+                log::info!(
+                    "Ward agents: session {} opened again for the owner",
+                    session.assignment.session_id
+                );
+                session.pane_uuid = opened.clone();
+                (opened, true)
+            }
+            Err(err) => {
+                log::warn!(
+                    "Ward agents: could not open session {} for the owner: {err}",
+                    session.assignment.session_id
+                );
+                (None, false)
+            }
+        }
+    }
+
+    /// Sends the session's tab to the owner at another machine, see [`super::stream`].
+    async fn stream_session(&self, session: &mut Session) {
+        if !std::mem::take(&mut session.stream) {
+            return;
+        }
+        let (pane, reopened) = self.pane_or_reopen(session).await;
+        if reopened && !session.is_done() {
+            session.found = None;
+        }
+        let Some(pane) = pane else { return };
+        let Some((base_url, token)) = self.credentials() else {
+            log::warn!("Ward agents: no registration to stream the session with");
+            return;
+        };
+        let Some(url) = stream::worker_url(&base_url, &session.assignment.session_id) else {
+            log::warn!("Ward agents: no stream address for {base_url}");
+            return;
+        };
+        self.host.tap_pane(&pane).await;
+        if let Err(err) = self.host.stream_pane(&pane, &url, &token).await {
+            log::warn!("Ward agents: could not stream the session: {err}");
         }
     }
 
@@ -3465,6 +3512,7 @@ fn apply_command(sessions: &mut [Session], command: Command) {
         }
         // Also for a session that is over: its tab is what the owner goes on talking in.
         Command::Show { remote, .. } => session.show = Some(ShowRequest { remote }),
+        Command::Stream { .. } => session.stream = true,
     }
 }
 

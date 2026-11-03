@@ -17223,6 +17223,14 @@ impl TerminalView {
         &self.size_info
     }
 
+    /// The raw PTY output of this session, see [`PtyRecorder::pty_reads`].
+    pub fn pty_reads(
+        &self,
+        ctx: &AppContext,
+    ) -> Option<async_broadcast::InactiveReceiver<Arc<Vec<u8>>>> {
+        self.pty_recorder.as_ref(ctx).pty_reads()
+    }
+
     pub fn colors(&self) -> &color::List {
         &self.colors
     }

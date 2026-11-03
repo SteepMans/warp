@@ -384,6 +384,13 @@ pub enum Command {
         #[serde(default)]
         remote: bool,
     },
+    /// The owner at another machine opened the session's window: Ward streams its tab to the
+    /// service, which relays it to the browser (see [`super::stream`]). A tab that is gone is
+    /// opened again first, as for `show`.
+    Stream {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+    },
 }
 
 impl Command {
@@ -393,7 +400,8 @@ impl Command {
             | Self::Message { session_id, .. }
             | Self::Approve { session_id }
             | Self::Reject { session_id, .. }
-            | Self::Show { session_id, .. } => session_id,
+            | Self::Show { session_id, .. }
+            | Self::Stream { session_id } => session_id,
         }
     }
 }
