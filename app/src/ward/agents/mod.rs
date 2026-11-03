@@ -42,6 +42,7 @@ pub mod launch;
 pub mod machine;
 pub mod plan;
 pub mod prepare;
+pub mod presence;
 pub mod profile;
 pub mod provider;
 pub mod resume;
@@ -333,6 +334,8 @@ pub fn model(app: &AppContext) -> Option<&AgentsModel> {
 /// Opens tabs, types into them and reads the settings on the main thread for the worker.
 struct UiHost {
     spawner: ModelSpawner<AgentsModel>,
+    /// What the card in the browser on this computer is told: see [`presence`].
+    presence: presence::Shared,
 }
 
 /// Bracketed paste markers: the agent's input box takes the text as one paste, newlines
@@ -486,11 +489,19 @@ fn open_tab(spec: TabSpec, ctx: &mut AppContext) -> Result<Option<String>, Strin
 #[async_trait]
 impl Host for UiHost {
     async fn config(&self) -> Option<WorkerConfig> {
-        self.spawner
+        let config = self
+            .spawner
             .spawn(|_, ctx| config(ctx))
             .await
             .ok()
-            .flatten()
+            .flatten();
+        let now = config
+            .as_ref()
+            .and_then(|config| presence::presence_of(&config.name, &config.base_url));
+        if let Ok(mut shared) = self.presence.write() {
+            *shared = now;
+        }
+        config
     }
 
     async fn load_registration(&self) -> Option<Registration> {
@@ -576,9 +587,12 @@ pub fn init(ctx: &mut AppContext) {
         log::warn!("Ward agents: no home directory; the worker is off");
         return;
     };
+    let shared: presence::Shared = Arc::default();
+    presence::start(shared.clone());
     ctx.add_singleton_model(|ctx| {
         let host = Arc::new(UiHost {
             spawner: ctx.spawner(),
+            presence: shared,
         });
         let profile_target = profile::Target::of_machine(&homes);
         let worker = Worker::new(
