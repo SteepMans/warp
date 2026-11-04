@@ -51,6 +51,7 @@ pub use tab_metadata::TerminalRowModelState;
 mod testing;
 mod tooltips;
 pub mod use_agent_footer;
+mod ward_remote;
 mod zero_state_block;
 
 use std::any::Any;
@@ -8865,6 +8866,9 @@ impl TerminalView {
         if model.is_read_only() {
             return false;
         }
+        if self.ward_remote_hides_input(model) {
+            return false;
+        }
         // Warp's own headless TUI (`warp_tui`) is itself an agent surface, so
         // suppress the outer agent input bar while it runs in this pane. Uses
         // the same command-based detection as the CLI agent footer (see
@@ -12933,6 +12937,7 @@ impl TerminalView {
                 if *is_for_in_band_command {
                     return;
                 }
+                self.ward_remote_block_started(block_id, ctx);
                 self.did_notify_long_running = false;
 
                 // Snapshot the prompt state as of when the command began executing.
@@ -13129,6 +13134,7 @@ impl TerminalView {
                 cloud_workflow_id,
                 cloud_env_var_collection_id,
             }) => {
+                self.ward_remote_block_completed(ctx);
                 // To automatically warpify a subshell, we run the relevant command to open the
                 // subshell and create a future to delay bootstrapping the subshell long enough for
                 // the command to complete. We receive AfterBlockCompleted if the subshell command

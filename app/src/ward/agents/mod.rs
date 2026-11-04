@@ -34,7 +34,9 @@
 //!
 //! The tab of a session on another machine can be opened here as well: the card asks this Ward
 //! on its loopback answer, and a tab of its own shows the stream of that session's tab, keys
-//! going back ([`attach`]).
+//! going back ([`attach`]). That tab says it is remote control and of which machine
+//! ([`remote_tab`]); the tab of the session takes the size of the viewer while it watches
+//! ([`stream`]).
 
 pub mod about;
 pub mod admission;
@@ -51,6 +53,7 @@ pub mod prepare;
 pub mod presence;
 pub mod profile;
 pub mod provider;
+pub mod remote_tab;
 pub mod resume;
 pub mod sessions;
 pub mod stream;
@@ -380,6 +383,19 @@ fn pane_size_of(pane_uuid: &str, ctx: &AppContext) -> Option<(usize, usize)> {
     Some((size.columns(), size.rows()))
 }
 
+/// Gives the PTY of the pane the size of a viewer of its stream, or the size of the pane back
+/// with `None` (see [`stream::Sizing`]); the size the terminal has after, `None` when the tab is
+/// gone.
+fn resize_pane_for_viewer(
+    pane_uuid: &str,
+    size: Option<(usize, usize)>,
+    ctx: &mut AppContext,
+) -> Option<(usize, usize)> {
+    let view = terminal_view_of(pane_uuid, ctx)?;
+    view.update(ctx, |view, ctx| view.ward_set_remote_viewer_size(size, ctx));
+    pane_size_of(pane_uuid, ctx)
+}
+
 /// Writes keys into the pane as they come, without the paste markers of [`send_text_to_pane`]:
 /// the viewer of a stream types, he does not paste.
 fn write_bytes_to_pane(
@@ -452,21 +468,36 @@ async fn pane_size(spawner: &ModelSpawner<AgentsModel>, pane: &str) -> Option<(u
 }
 
 /// One stream of a tab, from the connection to the end; the pane can be streamed again after.
+/// A size a viewer gave the tab ends with the stream: the tab gets the size of its pane back.
 async fn run_stream(job: StreamJob) {
     let pane = job.pane.clone();
     let streams = job.streams.clone();
-    match stream_tab(job).await {
+    let spawner = job.spawner.clone();
+    let sizing = Arc::new(parking_lot::Mutex::new(stream::Sizing::default()));
+    match stream_tab(job, sizing.clone()).await {
         Ok(()) => log::info!("Ward agents: the stream of a session is over"),
         Err(err) => log::warn!("Ward agents: the stream of a session broke: {err:#}"),
+    }
+    let back = sizing.lock().on_end();
+    if back.is_some() {
+        let resized = pane.clone();
+        let _ = spawner
+            .spawn(move |_, ctx| resize_pane_for_viewer(&resized, None, ctx))
+            .await;
+        log::info!("Ward agents: the tab of a session has the size of its pane again");
     }
     streams.lock().remove(&pane);
 }
 
 /// Connects to the service and streams the tab: its size, the recent output, then every new
-/// read; the keys of the viewers go into the tab. Over when the service closes the socket, the
-/// socket breaks or the tab is gone.
-async fn stream_tab(job: StreamJob) -> anyhow::Result<()> {
-    use futures::{SinkExt as _, StreamExt as _};
+/// read; the keys of the viewers go into the tab, and the size a viewer gives it goes to its
+/// PTY ([`stream::Sizing`]). Over when the service closes the socket, the socket breaks or the
+/// tab is gone.
+async fn stream_tab(
+    job: StreamJob,
+    sizing: Arc<parking_lot::Mutex<stream::Sizing>>,
+) -> anyhow::Result<()> {
+    use futures::{FutureExt as _, SinkExt as _, StreamExt as _};
     use websocket::WebsocketMessage as _;
 
     let StreamJob {
@@ -498,6 +529,9 @@ async fn stream_tab(job: StreamJob) -> anyhow::Result<()> {
     }
 
     let (out_tx, out_rx) = async_channel::unbounded::<Out>();
+    // The size the viewers were told last: by the check below, or at once after the size of a
+    // viewer was given to the tab.
+    let last_size = Arc::new(parking_lot::Mutex::new(size));
     let forward = {
         let out_tx = out_tx.clone();
         async move {
@@ -511,8 +545,9 @@ async fn stream_tab(job: StreamJob) -> anyhow::Result<()> {
     let watch = {
         let spawner = spawner.clone();
         let pane = pane.clone();
+        let out_tx = out_tx.clone();
+        let last_size = last_size.clone();
         async move {
-            let mut last = size;
             let mut ticks: u32 = 0;
             loop {
                 async_io::Timer::after(stream::SIZE_CHECK).await;
@@ -521,8 +556,8 @@ async fn stream_tab(job: StreamJob) -> anyhow::Result<()> {
                 let Some(now) = pane_size(&spawner, &pane).await else {
                     break;
                 };
-                if last != Some(now) {
-                    last = Some(now);
+                let changed = last_size.lock().replace(now) != Some(now);
+                if changed {
                     let text = stream::size_message(now.0, now.1);
                     if out_tx.send(Out::Text(text)).await.is_err() {
                         break;
@@ -556,6 +591,43 @@ async fn stream_tab(job: StreamJob) -> anyhow::Result<()> {
         let pane = pane.clone();
         async move {
             while let Some(Ok(message)) = incoming.next().await {
+                if let Some(text) = message.text() {
+                    let resize = stream::parse_viewer_frame(text)
+                        .and_then(|frame| sizing.lock().on_frame(frame));
+                    let Some(resize) = resize else {
+                        continue;
+                    };
+                    let resized = pane.clone();
+                    let Ok(now) = spawner
+                        .spawn(move |_, ctx| resize_pane_for_viewer(&resized, resize.size(), ctx))
+                        .await
+                    else {
+                        break;
+                    };
+                    match resize {
+                        stream::Resize::To { cols, rows } => log::info!(
+                            "Ward agents: the tab of a session takes the size of its viewer, \
+                             {cols}x{rows}"
+                        ),
+                        stream::Resize::Back => log::info!(
+                            "Ward agents: the tab of a session has the size of its pane again"
+                        ),
+                    }
+                    // The viewers learn the new size at once, ahead of the screen drawn at it.
+                    let Some(now) = now else {
+                        continue;
+                    };
+                    let changed = last_size.lock().replace(now) != Some(now);
+                    if changed
+                        && out_tx
+                            .send(Out::Text(stream::size_message(now.0, now.1)))
+                            .await
+                            .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
                 let Some(bytes) = message.binary() else {
                     continue;
                 };
@@ -572,11 +644,14 @@ async fn stream_tab(job: StreamJob) -> anyhow::Result<()> {
             }
         }
     };
-    let output_side = futures::future::join(
-        write,
+    // The first of the three to end ends the stream: the others are dropped with their senders,
+    // and the writer sends what is left and closes the socket.
+    let producers = futures::future::select(
+        Box::pin(read),
         futures::future::select(Box::pin(forward), Box::pin(watch)),
-    );
-    futures::future::select(Box::pin(read), Box::pin(output_side)).await;
+    )
+    .map(|_| ());
+    futures::future::join(write, producers).await;
     Ok(())
 }
 
@@ -699,10 +774,17 @@ fn focus_pane_of(pane_uuid: &str, ctx: &mut AppContext) -> Result<(), String> {
 fn open_attach_tab(tab: attach::Attach, ctx: &mut AppContext) -> Result<(), String> {
     let script = attach::script_path();
     attach::write_script(&script).map_err(|err| format!("could not write the viewer: {err}"))?;
-    let attach::Attach { url, title } = tab;
+    let attach::Attach {
+        url,
+        title,
+        task,
+        worker,
+    } = tab;
+    let remote = remote_tab::RemoteTab::new(worker.clone(), task.clone());
     let mut env_vars: HashMap<std::ffi::OsString, std::ffi::OsString> = HashMap::new();
     env_vars.insert(attach::URL_ENV_VAR.into(), url.into());
-    env_vars.insert(attach::TITLE_ENV_VAR.into(), title.clone().into());
+    env_vars.insert(attach::TITLE_ENV_VAR.into(), task.into());
+    env_vars.insert(attach::WORKER_ENV_VAR.into(), worker.into());
     let tab = UriTab {
         options: NewTerminalOptions {
             shell: uri_launch::find_shell("powershell", ctx),
@@ -720,10 +802,46 @@ fn open_attach_tab(tab: attach::Attach, ctx: &mut AppContext) -> Result<(), Stri
             .map(|(window_id, _)| *window_id)
     });
     let (window_id, opened) = uri_launch::open_tab_in_window(window_id, tab, ctx);
-    opened.ok_or_else(|| "could not open the tab".to_owned())?;
+    let opened = opened.ok_or_else(|| "could not open the tab".to_owned())?;
+    if let Some(pane_uuid) = opened.pane_uuid {
+        mark_remote_tab(&pane_uuid, remote, ctx);
+    }
     // The owner clicked in the browser: Ward comes forward with the new tab.
     ctx.windows().show_window_and_focus_app(window_id);
     Ok(())
+}
+
+/// Marks the tab just opened for a session on another machine (see [`remote_tab`]): its pane
+/// header, its tab and its row say so, and it goes to the group of remote tabs.
+fn mark_remote_tab(pane_uuid: &str, remote: remote_tab::RemoteTab, ctx: &mut AppContext) {
+    let mut alive = HashSet::new();
+    let mut target = None;
+    for (_, workspace) in WorkspaceRegistry::as_ref(ctx).all_workspaces(ctx) {
+        for pane_group in workspace.as_ref(ctx).tab_views() {
+            let group = pane_group.as_ref(ctx);
+            for view in group.terminal_views(ctx) {
+                alive.insert(view.id());
+                if target.is_none()
+                    && group
+                        .terminal_pane_session_uuid(view.id(), ctx)
+                        .is_some_and(|uuid| {
+                            crate::ward::chimney::bindings::uuid_hex(&uuid) == pane_uuid
+                        })
+                {
+                    target = Some((workspace.clone(), pane_group.id(), view));
+                }
+            }
+        }
+    }
+    remote_tab::retain(|view| alive.contains(&view));
+    let Some((workspace, pane_group_id, view)) = target else {
+        return;
+    };
+    remote_tab::register(view.id(), remote);
+    view.update(ctx, |view, ctx| view.ward_remote_tab_changed(ctx));
+    workspace.update(ctx, |workspace, ctx| {
+        workspace.ward_place_remote_tab(pane_group_id, ctx);
+    });
 }
 
 /// Opens the tabs the card asks for, one after another, until Ward quits.

@@ -283,6 +283,13 @@ impl TerminalView {
         // shown on every view, so a breadcrumb row alongside it would
         // double-render the same navigation affordance.
 
+        // Ward: the tab of a session on another machine says so instead.
+        if let Some(title) =
+            self.ward_render_remote_header_title(header_ctx.draggable_state.is_dragging(), app)
+        {
+            return title;
+        }
+
         let appearance = Appearance::as_ref(app);
         let pane_config = self.pane_configuration.as_ref(app);
         let title = pane_config.title().to_owned();
@@ -736,6 +743,7 @@ impl BackingView for TerminalView {
             || is_fullscreen_agent_view
             || FeatureFlag::ContextWindowUsageV2.is_enabled()
                 && self.split_pane_state(app).is_in_split_pane()
+            || self.ward_renders_remote_header()
     }
 
     fn render_header_content(

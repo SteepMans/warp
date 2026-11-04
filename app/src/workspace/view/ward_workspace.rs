@@ -25,6 +25,7 @@ use crate::terminal::session_settings::{NotificationsMode, SessionSettings};
 use crate::util::bindings::keybinding_name_to_display_string;
 use crate::view_components::{DismissibleToast, ToastFlavor, ToastLink};
 use crate::ward::agent_state::AgentState;
+use crate::ward::agents::remote_tab;
 use crate::ward::announcements::feed::{Announcement, Level};
 use crate::ward::announcements::{AnnouncementsEvent, AnnouncementsModel};
 use crate::ward::attention::AttentionCounts;
@@ -441,6 +442,14 @@ impl Workspace {
     /// wandering through directories would otherwise teach the map every folder it visits.
     fn ward_tab_project_keys(tab: &TabData, app: &AppContext) -> Vec<String> {
         let terminal_views = tab.pane_group.as_ref(app).visible_terminal_views(app);
+        // A remote tab shows a session of another machine: whatever directory it is in, it is
+        // no project of this one, and it stays in its own group.
+        if terminal_views
+            .iter()
+            .any(|view| remote_tab::is_remote(view.id()))
+        {
+            return Vec::new();
+        }
         let sessions = CLIAgentSessionsModel::as_ref(app);
         let agent_view = terminal_views
             .iter()
@@ -493,6 +502,19 @@ impl Workspace {
         for (pane_group_id, group) in moves {
             self.ward_move_tab_to_named_group(pane_group_id, &group, ctx);
         }
+    }
+
+    /// Puts the tab of a session on another machine into the group of remote tabs, apart from
+    /// the projects of this machine.
+    pub(crate) fn ward_place_remote_tab(
+        &mut self,
+        pane_group_id: EntityId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if !FeatureFlag::GroupedTabs.is_enabled() {
+            return;
+        }
+        self.ward_move_tab_to_named_group(pane_group_id, remote_tab::GROUP_NAME, ctx);
     }
 
     /// Moves a tab to the end of the group with the given name, creating the group when no

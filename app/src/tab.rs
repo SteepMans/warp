@@ -1094,6 +1094,8 @@ enum Indicator {
         conversation_status: Option<ConversationStatus>,
     },
     AmbientAgent,
+    /// Ward: the tab of a session on another machine (remote control).
+    Remote,
 }
 
 impl From<TerminalViewState> for Indicator {
@@ -1251,13 +1253,22 @@ impl<'a> TabComponent<'a> {
         let has_active_pane_state_indicator = !(matches!(pane_state_indicator, Indicator::None));
         let is_maximized = tab.pane_group.as_ref(ctx).is_focused_pane_maximized(ctx);
         let shell_indicator_type = tab.pane_group.as_ref(ctx).focused_shell_indicator_type(ctx);
+        // Ward: a tab that controls a session on another machine is marked as such above all
+        // else, whatever the indicator setting.
+        let is_ward_remote_tab = tab
+            .pane_group
+            .as_ref(ctx)
+            .focused_session_view(ctx)
+            .is_some_and(|view| crate::ward::agents::remote_tab::is_remote(view.id()));
 
         // If a session is being shared, we want to show that indicator in the tab bar above all else.
         // Otherwise, if the tab indicator setting is explicitly turned off, we don't want to show any indicator.
         // But if it's on, we want to show the synced indicator if this tab is being synced.
         // If we aren't showing the synced indicator (and we know the setting is on),
         // we will show long-running, error indicators, etc. as applicable.
-        let indicator = if active_pane_is_ambient_agent_session {
+        let indicator = if is_ward_remote_tab {
+            Indicator::Remote
+        } else if active_pane_is_ambient_agent_session {
             Indicator::AmbientAgent
         } else if active_pane_has_unsaved_code_changes {
             Indicator::UnsavedChanges
@@ -1413,6 +1424,15 @@ impl<'a> TabComponent<'a> {
     ) -> Option<String> {
         if Self::is_agent_task_indicator(indicator) {
             return Self::get_agent_task_tooltip_message(tab, ctx);
+        }
+        if matches!(indicator, Indicator::Remote)
+            && let Some(remote) = tab
+                .pane_group
+                .as_ref(ctx)
+                .focused_session_view(ctx)
+                .and_then(|view| crate::ward::agents::remote_tab::of_view(view.id()))
+        {
+            return Some(remote.tooltip());
         }
 
         // If we're not showing the conversation title in the tooltip,
@@ -1718,6 +1738,11 @@ impl<'a> TabComponent<'a> {
             Indicator::Shared => Some(
                 Icon::Sharing
                     .to_warpui_icon(self.styles.sharing_color.into())
+                    .finish(),
+            ),
+            Indicator::Remote => Some(
+                Icon::Laptop
+                    .to_warpui_icon(self.appearance.theme().ansi_fg_magenta().into())
                     .finish(),
             ),
             Indicator::Maximized => Some(
