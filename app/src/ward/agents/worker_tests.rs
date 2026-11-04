@@ -2769,3 +2769,55 @@ fn a_saved_registration_still_reads_the_installed_agents() {
         );
     }
 }
+
+/// A session that ended here comes back with `resume`: the owner runs it again, from the archive
+/// or after its tab was closed in Ward. It starts anew, and only once: a repeated delivery of
+/// the new run is a duplicate again. Without `resume`, or while it still runs, a known session
+/// is never started twice.
+#[test]
+fn a_settled_session_can_be_run_again_with_resume() {
+    let mut state = State::default();
+    assert!(!repeated_delivery(&mut state, "s-new", false));
+
+    state.known_ids.insert("s-run".to_owned());
+    assert!(repeated_delivery(&mut state, "s-run", false));
+    assert!(repeated_delivery(&mut state, "s-run", true));
+
+    state.settled_ids.insert("s-run".to_owned());
+    assert!(repeated_delivery(&mut state, "s-run", false));
+    assert!(!repeated_delivery(&mut state, "s-run", true));
+    assert!(repeated_delivery(&mut state, "s-run", true));
+}
+
+/// The new run of a session replaces its settled run in the panel; the settled ids are those
+/// that do not run again.
+#[test]
+fn a_new_run_replaces_the_settled_one() {
+    let provider = provider::by_id("claude").unwrap();
+    let assignment = |id: &str| Assignment {
+        session_id: id.to_owned(),
+        ..Assignment::default()
+    };
+    let old = Session::new(assignment("s-again"), provider, Phase::Done);
+    let other = Session::new(assignment("s-other"), provider, Phase::Done);
+    let new = Session::new(
+        assignment("s-again"),
+        provider,
+        Phase::Launched {
+            launched_at_ms: 0,
+            at: Instant::now(),
+        },
+    );
+    assert!(old.is_settled());
+    assert!(!new.is_settled());
+
+    let mut sessions = vec![old, other, new];
+    let settled = settle_runs(&mut sessions);
+    assert_eq!(settled, HashSet::from(["s-other".to_owned()]));
+    assert_eq!(sessions.len(), 2);
+    assert!(
+        sessions
+            .iter()
+            .any(|session| session.assignment.session_id == "s-again" && !session.is_settled())
+    );
+}

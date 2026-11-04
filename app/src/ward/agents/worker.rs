@@ -729,6 +729,36 @@ impl Session {
     }
 }
 
+/// Whether an assignment of a session Ward already knows is only delivered again: then it is
+/// confirmed and nothing starts. The exception is a session that ended here and comes back with
+/// `resume` — the owner runs it again (from the archive or after its tab was closed), so it
+/// starts anew. Taking it out of the settled ones makes a repeated delivery of that new run a
+/// duplicate again.
+fn repeated_delivery(state: &mut State, session_id: &str, resume: bool) -> bool {
+    if !state.known_ids.contains(session_id) {
+        return false;
+    }
+    !(resume && state.settled_ids.remove(session_id))
+}
+
+/// The bookkeeping of runs at the end of a tick: a settled run of a session that runs again
+/// leaves the panel, and the ids of the settled sessions left are returned.
+fn settle_runs(sessions: &mut Vec<Session>) -> HashSet<String> {
+    let running: HashSet<String> = sessions
+        .iter()
+        .filter(|session| !session.is_settled())
+        .map(|session| session.assignment.session_id.clone())
+        .collect();
+    sessions.retain(|session| {
+        !(session.is_settled() && running.contains(&session.assignment.session_id))
+    });
+    sessions
+        .iter()
+        .filter(|session| session.is_settled())
+        .map(|session| session.assignment.session_id.clone())
+        .collect()
+}
+
 #[derive(Default)]
 struct State {
     config: Option<WorkerConfig>,
@@ -740,6 +770,9 @@ struct State {
     /// Sessions waiting for the sessions loop; it takes them out while it works on them.
     sessions: Vec<Session>,
     known_ids: HashSet<String>,
+    /// Sessions that ended here and whose every report reached the service, as of the last
+    /// tick: the owner may run one of them again (see [`repeated_delivery`]).
+    settled_ids: HashSet<String>,
     commands: Vec<Command>,
     beats: Vec<SessionBeat>,
     views: Vec<SessionView>,
@@ -1299,7 +1332,11 @@ impl Worker {
         if session_id.is_empty() {
             return;
         }
-        let duplicate = self.state.lock().known_ids.contains(&session_id);
+        let duplicate = repeated_delivery(
+            &mut self.state.lock(),
+            &session_id,
+            assignment.resume.is_some(),
+        );
         if duplicate {
             // A repeated delivery: confirm again, start nothing new.
             let _ = api.ack(token, &session_id, &AckRequest::accept()).await;
@@ -2089,6 +2126,7 @@ impl Worker {
             {
                 let mut state = self.state.lock();
                 sessions.append(&mut state.sessions);
+                state.settled_ids = settle_runs(&mut sessions);
                 // Settled sessions beyond the panel's history are dropped.
                 let finished = sessions
                     .iter()
