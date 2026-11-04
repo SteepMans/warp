@@ -1,4 +1,5 @@
-//! Ward (OSS build) additions to the vertical tabs panel: the agent state line in terminal rows.
+//! Ward (OSS build) additions to the vertical tabs panel: the agent state line in terminal rows
+//! and the line of a tab that controls a session on another machine.
 //! Kept out of `vertical_tabs.rs` so the upstream file only carries small hooks.
 
 use warp_core::ui::color::coloru_with_opacity;
@@ -14,7 +15,10 @@ use warpui::{AppContext, EntityId, SingletonEntity};
 
 use crate::appearance::Appearance;
 use crate::pane_group::PaneId;
+use crate::terminal::TerminalView;
+use crate::ui_components::icons::Icon;
 use crate::ward::agent_state::{AgentState, agent_snapshot, format_in_state};
+use crate::ward::agents::remote_tab::Phase;
 use crate::ward::attention::{self, AgentStatusFilter, AttentionCounts};
 use crate::ward::project_groups::remote_control_session_name;
 use crate::workspace::Workspace;
@@ -107,6 +111,39 @@ pub(super) fn render_agent_status_line(
             .with_child(glyph)
             .with_child(Shrinkable::new(1., detail).finish())
             .with_child(Container::new(elapsed).with_margin_left(4.).finish())
+            .finish(),
+    )
+}
+
+/// The line of a tab that controls a session on another machine: the remote icon, that it is
+/// remote control and of which machine, greyed out once the viewer is over.
+pub(super) fn render_remote_line(
+    terminal_view: &TerminalView,
+    appearance: &Appearance,
+) -> Option<Box<dyn Element>> {
+    let (tab, phase) = terminal_view.ward_remote_tab()?;
+    let theme = appearance.theme();
+    let color = if phase == Phase::Ended {
+        theme.sub_text_color(theme.background()).into_solid()
+    } else {
+        theme.ansi_fg_magenta()
+    };
+    let glyph = ConstrainedBox::new(Icon::Laptop.to_warpui_icon(color.into()).finish())
+        .with_width(STATE_GLYPH_SIZE)
+        .with_height(STATE_GLYPH_SIZE)
+        .finish();
+    let label = Text::new_inline(tab.row_label(phase), appearance.ui_font_family(), 12.)
+        .with_clip(ClipConfig::ellipsis())
+        .with_color(color)
+        .finish();
+
+    Some(
+        Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(4.)
+            .with_child(glyph)
+            .with_child(Shrinkable::new(1., label).finish())
             .finish(),
     )
 }

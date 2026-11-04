@@ -34,7 +34,9 @@
 //!
 //! The tab of a session on another machine can be opened here as well: the card asks this Ward
 //! on its loopback answer, and a tab of its own shows the stream of that session's tab, keys
-//! going back ([`attach`]).
+//! going back ([`attach`]). That tab says it is remote control and of which machine
+//! ([`remote_tab`]); the tab of the session takes the size of the viewer while it watches
+//! ([`stream`]).
 
 pub mod about;
 pub mod admission;
@@ -51,6 +53,7 @@ pub mod prepare;
 pub mod presence;
 pub mod profile;
 pub mod provider;
+pub mod remote_tab;
 pub mod resume;
 pub mod sessions;
 pub mod stream;
@@ -777,6 +780,7 @@ fn open_attach_tab(tab: attach::Attach, ctx: &mut AppContext) -> Result<(), Stri
         task,
         worker,
     } = tab;
+    let remote = remote_tab::RemoteTab::new(worker.clone(), task.clone());
     let mut env_vars: HashMap<std::ffi::OsString, std::ffi::OsString> = HashMap::new();
     env_vars.insert(attach::URL_ENV_VAR.into(), url.into());
     env_vars.insert(attach::TITLE_ENV_VAR.into(), task.into());
@@ -798,10 +802,46 @@ fn open_attach_tab(tab: attach::Attach, ctx: &mut AppContext) -> Result<(), Stri
             .map(|(window_id, _)| *window_id)
     });
     let (window_id, opened) = uri_launch::open_tab_in_window(window_id, tab, ctx);
-    opened.ok_or_else(|| "could not open the tab".to_owned())?;
+    let opened = opened.ok_or_else(|| "could not open the tab".to_owned())?;
+    if let Some(pane_uuid) = opened.pane_uuid {
+        mark_remote_tab(&pane_uuid, remote, ctx);
+    }
     // The owner clicked in the browser: Ward comes forward with the new tab.
     ctx.windows().show_window_and_focus_app(window_id);
     Ok(())
+}
+
+/// Marks the tab just opened for a session on another machine (see [`remote_tab`]): its pane
+/// header, its tab and its row say so, and it goes to the group of remote tabs.
+fn mark_remote_tab(pane_uuid: &str, remote: remote_tab::RemoteTab, ctx: &mut AppContext) {
+    let mut alive = HashSet::new();
+    let mut target = None;
+    for (_, workspace) in WorkspaceRegistry::as_ref(ctx).all_workspaces(ctx) {
+        for pane_group in workspace.as_ref(ctx).tab_views() {
+            let group = pane_group.as_ref(ctx);
+            for view in group.terminal_views(ctx) {
+                alive.insert(view.id());
+                if target.is_none()
+                    && group
+                        .terminal_pane_session_uuid(view.id(), ctx)
+                        .is_some_and(|uuid| {
+                            crate::ward::chimney::bindings::uuid_hex(&uuid) == pane_uuid
+                        })
+                {
+                    target = Some((workspace.clone(), pane_group.id(), view));
+                }
+            }
+        }
+    }
+    remote_tab::retain(|view| alive.contains(&view));
+    let Some((workspace, pane_group_id, view)) = target else {
+        return;
+    };
+    remote_tab::register(view.id(), remote);
+    view.update(ctx, |view, ctx| view.ward_remote_tab_changed(ctx));
+    workspace.update(ctx, |workspace, ctx| {
+        workspace.ward_place_remote_tab(pane_group_id, ctx);
+    });
 }
 
 /// Opens the tabs the card asks for, one after another, until Ward quits.

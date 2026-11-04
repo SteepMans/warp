@@ -4753,6 +4753,9 @@ fn render_terminal_row_content(
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Start);
     content.add_child(first_line_element);
+    if let Some(remote_line) = ward::render_remote_line(terminal_view, appearance) {
+        content.add_child(Container::new(remote_line).with_margin_top(2.).finish());
+    }
     if let Some(agent_line) = ward::render_agent_status_line(terminal_view.id(), appearance, app) {
         content.add_child(Container::new(agent_line).with_margin_top(2.).finish());
     }
