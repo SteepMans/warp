@@ -473,7 +473,8 @@ pub const REASON_PLAN_REJECTED: &str = "plan_rejected";
 /// never started nor one that finished.
 pub const REASON_WARD_RESTARTED: &str = "ward_restarted";
 
-/// `POST /sessions/{sessionId}/status`. Every field is sent, unknown ones as `null`.
+/// `POST /sessions/{sessionId}/status`. Every field is sent, unknown ones as `null`, except
+/// `summary` and `tags`, which go only when the executor wrote them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatusRequest {
@@ -491,6 +492,13 @@ pub struct StatusRequest {
     pub reason: Option<String>,
     /// RFC 3339.
     pub resets_at: Option<String>,
+    /// What the session does now, from the executor's `about.json` (see [`super::about`]).
+    /// Left out while there is none, so an older service sees the body it always saw.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// Project tags from the same file; left out while empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 impl StatusRequest {
@@ -508,6 +516,8 @@ impl StatusRequest {
             exit_code: None,
             reason: None,
             resets_at: None,
+            summary: None,
+            tags: Vec::new(),
         }
     }
 }

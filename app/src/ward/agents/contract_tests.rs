@@ -387,6 +387,19 @@ fn status_request_sends_every_field() {
 }
 
 #[test]
+fn status_request_carries_what_the_session_is_about_only_when_known() {
+    let mut request = StatusRequest::new(SessionStatus::Review);
+    let body = serde_json::to_value(&request).unwrap();
+    assert!(body.get("summary").is_none(), "{body}");
+    assert!(body.get("tags").is_none(), "{body}");
+    request.summary = Some("Поиск по сессиям".to_owned());
+    request.tags = vec!["chimney".to_owned(), "agents".to_owned()];
+    let body = serde_json::to_value(&request).unwrap();
+    assert_eq!(body["summary"], "Поиск по сессиям");
+    assert_eq!(body["tags"], json!(["chimney", "agents"]));
+}
+
+#[test]
 fn ack_bodies() {
     assert_eq!(
         serde_json::to_value(AckRequest::accept()).unwrap(),

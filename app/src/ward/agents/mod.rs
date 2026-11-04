@@ -36,6 +36,7 @@
 //! on its loopback answer, and a tab of its own shows the stream of that session's tab, keys
 //! going back ([`attach`]).
 
+pub mod about;
 pub mod admission;
 pub mod attach;
 pub mod client;

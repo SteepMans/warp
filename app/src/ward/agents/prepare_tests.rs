@@ -127,6 +127,7 @@ fn the_orchestrator_prompt_carries_the_card_the_playbook_and_the_plan() {
         "\"provider\"",
         "\"model\"",
         "\"summary\"",
+        "\"tags\"",
         "\"grouped\"",
     ] {
         assert!(prompt.contains(field), "{field} is missing from {prompt}");

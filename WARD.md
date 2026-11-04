@@ -171,6 +171,11 @@ Settings → Third party CLI agents → Agents worker:
   вкладка Ward в worktree. Раннер убирает из окружения `CLAUDE*`, ставит
   `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1`, передаёт промпт из файла первым сообщением и
   пишет код выхода агента в `<worktree>/.agents/exit-code`.
+- О чём сессия: в конец `prompt.md` Ward дописывает раздел «Для экрана агентов» — когда агент
+  берётся за задачу и когда заканчивает её (владелец дописывает новые в чат), он перезаписывает
+  `<worktree>/.agents/about.json` объектом `{"summary": "...", "tags": [...]}`. Ward читает файл
+  при каждом статусе и шлёт `summary` и `tags` в `POST /sessions/{id}/status`; пока файла нет,
+  этих полей в теле нет. Отдельного вызова модели нет: файл пишется в том же ходе агента.
   - Claude: `claude --remote-control <имя> --dangerously-skip-permissions [--model <m>]`,
     промпт — позиционным аргументом после `--`; id сессии и `bridgeSessionId` — из
     `~/.claude/sessions/<pid>.json`, транскрипт —
@@ -308,7 +313,9 @@ Settings → Third party CLI agents → Agents worker:
 - **Файлы фазы** лежат вне волта: `<корень>/.agents/<8 символов sessionId>/` — `prompt.md`,
   раннер, `runner.pid`, `exit-code` и `plan.json`. В волт Ward не пишет ничего.
 - **План.** `plan.json` — объект JSON с полями `repo`, `baseBranch`, `branch`, `prompt`,
-  `dossierPath`, `runId`, `provider`, `model`, `summary`, `grouped`. Ward читает файл (битый
+  `dossierPath`, `runId`, `provider`, `model`, `summary`, `tags`, `grouped`. `summary` — одна-две
+  строки о том, чем занята сессия, `tags` — теги проектов для поиска и фильтра на экране агентов
+  (без них сервис берёт имя репозитория и метки карточки). Ward читает файл (битый
   или недописанный не валит сессию, пока оркестратор работает), дополняет им назначение —
   заданное в назначении не переопределяется, кроме промпта (он из плана) и базовой ветки, которую
   план поправил, — отправляет `POST /sessions/{id}/plan` и

@@ -203,7 +203,10 @@ pub fn orchestrator_prompt(ctx: &PromptContext<'_>) -> String {
          - `prompt` — полный промпт исполнителю по шаблону, вместе с паспортом запуска.\n\
          - `provider` — `claude` или `codex`; `model` — id модели или `null`.\n\
          - `dossierPath` — путь досье внутри волта, `runId` — `run-ГГГГММДД-NNN`.\n\
-         - `summary` — две-три строки для карточки.\n\
+         - `summary` — одна-две строки: о чём эта сессия, для экрана агентов и карточки.\n\
+         - `tags` — одно-четыре коротких тега в нижнем регистре: проект (метка карточки или \
+           папка проекта в волте), репозиторий, модуль. По ним владелец ищет и фильтрует \
+           сессии на экране агентов.\n\
          - `grouped` — номера карточек, которые ты решил вести одной сессией.\n\
          - Пути в JSON — с прямыми слэшами.\n\
          - Файл — последнее действие: записал, коротко ответил — и заверши сессию сам. Ward \
@@ -254,7 +257,8 @@ fn plan_example(assignment: &Assignment, number: u64) -> String {
                 .unwrap_or("claude-sonnet-5-5")
                 .to_owned(),
         ),
-        summary: "<две-три строки для карточки>".to_owned(),
+        summary: "<одна-две строки: о чём сессия>".to_owned(),
+        tags: vec!["<проект>".to_owned(), "<модуль>".to_owned()],
         grouped: vec![number],
     };
     let mut text = serde_json::to_string_pretty(&plan).unwrap_or_default();
