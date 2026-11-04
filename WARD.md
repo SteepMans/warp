@@ -313,7 +313,9 @@ Settings → Third party CLI agents → Agents worker:
 - **Файлы фазы** лежат вне волта: `<корень>/.agents/<8 символов sessionId>/` — `prompt.md`,
   раннер, `runner.pid`, `exit-code` и `plan.json`. В волт Ward не пишет ничего.
 - **План.** `plan.json` — объект JSON с полями `repo`, `baseBranch`, `branch`, `prompt`,
-  `dossierPath`, `runId`, `provider`, `model`, `summary`, `grouped`. Ward читает файл (битый
+  `dossierPath`, `runId`, `provider`, `model`, `summary`, `tags`, `grouped`. `summary` — одна-две
+  строки о том, чем занята сессия, `tags` — теги проектов для поиска и фильтра на экране агентов
+  (без них сервис берёт имя репозитория и метки карточки). Ward читает файл (битый
   или недописанный не валит сессию, пока оркестратор работает), дополняет им назначение —
   заданное в назначении не переопределяется, кроме промпта (он из плана) и базовой ветки, которую
   план поправил, — отправляет `POST /sessions/{id}/plan` и

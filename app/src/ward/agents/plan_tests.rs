@@ -21,6 +21,7 @@ fn a_full_plan_fills_an_empty_assignment() {
             "provider": "claude",
             "model": "claude-opus-5-5",
             "summary": "Ward поднимает оркестратора",
+            "tags": ["Ward", " Agents ", 7, "ward"],
             "grouped": [4639, "4627", null],
             "unknown": {"a": 1}
         }"#,
@@ -28,6 +29,7 @@ fn a_full_plan_fills_an_empty_assignment() {
     .unwrap();
     assert_eq!(plan.grouped, vec![4639, 4627]);
     assert_eq!(plan.run_id, "run-20261031-001");
+    assert_eq!(plan.tags, vec!["ward", "agents"]);
 
     let mut assignment = blank();
     apply(&plan, &mut assignment).unwrap();
@@ -163,6 +165,7 @@ fn the_plan_goes_out_in_contract_field_names() {
         provider: "claude".to_owned(),
         model: None,
         summary: "итог".to_owned(),
+        tags: vec!["ward".to_owned()],
         grouped: vec![4639],
     };
     assert_eq!(
@@ -177,6 +180,7 @@ fn the_plan_goes_out_in_contract_field_names() {
             "provider": "claude",
             "model": null,
             "summary": "итог",
+            "tags": ["ward"],
             "grouped": [4639]
         })
     );

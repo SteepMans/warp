@@ -39,9 +39,13 @@ pub struct Plan {
     #[serde(deserialize_with = "string_or_empty")]
     pub provider: String,
     pub model: Option<String>,
-    /// Two or three lines for the card.
+    /// One or two lines: what the session is about, for the Agents screen and the card.
     #[serde(deserialize_with = "string_or_empty")]
     pub summary: String,
+    /// Project tags of the session for the Agents screen, lowercase. Without them the service
+    /// takes the repository name and the labels of the card.
+    #[serde(deserialize_with = "lenient_tags")]
+    pub tags: Vec<String>,
     /// Cards the orchestrator decided to do in one session.
     #[serde(deserialize_with = "lenient_numbers")]
     pub grouped: Vec<u64>,
@@ -55,6 +59,15 @@ where
         .unwrap_or_default()
         .trim()
         .to_owned())
+}
+
+/// Tags as an array of strings or one string with commas, see [`super::about::tags`].
+fn lenient_tags<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(super::about::tags(value.as_ref()))
 }
 
 /// Card numbers, whether the agent wrote them as numbers or as strings; anything else is
