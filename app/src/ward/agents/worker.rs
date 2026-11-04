@@ -478,6 +478,9 @@ struct Session {
     /// The session was picked up after a restart of Ward and its agent has not turned up yet:
     /// the watch of the session waits for it instead of watching a process that is gone.
     restarted: bool,
+    /// The agent came back after a restart without the runner of its launch: `runner.pid`
+    /// names a process that went with the old tab and is not read again.
+    runner_left: bool,
     /// The preparation phase, when the assignment needed one.
     prepare: Option<PrepareRun>,
     /// The plan of the preparation phase, once it was read.
@@ -527,6 +530,7 @@ impl Session {
             reason: None,
             saved_state: None,
             restarted: false,
+            runner_left: false,
             prepare: None,
             plan: None,
             plan_outbox: None,
@@ -544,6 +548,7 @@ impl Session {
         self.transcript = None;
         self.pane_uuid = None;
         self.runner_pid = None;
+        self.runner_left = false;
         self.runner_gone_since = None;
         self.last_journal_read = None;
         self.transcript_grew_at = None;
@@ -2076,6 +2081,13 @@ impl Worker {
                 session.assignment.session_id,
                 found.agent_session_id
             );
+            // The tab of an update relaunch runs the agent with its own resume command: the
+            // runner of the launch went with the old tab and leaves no exit code. From now on
+            // the agent's own process says whether the session still runs, or nothing does
+            // when its pid is not known, but never the runner that is gone.
+            session.runner_pid = found.pid;
+            session.runner_left = true;
+            session.runner_gone_since = None;
             session.found = Some(found);
             alive = true;
         }
@@ -2642,7 +2654,7 @@ impl Worker {
         launched_at: Instant,
         role: &'static str,
     ) {
-        if session.runner_pid.is_none() {
+        if session.runner_pid.is_none() && !session.runner_left {
             session.runner_pid = read_runner_pid(files_dir);
         }
         if session.found.is_none()

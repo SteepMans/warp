@@ -1456,6 +1456,8 @@ const RUNNER_PID: u32 = 4242;
 /// stop; everything else is [`FakeMachine`].
 struct WatchedMachine {
     alive: Mutex<bool>,
+    /// Single processes that are gone while the rest are alive.
+    gone: Mutex<Vec<u32>>,
     stopped: Mutex<Vec<u32>>,
 }
 
@@ -1463,6 +1465,7 @@ impl Default for WatchedMachine {
     fn default() -> Self {
         Self {
             alive: Mutex::new(true),
+            gone: Mutex::new(Vec::new()),
             stopped: Mutex::new(Vec::new()),
         }
     }
@@ -1485,8 +1488,8 @@ impl Machine for WatchedMachine {
         FakeMachine.tool_version(name)
     }
 
-    fn is_alive(&self, _pid: u32) -> bool {
-        *self.alive.lock()
+    fn is_alive(&self, pid: u32) -> bool {
+        *self.alive.lock() && !self.gone.lock().contains(&pid)
     }
 
     fn stop(&self, pids: &[u32]) {
@@ -2600,6 +2603,79 @@ fn a_restart_closes_a_session_whose_agent_is_gone() {
     // The state of a session that is over leaves the disk, so the next start finds nothing.
     save_session_state(session, &root);
     assert!(resume::scan(&root).is_empty());
+}
+
+/// Pid of the agent the tab of an update relaunch resumes on its own, without the runner.
+const RESUMED_PID: u32 = 5151;
+
+/// The update relaunch reopened the tab and the agent resumed in it under another process,
+/// while the runner of the launch went with the old tab. The session follows the agent: it
+/// stays running as long as the agent does, and ends when the agent goes, not when the runner
+/// that is already gone runs out of grace.
+#[test]
+fn a_restart_follows_an_agent_that_came_back_without_its_runner() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("agents-work");
+    let worktree = root.join("worktree");
+    std::fs::create_dir_all(&worktree).unwrap();
+    let transcript = dir.path().join("executor.jsonl");
+    std::fs::write(&transcript, PROMPT_LINE).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let worker = offline_worker(dir.path(), machine.clone(), message_timing());
+    let mut session = launched_session(&root, Some(transcript.as_path()));
+    session.role = Some(ROLE_EXECUTOR);
+    futures::executor::block_on(worker.advance(&mut session));
+    take_journal(&mut session);
+    save_session_state(&mut session, &root);
+    drop(session);
+
+    // Ward closed the tab: the runner and the agent of the launch are gone. The reopened tab
+    // resumed the same agent session under another process.
+    machine.gone.lock().extend([RUNNER_PID, EXECUTOR_PID]);
+    let sessions_dir = dir.path().join("home").join(".claude").join("sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    let session_file = serde_json::json!({
+        "pid": RESUMED_PID,
+        "sessionId": AGENT_SESSION_ID,
+        "cwd": worktree.to_string_lossy(),
+        "startedAt": now_ms(),
+    });
+    std::fs::write(
+        sessions_dir.join(format!("{RESUMED_PID}.json")),
+        session_file.to_string(),
+    )
+    .unwrap();
+
+    let timing = Timing {
+        exit_grace: Duration::from_millis(50),
+        ..message_timing()
+    };
+    let after = offline_worker(dir.path(), machine.clone(), timing);
+    let mut sessions = restored_sessions(&after);
+    assert_eq!(sessions.len(), 1);
+    let session = &mut sessions[0];
+    assert_eq!(session.status, SessionStatus::Running);
+    assert_eq!(
+        session.found.as_ref().map(|found| found.pid),
+        Some(Some(RESUMED_PID))
+    );
+
+    // Longer than the grace of a runner that is gone: the agent runs, so does the session.
+    futures::executor::block_on(after.advance(session));
+    std::thread::sleep(Duration::from_millis(100));
+    futures::executor::block_on(after.advance(session));
+    assert!(!session.is_done());
+    assert_eq!(session.status, SessionStatus::Running);
+    assert!(machine.stopped.lock().is_empty());
+
+    // The owner closed the tab of the resumed agent: now the session is over.
+    machine.gone.lock().push(RESUMED_PID);
+    futures::executor::block_on(after.advance(session));
+    std::thread::sleep(Duration::from_millis(100));
+    futures::executor::block_on(after.advance(session));
+    assert!(session.is_done());
+    assert_eq!(session.status, SessionStatus::Failed);
+    assert_eq!(session.outbox.back().unwrap().exit_code, None);
 }
 
 /// The agent finished while Ward was away: its exit code is the end of the session, not the
