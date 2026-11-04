@@ -60,7 +60,10 @@ fn the_origin_is_taken_from_the_service_address() {
     );
     assert_eq!(
         presence_of("steep-pc", "https://chimney.steep-man.ru/agents"),
-        Some(presence())
+        Some(Presence {
+            can_attach: attach::SUPPORTED,
+            ..presence()
+        })
     );
 }
 

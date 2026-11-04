@@ -103,7 +103,7 @@ fn the_title_is_one_short_line() {
         "#1 задача [31m (удалённо: steep-pc)"
     );
     let long = "я".repeat(500);
-    let title = tab_title(Some(&long), None);
+    let title = tab_title(Some(long.as_str()), None);
     assert_eq!(
         title.chars().count(),
         MAX_TITLE_CHARS + " (удалённо)".chars().count()
