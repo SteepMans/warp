@@ -282,3 +282,32 @@ fn the_server_takes_a_request_to_connect_with_its_body() {
     let tab = tabs.try_recv().unwrap();
     assert_eq!(tab.title, "#4711 Задача (удалённо: laptop)");
 }
+
+/// A socket the browser opened ahead of time and left empty does not hold the answer to the
+/// card: it waits on its own thread, and the request after it is answered at once.
+#[test]
+fn an_empty_socket_does_not_hold_the_answer() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let shared: Shared = Arc::new(RwLock::new(Some(presence())));
+    let (attaches, _tabs) = async_channel::unbounded();
+    std::thread::spawn(move || run(listener, shared, attaches));
+
+    let _empty = TcpStream::connect(address).unwrap();
+    let started = std::time::Instant::now();
+    let mut stream = TcpStream::connect(address).unwrap();
+    stream
+        .write_all(
+            format!("GET {PATH} HTTP/1.1\r\nHost: {address}\r\nOrigin: {CHIMNEY}\r\n\r\n")
+                .as_bytes(),
+        )
+        .unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    assert!(answer.starts_with("HTTP/1.1 200 OK\r\n"), "{answer}");
+    assert!(
+        started.elapsed() < IO_TIMEOUT / 2,
+        "answered in {:?}",
+        started.elapsed()
+    );
+}
