@@ -15,6 +15,7 @@
 
 use std::io::{Read as _, Write as _};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -27,6 +28,9 @@ pub const PATH: &str = "/ward/presence";
 /// A request bigger than this is not one of ours.
 const MAX_REQUEST: usize = 8 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
+/// Connections served at once. A browser opens sockets ahead of time and may send nothing on
+/// them; each waits for its request up to [`IO_TIMEOUT`] on a thread of its own.
+const MAX_CONNECTIONS: usize = 16;
 
 /// What Ward answers with: the worker name and the origin of the page that may ask.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -287,14 +291,35 @@ fn serve(mut stream: TcpStream, shared: &Shared, attaches: &async_channel::Sende
     let _ = stream.write_all(&response.to_bytes());
 }
 
-/// Answers on `listener` until Ward quits, one connection after another: the card asks once
-/// per click, so there is nothing to serve in parallel. The tabs the card asks for go to
-/// `attaches`.
+/// Answers on `listener` until Ward quits, each connection on a thread of its own. One after
+/// another is not enough: a socket the browser opened ahead of time and left empty held the
+/// answer for [`IO_TIMEOUT`], and the card, tired of waiting, took this machine for another
+/// one. The tabs the card asks for go to `attaches`.
 pub fn run(listener: TcpListener, shared: Shared, attaches: async_channel::Sender<attach::Attach>) {
+    let open = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => serve(stream, &shared, &attaches),
-            Err(err) => log::debug!("Ward presence: accept failed: {err}"),
+        let stream = match stream {
+            Ok(stream) => stream,
+            Err(err) => {
+                log::debug!("Ward presence: accept failed: {err}");
+                continue;
+            }
+        };
+        if open.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+            open.fetch_sub(1, Ordering::SeqCst);
+            log::debug!("Ward presence: too many connections, dropping one");
+            continue;
+        }
+        let (shared, attaches, served) = (shared.clone(), attaches.clone(), open.clone());
+        let spawned = std::thread::Builder::new()
+            .name("ward-presence-conn".to_owned())
+            .spawn(move || {
+                serve(stream, &shared, &attaches);
+                served.fetch_sub(1, Ordering::SeqCst);
+            });
+        if let Err(err) = spawned {
+            open.fetch_sub(1, Ordering::SeqCst);
+            log::warn!("Ward presence: no thread for a connection: {err}");
         }
     }
 }
