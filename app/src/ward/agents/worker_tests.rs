@@ -589,10 +589,13 @@ fn full_cycle_against_a_fake_service() {
         .join(".worktrees")
         .join("s-good");
     let agents = worktree.join(".agents");
-    assert_eq!(
-        std::fs::read_to_string(agents.join("prompt.md")).unwrap(),
-        "Do the demo task"
+    // The prompt of the assignment, then Ward's note on the file about the session.
+    let prompt = std::fs::read_to_string(agents.join("prompt.md")).unwrap();
+    assert!(
+        prompt.starts_with("Do the demo task\n\n## Для экрана агентов"),
+        "{prompt}"
     );
+    assert!(prompt.contains("/.agents/about.json"), "{prompt}");
     assert!(agents.join(RunnerKind::Pwsh.file_name()).is_file());
     {
         let tabs = host.tabs.lock();
@@ -972,9 +975,10 @@ fn the_preparation_phase_runs_before_the_executor() {
     wait_for("the prompt of the executor", || {
         worktree.join(".agents").join("prompt.md").is_file()
     });
-    assert_eq!(
-        std::fs::read_to_string(worktree.join(".agents").join("prompt.md")).unwrap(),
-        "Промпт из плана"
+    assert!(
+        std::fs::read_to_string(worktree.join(".agents").join("prompt.md"))
+            .unwrap()
+            .starts_with("Промпт из плана\n\n## Для экрана агентов")
     );
     wait_for("running", || {
         statuses(&log)

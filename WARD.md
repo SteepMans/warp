@@ -171,6 +171,11 @@ Settings → Third party CLI agents → Agents worker:
   вкладка Ward в worktree. Раннер убирает из окружения `CLAUDE*`, ставит
   `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1`, передаёт промпт из файла первым сообщением и
   пишет код выхода агента в `<worktree>/.agents/exit-code`.
+- О чём сессия: в конец `prompt.md` Ward дописывает раздел «Для экрана агентов» — когда агент
+  берётся за задачу и когда заканчивает её (владелец дописывает новые в чат), он перезаписывает
+  `<worktree>/.agents/about.json` объектом `{"summary": "...", "tags": [...]}`. Ward читает файл
+  при каждом статусе и шлёт `summary` и `tags` в `POST /sessions/{id}/status`; пока файла нет,
+  этих полей в теле нет. Отдельного вызова модели нет: файл пишется в том же ходе агента.
   - Claude: `claude --remote-control <имя> --dangerously-skip-permissions [--model <m>]`,
     промпт — позиционным аргументом после `--`; id сессии и `bridgeSessionId` — из
     `~/.claude/sessions/<pid>.json`, транскрипт —

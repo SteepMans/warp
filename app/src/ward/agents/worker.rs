@@ -47,6 +47,7 @@ use instant::Instant;
 use parking_lot::Mutex;
 use sha2::Digest as _;
 
+use super::about;
 use super::admission::{self, MachineState};
 use super::client::{Api, ApiError};
 use super::contract::{
@@ -643,6 +644,16 @@ impl Session {
                 request.claude_session_id = Some(found.agent_session_id.clone());
             }
             request.remote_control_url = found.remote_control_url.clone();
+        }
+        // What the session does now, as its executor wrote it: the Agents screen shows it, and
+        // it changes as the owner gives the session more tasks in the chat.
+        if let Some(now) = self
+            .worktree
+            .as_deref()
+            .and_then(|worktree| about::read(&launch::agents_dir(worktree)))
+        {
+            request.summary = now.summary;
+            request.tags = now.tags;
         }
         request
     }
@@ -2241,6 +2252,8 @@ impl Worker {
 
     /// Writes the session files and opens its tab. `resume`: the agent session to continue
     /// instead of a new one — then the prompt is not written, the agent has it in its history.
+    /// The prompt ends with Ward's note on `about.json` ([`about`]), which keeps the description
+    /// of the session on the Agents screen current.
     async fn launch(
         &self,
         session: &Session,
@@ -2254,7 +2267,11 @@ impl Worker {
         let agents = launch::agents_dir(worktree);
         std::fs::create_dir_all(&agents).map_err(|err| err.to_string())?;
         if resume.is_none() {
-            std::fs::write(agents.join(launch::PROMPT_FILE), &session.assignment.prompt)
+            let prompt = about::with_instruction(
+                &session.assignment.prompt,
+                &agents.join(about::ABOUT_FILE),
+            );
+            std::fs::write(agents.join(launch::PROMPT_FILE), prompt)
                 .map_err(|err| err.to_string())?;
         }
         let _ = std::fs::remove_file(agents.join(launch::EXIT_CODE_FILE));
