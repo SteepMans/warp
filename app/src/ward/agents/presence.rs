@@ -9,11 +9,16 @@
 //! Only the origin of the Chimney the worker is connected to gets an answer (CORS), together
 //! with the private network preflight browsers send before a public page reaches loopback.
 //! The answer carries the worker name and nothing else.
+//!
+//! The same port takes `POST /ward/attach` from that page: open here the tab of a session that
+//! runs on another machine, see [`super::attach`].
 
 use std::io::{Read as _, Write as _};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+
+use super::attach;
 
 /// The loopback port of the answer. The card asks it, so it must not change.
 pub const PORT: u16 = 47615;
@@ -28,6 +33,10 @@ const IO_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct Presence {
     pub worker: String,
     pub origin: String,
+    /// The service address: the viewer socket of [`attach`] is built from it.
+    pub base_url: String,
+    /// Whether this Ward can open the tab of a session on another machine.
+    pub can_attach: bool,
 }
 
 /// Kept up to date by the worker loop; `None` while the worker has no settings.
@@ -48,6 +57,8 @@ pub fn presence_of(worker: &str, base_url: &str) -> Option<Presence> {
     Some(Presence {
         worker: worker.to_owned(),
         origin: origin_of(base_url)?,
+        base_url: base_url.trim().to_owned(),
+        can_attach: attach::SUPPORTED,
     })
 }
 
@@ -68,6 +79,16 @@ impl Response {
         }
     }
 
+    fn json(status: u16, mut headers: Vec<(&'static str, String)>, body: String) -> Self {
+        headers.push(("Content-Type", "application/json".to_owned()));
+        headers.push(("Cache-Control", "no-store".to_owned()));
+        Self {
+            status,
+            headers,
+            body,
+        }
+    }
+
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
@@ -78,10 +99,13 @@ impl Response {
     pub fn to_bytes(&self) -> Vec<u8> {
         let reason = match self.status {
             200 => "OK",
+            202 => "Accepted",
             204 => "No Content",
             403 => "Forbidden",
             404 => "Not Found",
             405 => "Method Not Allowed",
+            501 => "Not Implemented",
+            503 => "Service Unavailable",
             _ => "Bad Request",
         };
         let mut out = format!("HTTP/1.1 {} {reason}\r\n", self.status);
@@ -97,12 +121,15 @@ impl Response {
     }
 }
 
-/// The request line and the headers, as far as the answer needs them.
+/// The request line and the headers, as far as the answer needs them, and the body.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Request {
     pub method: String,
     pub path: String,
     pub origin: Option<String>,
+    /// `Content-Length`; the body itself is read after the head.
+    pub content_length: usize,
+    pub body: String,
 }
 
 /// Reads the head of a request; `None` for anything that is not HTTP.
@@ -115,80 +142,145 @@ pub fn parse(head: &str) -> Option<Request> {
         .next()
         .filter(|version| version.starts_with("HTTP/"))?;
     let path = target.split('?').next().unwrap_or_default().to_owned();
-    let origin = lines
-        .filter_map(|line| line.split_once(':'))
-        .find(|(name, _)| name.trim().eq_ignore_ascii_case("origin"))
-        .map(|(_, value)| value.trim().to_owned());
+    let headers: Vec<(&str, &str)> = lines.filter_map(|line| line.split_once(':')).collect();
+    let header = |wanted: &str| {
+        headers
+            .iter()
+            .find(|(name, _)| name.trim().eq_ignore_ascii_case(wanted))
+            .map(|(_, value)| value.trim())
+    };
+    let origin = header("origin").map(str::to_owned);
+    let content_length = header("content-length")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_default();
     Some(Request {
         method,
         path,
         origin,
+        content_length,
+        body: String::new(),
     })
 }
 
 /// The answer to one request. Pages of other origins get nothing: without the CORS headers the
 /// browser hides even the status from them.
 pub fn respond(request: &Request, presence: Option<&Presence>) -> Response {
-    if request.path != PATH {
-        return Response::plain(404);
+    handle(request, presence).0
+}
+
+/// The answer to one request and, for a request to connect, the tab to open.
+pub fn handle(
+    request: &Request,
+    presence: Option<&Presence>,
+) -> (Response, Option<attach::Attach>) {
+    let attaching = request.path == attach::PATH;
+    if request.path != PATH && !attaching {
+        return (Response::plain(404), None);
     }
     let Some(presence) = presence else {
-        return Response::plain(404);
+        return (Response::plain(404), None);
     };
     if request.origin.as_deref() != Some(presence.origin.as_str()) {
-        return Response::plain(403);
+        return (Response::plain(403), None);
     }
     let mut headers = vec![
         ("Access-Control-Allow-Origin", presence.origin.clone()),
         ("Vary", "Origin".to_owned()),
     ];
-    match request.method.as_str() {
-        "OPTIONS" => {
-            headers.push(("Access-Control-Allow-Methods", "GET".to_owned()));
+    match (attaching, request.method.as_str()) {
+        (_, "OPTIONS") => {
+            let methods = if attaching { "POST" } else { "GET" };
+            headers.push(("Access-Control-Allow-Methods", methods.to_owned()));
+            if attaching {
+                headers.push(("Access-Control-Allow-Headers", "Content-Type".to_owned()));
+            }
             headers.push(("Access-Control-Allow-Private-Network", "true".to_owned()));
             headers.push(("Access-Control-Max-Age", "600".to_owned()));
-            Response {
+            let response = Response {
                 status: 204,
                 headers,
                 body: String::new(),
+            };
+            (response, None)
+        }
+        (false, "GET") => {
+            let body = serde_json::json!({ "worker": presence.worker }).to_string();
+            (Response::json(200, headers, body), None)
+        }
+        (true, "POST") => {
+            if !presence.can_attach {
+                let body = serde_json::json!({
+                    "error": "this Ward cannot open the tab of a session on another machine"
+                })
+                .to_string();
+                return (Response::json(501, headers, body), None);
+            }
+            match attach::parse(&request.body, &presence.base_url) {
+                Ok(tab) => {
+                    let body = serde_json::json!({ "ok": true }).to_string();
+                    (Response::json(202, headers, body), Some(tab))
+                }
+                Err(rejected) => {
+                    let body = serde_json::json!({ "error": rejected.message() }).to_string();
+                    (Response::json(400, headers, body), None)
+                }
             }
         }
-        "GET" => {
-            headers.push(("Content-Type", "application/json".to_owned()));
-            headers.push(("Cache-Control", "no-store".to_owned()));
-            Response {
-                status: 200,
-                headers,
-                body: serde_json::json!({ "worker": presence.worker }).to_string(),
-            }
-        }
-        _ => Response::plain(405),
+        _ => (Response::plain(405), None),
     }
 }
 
-fn read_head(stream: &mut TcpStream) -> Option<String> {
+/// Reads one request: the head, then as much of the body as `Content-Length` says.
+fn read_request(stream: &mut TcpStream) -> Option<Request> {
+    const END: &[u8] = b"\r\n\r\n";
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 1024];
-    while !buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+    let head_end = loop {
+        if let Some(at) = buffer.windows(END.len()).position(|window| window == END) {
+            break at + END.len();
+        }
         let read = stream.read(&mut chunk).ok()?;
         if read == 0 {
-            break;
+            return None;
         }
         buffer.extend_from_slice(&chunk[..read]);
         if buffer.len() > MAX_REQUEST {
             return None;
         }
+    };
+    let mut request = parse(std::str::from_utf8(&buffer[..head_end]).ok()?)?;
+    if request.content_length > MAX_REQUEST {
+        return None;
     }
-    String::from_utf8(buffer).ok()
+    let mut body = buffer.split_off(head_end);
+    while body.len() < request.content_length {
+        let read = stream.read(&mut chunk).ok()?;
+        if read == 0 {
+            return None;
+        }
+        body.extend_from_slice(&chunk[..read]);
+    }
+    body.truncate(request.content_length);
+    request.body = String::from_utf8(body).ok()?;
+    Some(request)
 }
 
-fn serve(mut stream: TcpStream, shared: &Shared) {
+fn serve(mut stream: TcpStream, shared: &Shared, attaches: &async_channel::Sender<attach::Attach>) {
     let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
-    let response = match read_head(&mut stream).as_deref().and_then(parse) {
+    let response = match read_request(&mut stream) {
         Some(request) => {
             let presence = shared.read().ok().and_then(|presence| presence.clone());
-            respond(&request, presence.as_ref())
+            match handle(&request, presence.as_ref()) {
+                (response, Some(tab)) => {
+                    if attaches.try_send(tab).is_ok() {
+                        response
+                    } else {
+                        Response::plain(503)
+                    }
+                }
+                (response, None) => response,
+            }
         }
         None => Response::plain(400),
     };
@@ -196,11 +288,12 @@ fn serve(mut stream: TcpStream, shared: &Shared) {
 }
 
 /// Answers on `listener` until Ward quits, one connection after another: the card asks once
-/// per click, so there is nothing to serve in parallel.
-pub fn run(listener: TcpListener, shared: Shared) {
+/// per click, so there is nothing to serve in parallel. The tabs the card asks for go to
+/// `attaches`.
+pub fn run(listener: TcpListener, shared: Shared, attaches: async_channel::Sender<attach::Attach>) {
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => serve(stream, &shared),
+            Ok(stream) => serve(stream, &shared, &attaches),
             Err(err) => log::debug!("Ward presence: accept failed: {err}"),
         }
     }
@@ -208,7 +301,7 @@ pub fn run(listener: TcpListener, shared: Shared) {
 
 /// Starts the answer on its own thread. A second Ward on the machine finds the port taken and
 /// leaves the answer to the first one.
-pub fn start(shared: Shared) {
+pub fn start(shared: Shared, attaches: async_channel::Sender<attach::Attach>) {
     let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, PORT);
     let listener = match TcpListener::bind(address) {
         Ok(listener) => listener,
@@ -219,7 +312,7 @@ pub fn start(shared: Shared) {
     };
     let spawned = std::thread::Builder::new()
         .name("ward-presence".to_owned())
-        .spawn(move || run(listener, shared));
+        .spawn(move || run(listener, shared, attaches));
     if let Err(err) = spawned {
         log::warn!("Ward presence: no thread: {err}");
     }

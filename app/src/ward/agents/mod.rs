@@ -31,8 +31,13 @@
 //! limited to this machine: the session screen ([`sessions`]) goes through the owner's own view
 //! of the service ([`gateway`]), so the chat of a session running on another Ward is read and
 //! written the same way as a local one.
+//!
+//! The tab of a session on another machine can be opened here as well: the card asks this Ward
+//! on its loopback answer, and a tab of its own shows the stream of that session's tab, keys
+//! going back ([`attach`]).
 
 pub mod admission;
+pub mod attach;
 pub mod client;
 pub mod contract;
 pub mod gateway;
@@ -689,6 +694,55 @@ fn focus_pane_of(pane_uuid: &str, ctx: &mut AppContext) -> Result<(), String> {
     Ok(())
 }
 
+/// Opens the tab of a session on another machine, asked for by the card: see [`attach`].
+fn open_attach_tab(tab: attach::Attach, ctx: &mut AppContext) -> Result<(), String> {
+    let script = attach::script_path();
+    attach::write_script(&script).map_err(|err| format!("could not write the viewer: {err}"))?;
+    let attach::Attach { url, title } = tab;
+    let mut env_vars: HashMap<std::ffi::OsString, std::ffi::OsString> = HashMap::new();
+    env_vars.insert(attach::URL_ENV_VAR.into(), url.into());
+    env_vars.insert(attach::TITLE_ENV_VAR.into(), title.clone().into());
+    let tab = UriTab {
+        options: NewTerminalOptions {
+            shell: uri_launch::find_shell("powershell", ctx),
+            env_vars,
+            ..Default::default()
+        },
+        title: Some(title),
+        command: Some(attach::tab_command(&script)),
+        ack: None,
+    };
+    let window_id = ctx.windows().active_window().or_else(|| {
+        WorkspaceRegistry::as_ref(ctx)
+            .all_workspaces(ctx)
+            .first()
+            .map(|(window_id, _)| *window_id)
+    });
+    let (window_id, opened) = uri_launch::open_tab_in_window(window_id, tab, ctx);
+    opened.ok_or_else(|| "could not open the tab".to_owned())?;
+    // The owner clicked in the browser: Ward comes forward with the new tab.
+    ctx.windows().show_window_and_focus_app(window_id);
+    Ok(())
+}
+
+/// Opens the tabs the card asks for, one after another, until Ward quits.
+async fn open_attach_tabs(
+    spawner: ModelSpawner<AgentsModel>,
+    tabs: async_channel::Receiver<attach::Attach>,
+) {
+    while let Ok(tab) = tabs.recv().await {
+        match spawner.spawn(move |_, ctx| open_attach_tab(tab, ctx)).await {
+            Ok(Ok(())) => log::info!("Ward agents: opened the tab of a session on another machine"),
+            Ok(Err(err)) => {
+                log::warn!(
+                    "Ward agents: could not open the tab of a session on another machine: {err}"
+                )
+            }
+            Err(_) => break,
+        }
+    }
+}
+
 fn open_tab(spec: TabSpec, ctx: &mut AppContext) -> Result<Option<String>, String> {
     if !spec.cwd.is_dir() {
         return Err("the worktree is not a directory".to_owned());
@@ -854,6 +908,9 @@ impl Host for UiHost {
     }
 }
 
+/// Requests to open a tab not yet taken: the card asks once per click.
+const ATTACH_QUEUE: usize = 4;
+
 /// Registers the model and starts the worker loops in the OSS build.
 pub fn init(ctx: &mut AppContext) {
     if !crate::features::is_fork_oss() || cfg!(target_family = "wasm") {
@@ -867,8 +924,13 @@ pub fn init(ctx: &mut AppContext) {
         return;
     };
     let shared: presence::Shared = Arc::default();
-    presence::start(shared.clone());
+    let (attaches, attach_tabs) = async_channel::bounded(ATTACH_QUEUE);
+    presence::start(shared.clone(), attaches);
     ctx.add_singleton_model(|ctx| {
+        let spawner = ctx.spawner();
+        ctx.background_executor()
+            .spawn(open_attach_tabs(spawner, attach_tabs))
+            .detach();
         let host = Arc::new(UiHost {
             spawner: ctx.spawner(),
             presence: shared,
