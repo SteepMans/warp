@@ -380,6 +380,19 @@ fn pane_size_of(pane_uuid: &str, ctx: &AppContext) -> Option<(usize, usize)> {
     Some((size.columns(), size.rows()))
 }
 
+/// Gives the PTY of the pane the size of a viewer of its stream, or the size of the pane back
+/// with `None` (see [`stream::Sizing`]); the size the terminal has after, `None` when the tab is
+/// gone.
+fn resize_pane_for_viewer(
+    pane_uuid: &str,
+    size: Option<(usize, usize)>,
+    ctx: &mut AppContext,
+) -> Option<(usize, usize)> {
+    let view = terminal_view_of(pane_uuid, ctx)?;
+    view.update(ctx, |view, ctx| view.ward_set_remote_viewer_size(size, ctx));
+    pane_size_of(pane_uuid, ctx)
+}
+
 /// Writes keys into the pane as they come, without the paste markers of [`send_text_to_pane`]:
 /// the viewer of a stream types, he does not paste.
 fn write_bytes_to_pane(
@@ -452,21 +465,36 @@ async fn pane_size(spawner: &ModelSpawner<AgentsModel>, pane: &str) -> Option<(u
 }
 
 /// One stream of a tab, from the connection to the end; the pane can be streamed again after.
+/// A size a viewer gave the tab ends with the stream: the tab gets the size of its pane back.
 async fn run_stream(job: StreamJob) {
     let pane = job.pane.clone();
     let streams = job.streams.clone();
-    match stream_tab(job).await {
+    let spawner = job.spawner.clone();
+    let sizing = Arc::new(parking_lot::Mutex::new(stream::Sizing::default()));
+    match stream_tab(job, sizing.clone()).await {
         Ok(()) => log::info!("Ward agents: the stream of a session is over"),
         Err(err) => log::warn!("Ward agents: the stream of a session broke: {err:#}"),
+    }
+    let back = sizing.lock().on_end();
+    if back.is_some() {
+        let resized = pane.clone();
+        let _ = spawner
+            .spawn(move |_, ctx| resize_pane_for_viewer(&resized, None, ctx))
+            .await;
+        log::info!("Ward agents: the tab of a session has the size of its pane again");
     }
     streams.lock().remove(&pane);
 }
 
 /// Connects to the service and streams the tab: its size, the recent output, then every new
-/// read; the keys of the viewers go into the tab. Over when the service closes the socket, the
-/// socket breaks or the tab is gone.
-async fn stream_tab(job: StreamJob) -> anyhow::Result<()> {
-    use futures::{SinkExt as _, StreamExt as _};
+/// read; the keys of the viewers go into the tab, and the size a viewer gives it goes to its
+/// PTY ([`stream::Sizing`]). Over when the service closes the socket, the socket breaks or the
+/// tab is gone.
+async fn stream_tab(
+    job: StreamJob,
+    sizing: Arc<parking_lot::Mutex<stream::Sizing>>,
+) -> anyhow::Result<()> {
+    use futures::{FutureExt as _, SinkExt as _, StreamExt as _};
     use websocket::WebsocketMessage as _;
 
     let StreamJob {
@@ -498,6 +526,9 @@ async fn stream_tab(job: StreamJob) -> anyhow::Result<()> {
     }
 
     let (out_tx, out_rx) = async_channel::unbounded::<Out>();
+    // The size the viewers were told last: by the check below, or at once after the size of a
+    // viewer was given to the tab.
+    let last_size = Arc::new(parking_lot::Mutex::new(size));
     let forward = {
         let out_tx = out_tx.clone();
         async move {
@@ -511,8 +542,9 @@ async fn stream_tab(job: StreamJob) -> anyhow::Result<()> {
     let watch = {
         let spawner = spawner.clone();
         let pane = pane.clone();
+        let out_tx = out_tx.clone();
+        let last_size = last_size.clone();
         async move {
-            let mut last = size;
             let mut ticks: u32 = 0;
             loop {
                 async_io::Timer::after(stream::SIZE_CHECK).await;
@@ -521,8 +553,8 @@ async fn stream_tab(job: StreamJob) -> anyhow::Result<()> {
                 let Some(now) = pane_size(&spawner, &pane).await else {
                     break;
                 };
-                if last != Some(now) {
-                    last = Some(now);
+                let changed = last_size.lock().replace(now) != Some(now);
+                if changed {
                     let text = stream::size_message(now.0, now.1);
                     if out_tx.send(Out::Text(text)).await.is_err() {
                         break;
@@ -556,6 +588,43 @@ async fn stream_tab(job: StreamJob) -> anyhow::Result<()> {
         let pane = pane.clone();
         async move {
             while let Some(Ok(message)) = incoming.next().await {
+                if let Some(text) = message.text() {
+                    let resize = stream::parse_viewer_frame(text)
+                        .and_then(|frame| sizing.lock().on_frame(frame));
+                    let Some(resize) = resize else {
+                        continue;
+                    };
+                    let resized = pane.clone();
+                    let Ok(now) = spawner
+                        .spawn(move |_, ctx| resize_pane_for_viewer(&resized, resize.size(), ctx))
+                        .await
+                    else {
+                        break;
+                    };
+                    match resize {
+                        stream::Resize::To { cols, rows } => log::info!(
+                            "Ward agents: the tab of a session takes the size of its viewer, \
+                             {cols}x{rows}"
+                        ),
+                        stream::Resize::Back => log::info!(
+                            "Ward agents: the tab of a session has the size of its pane again"
+                        ),
+                    }
+                    // The viewers learn the new size at once, ahead of the screen drawn at it.
+                    let Some(now) = now else {
+                        continue;
+                    };
+                    let changed = last_size.lock().replace(now) != Some(now);
+                    if changed
+                        && out_tx
+                            .send(Out::Text(stream::size_message(now.0, now.1)))
+                            .await
+                            .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
                 let Some(bytes) = message.binary() else {
                     continue;
                 };
@@ -572,11 +641,14 @@ async fn stream_tab(job: StreamJob) -> anyhow::Result<()> {
             }
         }
     };
-    let output_side = futures::future::join(
-        write,
+    // The first of the three to end ends the stream: the others are dropped with their senders,
+    // and the writer sends what is left and closes the socket.
+    let producers = futures::future::select(
+        Box::pin(read),
         futures::future::select(Box::pin(forward), Box::pin(watch)),
-    );
-    futures::future::select(Box::pin(read), Box::pin(output_side)).await;
+    )
+    .map(|_| ());
+    futures::future::join(write, producers).await;
     Ok(())
 }
 
@@ -699,10 +771,16 @@ fn focus_pane_of(pane_uuid: &str, ctx: &mut AppContext) -> Result<(), String> {
 fn open_attach_tab(tab: attach::Attach, ctx: &mut AppContext) -> Result<(), String> {
     let script = attach::script_path();
     attach::write_script(&script).map_err(|err| format!("could not write the viewer: {err}"))?;
-    let attach::Attach { url, title } = tab;
+    let attach::Attach {
+        url,
+        title,
+        task,
+        worker,
+    } = tab;
     let mut env_vars: HashMap<std::ffi::OsString, std::ffi::OsString> = HashMap::new();
     env_vars.insert(attach::URL_ENV_VAR.into(), url.into());
-    env_vars.insert(attach::TITLE_ENV_VAR.into(), title.clone().into());
+    env_vars.insert(attach::TITLE_ENV_VAR.into(), task.into());
+    env_vars.insert(attach::WORKER_ENV_VAR.into(), worker.into());
     let tab = UriTab {
         options: NewTerminalOptions {
             shell: uri_launch::find_shell("powershell", ctx),

@@ -51,6 +51,7 @@ pub use tab_metadata::TerminalRowModelState;
 mod testing;
 mod tooltips;
 pub mod use_agent_footer;
+mod ward_remote;
 mod zero_state_block;
 
 use std::any::Any;

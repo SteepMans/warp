@@ -14,6 +14,10 @@
 //! sends the keys typed here as binary frames, like the viewer in the browser. The address with
 //! the ticket goes to it in an environment variable, not on the command line, and the ticket is
 //! good for one connection within a minute. Ctrl+] disconnects; the session goes on.
+//!
+//! The viewer also sends the size of its tab, and the session's tab takes it, so the raw output
+//! fits this screen ([`super::stream`]); until it does, the viewer holds the output back. The
+//! tab itself is marked as remote control of that machine ([`super::remote_tab`]).
 
 use std::path::{Path, PathBuf};
 
@@ -23,7 +27,10 @@ pub const PATH: &str = "/ward/attach";
 
 /// The viewer socket with the ticket, for the viewer in the tab.
 pub const URL_ENV_VAR: &str = "WARD_ATTACH_URL";
+/// The task, for the messages of the viewer.
 pub const TITLE_ENV_VAR: &str = "WARD_ATTACH_TITLE";
+/// The machine of the session, for the messages of the viewer.
+pub const WORKER_ENV_VAR: &str = "WARD_ATTACH_WORKER";
 
 /// The viewer run in the tab, see the module docs.
 pub const SCRIPT: &str = include_str!("attach.ps1");
@@ -35,11 +42,14 @@ pub const SUPPORTED: bool = cfg!(windows);
 const MAX_TITLE_CHARS: usize = 120;
 const MAX_WORKER_CHARS: usize = 64;
 
-/// A tab to open: the viewer socket with its ticket and the name of the tab.
+/// A tab to open: the viewer socket with its ticket, the name of the tab, the task and the
+/// machine of the session (empty when the page did not say).
 #[derive(Clone, PartialEq, Eq)]
 pub struct Attach {
     pub url: String,
     pub title: String,
+    pub task: String,
+    pub worker: String,
 }
 
 /// The ticket is a secret for a minute: it is not printed even in debug output.
@@ -47,6 +57,7 @@ impl std::fmt::Debug for Attach {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Attach")
             .field("title", &self.title)
+            .field("worker", &self.worker)
             .finish_non_exhaustive()
     }
 }
@@ -97,6 +108,8 @@ pub fn parse(body: &str, base_url: &str) -> Result<Attach, Rejected> {
     Ok(Attach {
         url,
         title: tab_title(body.title.as_deref(), body.worker.as_deref()),
+        task: task_title(body.title.as_deref()),
+        worker: clean(body.worker.as_deref(), MAX_WORKER_CHARS),
     })
 }
 
@@ -147,19 +160,25 @@ fn clean(text: Option<&str>, max: usize) -> String {
     text.chars().take(max).collect()
 }
 
-/// The name of the tab: the task, and the machine the session runs on.
-pub fn tab_title(title: Option<&str>, worker: Option<&str>) -> String {
+/// The task of the session as one short line.
+pub fn task_title(title: Option<&str>) -> String {
     let title = clean(title, MAX_TITLE_CHARS);
-    let title = if title.is_empty() {
+    if title.is_empty() {
         "Сессия агента".to_owned()
     } else {
         title
-    };
+    }
+}
+
+/// The name of the tab: the machine the session runs on first, so that a narrow tab still
+/// shows it, then the task.
+pub fn tab_title(title: Option<&str>, worker: Option<&str>) -> String {
+    let title = task_title(title);
     let worker = clean(worker, MAX_WORKER_CHARS);
     if worker.is_empty() {
-        format!("{title} (удалённо)")
+        format!("Удалённо · {title}")
     } else {
-        format!("{title} (удалённо: {worker})")
+        format!("{worker} · {title}")
     }
 }
 

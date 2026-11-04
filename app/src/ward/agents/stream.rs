@@ -11,14 +11,27 @@
 //!   text frames are JSON: `{"type":"size","cols":…,"rows":…}` when the size of the tab is known
 //!   or changes, `{"type":"ping"}` to keep proxies from closing a quiet socket.
 //! - The viewers to Ward: binary frames are keystrokes, written into the tab as if typed there.
-//!   Text frames are not commands and are ignored.
+//!   Text frames are JSON ([`ViewerFrame`]); any other text is ignored.
 //!
 //! A screen is not a single moment of output, so a viewer who joins later would see nothing
 //! until the agent draws again. Ward therefore keeps the recent output of every session's tab
 //! ([`Tap`]) from the moment it knows the tab, and the stream starts with it.
+//!
+//! The raw output only fits a screen of the same size: a TUI moves the cursor relative to where
+//! it is and wraps at its own width, so a viewer of another size sees the input box repeated
+//! and lines falling apart. The browser viewer takes the size of the tab itself. The viewer in
+//! Ward on another machine ([`super::attach`]) cannot, it is a real terminal: it sends its own
+//! size instead (`{"type":"size",…}` when it connects and whenever its tab is resized), and the
+//! tab here takes that size for as long as the stream lasts (the last viewer to send one wins;
+//! the service passes on only the latest). `{"type":"release"}` from the service, or the end of
+//! the stream, gives the tab back the size of its pane ([`Sizing`]). After the change the agent
+//! and the console redraw the screen at the new size, and the new size goes to the viewers at
+//! once.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+
+use serde::Deserialize;
 
 /// How much recent output of a tab is kept for a stream to start with.
 pub const RING_BYTES: usize = 2 * 1024 * 1024;
@@ -136,6 +149,95 @@ pub fn size_message(cols: usize, rows: usize) -> String {
 
 pub fn ping_message() -> String {
     serde_json::json!({ "type": "ping" }).to_string()
+}
+
+/// The biggest screen a viewer may give the tab; a bigger one is not a terminal.
+pub const MAX_COLS: usize = 1000;
+pub const MAX_ROWS: usize = 500;
+
+/// What a viewer asks of the tab in a text frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewerFrame {
+    /// `{"type":"size","cols":…,"rows":…}`: the screen of a viewer in Ward on another machine.
+    Size { cols: usize, rows: usize },
+    /// `{"type":"release"}`: no viewer asks for a size any more.
+    Release,
+}
+
+#[derive(Deserialize)]
+struct RawViewerFrame {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    cols: Option<u64>,
+    #[serde(default)]
+    rows: Option<u64>,
+}
+
+/// Reads a text frame of the viewers; `None` for anything that is not one of [`ViewerFrame`].
+pub fn parse_viewer_frame(text: &str) -> Option<ViewerFrame> {
+    let frame: RawViewerFrame = serde_json::from_str(text).ok()?;
+    match frame.kind.as_str() {
+        "size" => {
+            let cols = usize::try_from(frame.cols?).ok()?;
+            let rows = usize::try_from(frame.rows?).ok()?;
+            ((1..=MAX_COLS).contains(&cols) && (1..=MAX_ROWS).contains(&rows))
+                .then_some(ViewerFrame::Size { cols, rows })
+        }
+        "release" => Some(ViewerFrame::Release),
+        _ => None,
+    }
+}
+
+/// What a stream does to the PTY of its tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Resize {
+    /// The size of a viewer: columns and rows.
+    To { cols: usize, rows: usize },
+    /// Back to the size of the pane.
+    Back,
+}
+
+impl Resize {
+    /// Columns and rows to give the tab; `None` for the size of its pane.
+    pub fn size(self) -> Option<(usize, usize)> {
+        match self {
+            Resize::To { cols, rows } => Some((cols, rows)),
+            Resize::Back => None,
+        }
+    }
+}
+
+/// The size the viewers gave the tab during one stream, so that the tab gets the size of its
+/// pane back once they are gone.
+#[derive(Debug, Default)]
+pub struct Sizing {
+    given: Option<(usize, usize)>,
+}
+
+impl Sizing {
+    /// A frame of the viewers: the size to give the tab, if any. A size sent again is applied
+    /// again, so the viewer who sent it last wins.
+    pub fn on_frame(&mut self, frame: ViewerFrame) -> Option<Resize> {
+        match frame {
+            ViewerFrame::Size { cols, rows } => {
+                self.given = Some((cols, rows));
+                Some(Resize::To { cols, rows })
+            }
+            ViewerFrame::Release => self.given.take().map(|_| Resize::Back),
+        }
+    }
+
+    /// The stream is over: the tab goes back to the size of its pane if a viewer changed it.
+    pub fn on_end(&mut self) -> Option<Resize> {
+        self.given.take().map(|_| Resize::Back)
+    }
+
+    /// The size a viewer gave the tab, while it holds.
+    #[cfg(test)]
+    pub fn given(&self) -> Option<(usize, usize)> {
+        self.given
+    }
 }
 
 #[cfg(test)]

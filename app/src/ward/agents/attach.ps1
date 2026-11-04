@@ -1,14 +1,22 @@
 # Ward: the tab of an agent session that runs on another machine (WARD.md, "Подключиться").
 #
 # Ward writes this file and runs it in a tab of its own with WARD_ATTACH_URL (the viewer socket
-# of the agents service with a one-time ticket) and WARD_ATTACH_TITLE. The viewer connects to
-# the socket, prints the raw output of the session's tab as it comes and sends the keys typed
-# here back as binary frames, as the viewer in the browser does. Ctrl+] disconnects; the
-# session on its own machine goes on.
+# of the agents service with a one-time ticket), WARD_ATTACH_TITLE (the task) and
+# WARD_ATTACH_WORKER (the machine of the session). The viewer connects to the socket, prints the
+# raw output of the session's tab and sends the keys typed here back as binary frames, as the
+# viewer in the browser does. Ctrl+] disconnects; the session on its own machine goes on.
+#
+# The raw output fits a screen of its own size only. So the viewer sends the size of this tab
+# ({"type":"size","cols","rows"}) when it connects and whenever the tab is resized: the session's
+# tab takes it, and its machine redraws the screen at that size. Until then the output is held,
+# not drawn (see Screen): what was drawn for another size is dropped, the redraw is shown. A
+# machine that never takes the size (an older Ward or service) gets the old behavior after a few
+# seconds: what came is drawn as it is.
 
 $ErrorActionPreference = 'Stop'
 $url = $env:WARD_ATTACH_URL
 $title = [string]$env:WARD_ATTACH_TITLE
+$worker = [string]$env:WARD_ATTACH_WORKER
 Remove-Item Env:\WARD_ATTACH_URL -ErrorAction SilentlyContinue
 if (-not $url) {
     Write-Host 'Ward: нет адреса трансляции. Откройте сессию кнопкой «Подключиться» в карточке.'
@@ -24,15 +32,162 @@ if ($PSVersionTable.PSEdition -ne 'Core') {
 
 $source = @'
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net.WebSockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace WardAttach
 {
+    /// What the viewer does with its screen after a frame.
+    public sealed class Step
+    {
+        /// Wipe the screen first: what is on it was drawn for another size.
+        public bool Clear;
+        /// The session's tab kept another size: tell the owner if this tab is smaller.
+        public bool Warn;
+        /// Output of the session's tab to draw, in order.
+        public readonly List<byte[]> Draw = new List<byte[]>();
+    }
+
+    /// The screen of the session in this tab. The output of the session's tab is held, not
+    /// drawn, until that tab has the size of this one. Output that came while it had another
+    /// size is dropped and the screen wiped: the session's machine redraws after the change.
+    /// When the sizes do not meet within HoldFor (an older Ward or service), what was held is
+    /// drawn as it is.
+    public sealed class Screen
+    {
+        public static readonly TimeSpan HoldFor = TimeSpan.FromSeconds(3);
+        const int HeldCap = 4 * 1024 * 1024;
+
+        readonly List<byte[]> held = new List<byte[]>();
+        int heldBytes;
+        bool holding;
+        bool sized;
+        bool foreign;
+        DateTime deadline = DateTime.MaxValue;
+        int remoteCols;
+        int remoteRows;
+
+        /// Without the size of this tab there is nothing to wait for: output is drawn at once.
+        public Screen(bool knowsOwnSize)
+        {
+            holding = knowsOwnSize;
+        }
+
+        public bool Holding { get { return holding; } }
+        public int RemoteCols { get { return remoteCols; } }
+        public int RemoteRows { get { return remoteRows; } }
+
+        /// The session's machine starts its screen over (it connected again).
+        public void Reset(bool knowsOwnSize)
+        {
+            held.Clear();
+            heldBytes = 0;
+            holding = knowsOwnSize;
+            sized = false;
+            foreign = false;
+            deadline = DateTime.MaxValue;
+        }
+
+        /// A piece of output of the session's tab.
+        public Step Output(byte[] chunk, DateTime now)
+        {
+            Step step = new Step();
+            if (!holding)
+            {
+                step.Draw.Add(chunk);
+                return step;
+            }
+            // Output before any size may be of any size.
+            if (!sized)
+            {
+                foreign = true;
+            }
+            held.Add(chunk);
+            heldBytes += chunk.Length;
+            while (heldBytes > HeldCap && held.Count > 1)
+            {
+                heldBytes -= held[0].Length;
+                held.RemoveAt(0);
+            }
+            StartWaiting(now);
+            return step;
+        }
+
+        /// The size of the session's tab, against the size of this one.
+        public Step Size(int cols, int rows, int ownCols, int ownRows, DateTime now)
+        {
+            Step step = new Step();
+            remoteCols = cols;
+            remoteRows = rows;
+            if (!holding)
+            {
+                return step;
+            }
+            sized = true;
+            if (cols != ownCols || rows != ownRows)
+            {
+                foreign = true;
+                StartWaiting(now);
+                return step;
+            }
+            holding = false;
+            deadline = DateTime.MaxValue;
+            if (foreign)
+            {
+                step.Clear = true;
+            }
+            else
+            {
+                step.Draw.AddRange(held);
+            }
+            held.Clear();
+            heldBytes = 0;
+            return step;
+        }
+
+        /// How long the next frame may be waited for before Tick; infinite while not holding.
+        public TimeSpan Left(DateTime now)
+        {
+            if (!holding || deadline == DateTime.MaxValue)
+            {
+                return Timeout.InfiniteTimeSpan;
+            }
+            TimeSpan left = deadline - now;
+            return left > TimeSpan.Zero ? left : TimeSpan.Zero;
+        }
+
+        /// Time went by: past the deadline the held output is drawn as it is.
+        public Step Tick(DateTime now)
+        {
+            Step step = new Step();
+            if (!holding || now < deadline)
+            {
+                return step;
+            }
+            holding = false;
+            deadline = DateTime.MaxValue;
+            step.Warn = foreign;
+            step.Draw.AddRange(held);
+            held.Clear();
+            heldBytes = 0;
+            return step;
+        }
+
+        void StartWaiting(DateTime now)
+        {
+            if (deadline == DateTime.MaxValue)
+            {
+                deadline = now + HoldFor;
+            }
+        }
+    }
+
     public static class Viewer
     {
         const int StdInput = -10;
@@ -53,6 +208,8 @@ namespace WardAttach
         // What a TUI of the session may have left switched on: the alternate screen, mouse
         // reports, bracketed paste, focus events, a hidden cursor, colors.
         const string Restore = "\u001b[?1049l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1006l\u001b[?2004l\u001b[?1004l\u001b[?25h\u001b[0m";
+        const string Wipe = "\u001b[0m\u001b[H\u001b[2J\u001b[3J";
+        static readonly TimeSpan SizeCheck = TimeSpan.FromMilliseconds(250);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         static extern IntPtr GetStdHandle(int which);
@@ -70,12 +227,16 @@ namespace WardAttach
         static extern bool WriteConsoleW(IntPtr handle, string text, uint length, out uint written, IntPtr reserved);
 
         static readonly object writing = new object();
+        // ClientWebSocket takes one send at a time: keys and sizes go from two threads.
+        static readonly object sending = new object();
         static IntPtr output;
         static bool consoleOut;
         static Stream rawOut;
         static volatile bool detached;
+        static volatile int ownCols;
+        static volatile int ownRows;
 
-        public static int Run(string url, string title)
+        public static int Run(string url, string title, string worker)
         {
             IntPtr input = GetStdHandle(StdInput);
             output = GetStdHandle(StdOutput);
@@ -90,7 +251,8 @@ namespace WardAttach
             }
 
             string name = string.IsNullOrEmpty(title) ? "" : " «" + title + "»";
-            Say("подключение к сессии" + name + "…");
+            string machine = string.IsNullOrEmpty(worker) ? "" : " на " + worker;
+            Say("подключение к сессии" + name + machine + "…");
             ClientWebSocket socket = new ClientWebSocket();
             socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
             try
@@ -104,6 +266,18 @@ namespace WardAttach
                 return 1;
             }
             Say("Ctrl+] — отключиться; сессия на своей машине продолжит работу.");
+
+            int cols;
+            int rows;
+            if (ReadSize(out cols, out rows))
+            {
+                ownCols = cols;
+                ownRows = rows;
+                SendSize(socket);
+            }
+            Thread sizes = new Thread(delegate () { WatchSize(socket); });
+            sizes.IsBackground = true;
+            sizes.Start();
 
             if (consoleIn)
             {
@@ -145,14 +319,25 @@ namespace WardAttach
             char[] chars = new char[64 * 1024 + 8];
             Decoder decoder = new UTF8Encoding(false).GetDecoder();
             MemoryStream text = new MemoryStream();
+            Screen screen = new Screen(ownCols > 0);
+            Task<WebSocketReceiveResult> pending = null;
             bool drawn = false;
-            bool sized = false;
             while (true)
             {
                 WebSocketReceiveResult result;
                 try
                 {
-                    result = socket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None).GetAwaiter().GetResult();
+                    if (pending == null)
+                    {
+                        pending = socket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+                    }
+                    if (!pending.Wait(screen.Left(DateTime.UtcNow)))
+                    {
+                        drawn |= Apply(screen.Tick(DateTime.UtcNow), screen, decoder, chars);
+                        continue;
+                    }
+                    result = pending.GetAwaiter().GetResult();
+                    pending = null;
                 }
                 catch (Exception e)
                 {
@@ -172,12 +357,9 @@ namespace WardAttach
                 }
                 if (result.MessageType == WebSocketMessageType.Binary)
                 {
-                    int count = decoder.GetChars(buffer, 0, result.Count, chars, 0, false);
-                    if (count > 0)
-                    {
-                        Write(new string(chars, 0, count));
-                        drawn = true;
-                    }
+                    byte[] chunk = new byte[result.Count];
+                    Buffer.BlockCopy(buffer, 0, chunk, 0, result.Count);
+                    drawn |= Apply(screen.Output(chunk, DateTime.UtcNow), screen, decoder, chars);
                     continue;
                 }
                 text.Write(buffer, 0, result.Count);
@@ -197,21 +379,21 @@ namespace WardAttach
                 }
                 else if (type == "reset")
                 {
-                    // The Ward of the session connected again: its screen starts over.
+                    // The Ward of the session connected again: its screen starts over, and it
+                    // is told the size of this tab again.
                     if (drawn)
                     {
                         Write("\u001b[0m\u001b[H\u001b[2J");
                     }
                     decoder.Reset();
                     drawn = false;
+                    screen.Reset(ownCols > 0);
+                    SendSize(socket);
                 }
                 else if (type == "size")
                 {
-                    if (!sized && !drawn)
-                    {
-                        sized = true;
-                        WarnIfSmaller(Number(frame, "cols"), Number(frame, "rows"));
-                    }
+                    Step step = screen.Size(Number(frame, "cols"), Number(frame, "rows"), ownCols, ownRows, DateTime.UtcNow);
+                    drawn |= Apply(step, screen, decoder, chars);
                 }
                 else if (type == "ended")
                 {
@@ -227,6 +409,37 @@ namespace WardAttach
                     return 1;
                 }
             }
+        }
+
+        /// Does what the screen asks; true when anything of the session was drawn.
+        static bool Apply(Step step, Screen screen, Decoder decoder, char[] chars)
+        {
+            if (step.Clear)
+            {
+                Write(Wipe);
+                decoder.Reset();
+            }
+            if (step.Warn)
+            {
+                WarnIfSmaller(screen.RemoteCols, screen.RemoteRows);
+            }
+            bool drawn = false;
+            foreach (byte[] chunk in step.Draw)
+            {
+                int offset = 0;
+                while (offset < chunk.Length)
+                {
+                    int count = Math.Min(chunk.Length - offset, 64 * 1024);
+                    int decoded = decoder.GetChars(chunk, offset, count, chars, 0, false);
+                    if (decoded > 0)
+                    {
+                        Write(new string(chars, 0, decoded));
+                        drawn = true;
+                    }
+                    offset += count;
+                }
+            }
+            return drawn;
         }
 
         /// The keys typed here go to the session's tab as they are: Enter, Ctrl+C, Esc, arrows.
@@ -270,27 +483,89 @@ namespace WardAttach
                         stop = true;
                     }
                 }
-                if (count > 0)
+                if (count > 0 && !Send(socket, bytes, count, WebSocketMessageType.Binary))
                 {
-                    try
-                    {
-                        socket.SendAsync(new ArraySegment<byte>(bytes, 0, count), WebSocketMessageType.Binary, true, CancellationToken.None).GetAwaiter().GetResult();
-                    }
-                    catch
-                    {
-                        return;
-                    }
+                    return;
                 }
                 if (stop)
                 {
                     detached = true;
-                    try
+                    lock (sending)
                     {
-                        socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "detached", CancellationToken.None).Wait(2000);
+                        try
+                        {
+                            socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "detached", CancellationToken.None).Wait(2000);
+                        }
+                        catch { }
                     }
-                    catch { }
                     try { socket.Abort(); } catch { }
                     return;
+                }
+            }
+        }
+
+        /// The size of this tab as it changes: the session's tab follows it.
+        static void WatchSize(ClientWebSocket socket)
+        {
+            while (!detached && socket.State == WebSocketState.Open)
+            {
+                Thread.Sleep(SizeCheck);
+                int cols;
+                int rows;
+                if (!ReadSize(out cols, out rows) || (cols == ownCols && rows == ownRows))
+                {
+                    continue;
+                }
+                ownCols = cols;
+                ownRows = rows;
+                SendSize(socket);
+            }
+        }
+
+        static bool ReadSize(out int cols, out int rows)
+        {
+            cols = 0;
+            rows = 0;
+            if (!consoleOut)
+            {
+                return false;
+            }
+            try
+            {
+                cols = Console.WindowWidth;
+                rows = Console.WindowHeight;
+            }
+            catch
+            {
+                return false;
+            }
+            return cols > 0 && rows > 0;
+        }
+
+        static void SendSize(ClientWebSocket socket)
+        {
+            int cols = ownCols;
+            int rows = ownRows;
+            if (cols <= 0 || rows <= 0)
+            {
+                return;
+            }
+            byte[] frame = Encoding.UTF8.GetBytes("{\"type\":\"size\",\"cols\":" + cols + ",\"rows\":" + rows + "}");
+            Send(socket, frame, frame.Length, WebSocketMessageType.Text);
+        }
+
+        static bool Send(ClientWebSocket socket, byte[] bytes, int count, WebSocketMessageType type)
+        {
+            lock (sending)
+            {
+                try
+                {
+                    socket.SendAsync(new ArraySegment<byte>(bytes, 0, count), type, true, CancellationToken.None).GetAwaiter().GetResult();
+                    return true;
+                }
+                catch
+                {
+                    return false;
                 }
             }
         }
@@ -416,5 +691,5 @@ namespace WardAttach
 if (-not ('WardAttach.Viewer' -as [type])) {
     Add-Type -TypeDefinition $source -Language CSharp -IgnoreWarnings
 }
-$code = [WardAttach.Viewer]::Run($url, $title)
+$code = [WardAttach.Viewer]::Run($url, $title, $worker)
 exit $code
