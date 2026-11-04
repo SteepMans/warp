@@ -134,7 +134,8 @@ Ward работает воркером сервиса агентов (`agents-se
 
 ### Подключение
 
-Settings → Third party CLI agents → Agents worker:
+Settings → Agents worker (своя страница настроек; на странице Third party CLI agents — ссылка
+на неё):
 
 - адрес сервиса, по умолчанию `https://chimney.steep-man.ru/agents`;
 - ключ подключения `agk_…` (выдаёт сервис); без ключа воркер выключен;

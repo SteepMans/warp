@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use about_page::AboutPageView;
 use updates_page::UpdatesPageView;
 use agent_profiles_page::{AgentProfilesPageAction, AgentProfilesPageEvent, AgentProfilesPageView};
+use agents_worker_page::{AgentsWorkerPageEvent, AgentsWorkerPageView};
 use appearance_page::{AppearancePageAction, AppearanceSettingsPageView};
 use billing_and_usage_dispatch::BillingAndUsageDispatchView;
 use billing_and_usage_page::BillingAndUsagePageEvent;
@@ -80,6 +81,7 @@ mod about_page;
 mod admin_actions;
 mod agent_assisted_environment_modal;
 mod agent_profiles_page;
+mod agents_worker_page;
 mod ai_shared;
 mod appearance_page;
 mod billing_and_usage;
@@ -341,6 +343,8 @@ pub enum SettingsSection {
     // ── Ward ──
     /// Ward's update status page; only shown in the OSS build.
     Updates,
+    /// Ward as a worker of agents-service; only shown in the OSS build.
+    AgentsWorker,
 }
 
 /// Pages for Warp's own AI, account and cloud features, hidden in the fork's OSS build.
@@ -390,6 +394,7 @@ impl Display for SettingsSection {
             SettingsSection::EditorAndCodeReview => write!(f, "Editor and Code Review"),
             SettingsSection::CloudEnvironments => write!(f, "Environments"),
             SettingsSection::WarpCloudAgentAPIKeys => write!(f, "API keys"),
+            SettingsSection::AgentsWorker => write!(f, "Agents worker"),
             _ => write!(f, "{self:?}"),
         }
     }
@@ -436,6 +441,7 @@ impl SettingsSection {
             // Display label above dropped it.
             Self::WarpCloudAgentAPIKeys => "Oz Cloud API Keys",
             Self::Updates => "Updates",
+            Self::AgentsWorker => "Agents worker",
         }
     }
 
@@ -475,6 +481,7 @@ impl SettingsSection {
             "Environments" | "CloudEnvironments" => Self::CloudEnvironments,
             "Oz Cloud API Keys" | "OzCloudAPIKeys" => Self::WarpCloudAgentAPIKeys,
             "Updates" => Self::Updates,
+            "Agents worker" | "AgentsWorker" => Self::AgentsWorker,
             _ => return None,
         };
         Some(section)
@@ -1193,6 +1200,7 @@ macro_rules! update_page {
             SettingsPageViewHandle::CloudEnvironments(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::About(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::Updates(handle) => $ctx.update_view(handle, $update),
+            SettingsPageViewHandle::AgentsWorker(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::CodeIndexing(handle) => $ctx.update_view(handle, $update),
             SettingsPageViewHandle::EditorAndCodeReview(handle) => {
                 $ctx.update_view(handle, $update)
@@ -1299,6 +1307,12 @@ impl SettingsView {
         let cli_agents_page_handle = ctx.add_typed_action_view(CLIAgentsPageView::new);
         ctx.subscribe_to_view(&cli_agents_page_handle, |me, _, event, ctx| {
             me.handle_cli_agents_page_event(event, ctx);
+        });
+
+        // Agents worker page (Ward only, see `should_render`)
+        let agents_worker_page_handle = ctx.add_typed_action_view(AgentsWorkerPageView::new);
+        ctx.subscribe_to_view(&agents_worker_page_handle, |me, _, event, ctx| {
+            me.handle_agents_worker_page_event(event, ctx);
         });
 
         // Environments page
@@ -1415,6 +1429,7 @@ impl SettingsView {
             SettingsPage::new(agent_profiles_page_handle),
             SettingsPage::new(knowledge_page_handle),
             SettingsPage::new(cli_agents_page_handle),
+            SettingsPage::new(agents_worker_page_handle),
             billing_and_usage_page,
             SettingsPage::new(code_indexing_page_handle),
             SettingsPage::new(editor_review_page_handle),
@@ -1455,6 +1470,9 @@ impl SettingsView {
                     SettingsSection::ThirdPartyCLIAgents,
                 ],
             )),
+            // Ward: next to the CLI agents page, which takes the place of the Agents umbrella
+            // in the OSS build (below); hidden elsewhere.
+            SettingsNavItem::Page(SettingsSection::AgentsWorker),
             SettingsNavItem::Page(SettingsSection::BillingAndUsage),
             SettingsNavItem::Umbrella(SettingsUmbrella::new(
                 "Code",
@@ -2045,6 +2063,16 @@ impl SettingsView {
         }
     }
 
+    fn handle_agents_worker_page_event(
+        &mut self,
+        event: &AgentsWorkerPageEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match event {
+            AgentsWorkerPageEvent::FocusModal => ctx.focus(&self.search_editor),
+        }
+    }
+
     fn handle_code_indexing_page_event(
         &mut self,
         event: &CodeIndexingPageEvent,
@@ -2178,6 +2206,7 @@ impl SettingsView {
             SettingsPageViewHandle::BillingAndUsage(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::About(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::Updates(v) => v.as_ref(app).should_render(app),
+            SettingsPageViewHandle::AgentsWorker(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::WarpCloudAgentAPIKeys(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::Privacy(v) => v.as_ref(app).should_render(app),
             SettingsPageViewHandle::Warpify(v) => v.as_ref(app).should_render(app),
