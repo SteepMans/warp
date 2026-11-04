@@ -176,7 +176,7 @@ fn the_chimney_page_asks_for_the_tab_of_a_remote_session() {
         tab.url,
         format!("wss://chimney.steep-man.ru/agents/api/v1/stream/{SESSION}?ticket={TICKET}")
     );
-    assert_eq!(tab.title, "#4711 Задача (удалённо: laptop)");
+    assert_eq!(tab.title, "laptop · #4711 Задача");
 }
 
 #[test]
@@ -280,7 +280,7 @@ fn the_server_takes_a_request_to_connect_with_its_body() {
     stream.read_to_string(&mut answer).unwrap();
     assert!(answer.starts_with("HTTP/1.1 202 Accepted\r\n"), "{answer}");
     let tab = tabs.try_recv().unwrap();
-    assert_eq!(tab.title, "#4711 Задача (удалённо: laptop)");
+    assert_eq!(tab.title, "laptop · #4711 Задача");
 }
 
 /// A socket the browser opened ahead of time and left empty does not hold the answer to the
