@@ -1,10 +1,10 @@
 //! Ward as a worker of the agents system (`agents-service`, contract note «Agents — контракт»).
 //!
-//! With a service address and a connection key in the settings (Third party CLI agents page,
-//! "Agents worker") Ward registers as a worker, sends heartbeats, takes assignments, clones the
-//! repository into its root, creates a worktree per session, opens the agent (Claude Code or
-//! Codex) in its own tab and reports the transcript and the statuses back. There is no separate
-//! daemon: the worker lives as long as Ward runs. See [`worker`] for the loops.
+//! With a service address and a connection key in the settings (the "Agents worker" page) Ward
+//! registers as a worker, sends heartbeats, takes assignments, clones the repository into its
+//! root, creates a worktree per session, opens the agent (Claude Code or Codex) in its own tab
+//! and reports the transcript and the statuses back. There is no separate daemon: the worker
+//! lives as long as Ward runs. See [`worker`] for the loops.
 //!
 //! The sessions do outlive a restart of Ward, an update above all: the state of every session
 //! still going is saved beside its files on disk ([`resume`]) and read again at the start of
