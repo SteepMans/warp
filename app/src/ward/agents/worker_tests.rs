@@ -7,7 +7,7 @@
 //! the server of a test that starts later: with its own prefix it matches no mock there and
 //! neither takes that test's assignment nor lands in its log.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use command::blocking::Command as Process;
 use mockito::{Matcher, Server, ServerGuard};
@@ -131,11 +131,14 @@ struct FakeHost {
     snapshot: Mutex<Snapshot>,
     /// What the orchestrator "writes" as its plan when its tab opens.
     plan: Mutex<Option<(PathBuf, String)>>,
+    /// "Take tasks" off as the owner sets it on the settings page; starts as `config.paused`.
+    paused: AtomicBool,
 }
 
 impl FakeHost {
     fn new(config: WorkerConfig, homes: Homes) -> Self {
         Self {
+            paused: AtomicBool::new(config.paused),
             config,
             homes,
             silent: false,
@@ -181,7 +184,10 @@ impl FakeHost {
 #[async_trait]
 impl Host for FakeHost {
     async fn config(&self) -> Option<WorkerConfig> {
-        Some(self.config.clone())
+        Some(WorkerConfig {
+            paused: self.paused.load(Ordering::SeqCst),
+            ..self.config.clone()
+        })
     }
 
     async fn load_registration(&self) -> Option<Registration> {
@@ -690,6 +696,88 @@ fn full_cycle_against_a_fake_service() {
                 .iter()
                 .any(|session| session.status == SessionStatus::Review)
     });
+}
+
+/// "Take tasks" goes out with every heartbeat as `localPaused`, and turning it off or on sends
+/// a heartbeat at once: the service schedules by it, and would otherwise go on offering the
+/// machine tasks it refuses, or keep the waiting ones from it, for a whole heartbeat interval.
+#[test]
+fn take_tasks_goes_out_with_a_heartbeat_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let homes = Homes {
+        claude_dir: dir.path().join("home").join(".claude"),
+        claude_json: dir.path().join("home").join(".claude.json"),
+        codex_dir: dir.path().join("home").join(".codex"),
+    };
+    std::fs::create_dir_all(dir.path().join("home")).unwrap();
+
+    let mut server = Server::new();
+    let log: Log = Arc::default();
+    let base = "/agents/t-take-tasks/api/v1/worker";
+    // An hour between heartbeats: a second one during the test is one sent at once.
+    server
+        .mock("POST", format!("{base}/register").as_str())
+        .with_body(r#"{"workerId":"w-1","token":"agw_token","heartbeatSec":3600}"#)
+        .create();
+    record(
+        &mut server,
+        "POST",
+        &format!("{base}/heartbeat"),
+        &log,
+        |_| b"{}".to_vec(),
+    );
+    let host = Arc::new(FakeHost::new(
+        WorkerConfig {
+            base_url: format!("{}/agents/t-take-tasks", server.url()),
+            key: "agk_test".to_owned(),
+            name: "test-pc".to_owned(),
+            root: dir.path().join("agents-work"),
+            clone_search: Vec::new(),
+            paused: false,
+        },
+        homes.clone(),
+    ));
+    let timing = Timing {
+        config_every: Duration::from_millis(100),
+        min_backoff: Duration::from_millis(100),
+        max_backoff: Duration::from_secs(1),
+        ..Timing::default()
+    };
+    let worker = Worker::new(
+        host.clone(),
+        Arc::new(FakeMachine),
+        http_client::Client::new_for_test(),
+        homes.clone(),
+        profile_target(dir.path(), &homes),
+        timing,
+        "test".to_owned(),
+    );
+    let runner = worker.clone();
+    std::thread::spawn(move || futures::executor::block_on(runner.control_loop()));
+    let beats = || -> Vec<serde_json::Value> {
+        log.lock()
+            .iter()
+            .filter(|(path, _)| path.ends_with("/heartbeat"))
+            .map(|(_, body)| serde_json::from_str(body).unwrap())
+            .collect()
+    };
+
+    wait_for("the first heartbeat", || !beats().is_empty());
+    assert_eq!(beats()[0]["localPaused"], false);
+
+    // Off: the service hears of it before the hour is over, and so does the panel.
+    host.paused.store(true, Ordering::SeqCst);
+    worker.heartbeat_now();
+    wait_for("a heartbeat with Take tasks off", || beats().len() >= 2);
+    assert_eq!(beats()[1]["localPaused"], true);
+    wait_for("the panel", || host.snapshot.lock().local_paused);
+
+    // On again: the same right away, so the waiting tasks come to the machine at once.
+    host.paused.store(false, Ordering::SeqCst);
+    worker.heartbeat_now();
+    wait_for("a heartbeat with Take tasks on", || beats().len() >= 3);
+    assert_eq!(beats()[2]["localPaused"], false);
+    assert!(!worker.snapshot().local_paused);
 }
 
 /// An assignment without a prompt, a repository or a branch: the orchestrator session in the

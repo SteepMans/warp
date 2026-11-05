@@ -129,6 +129,7 @@ async fn worker_calls_carry_the_token() {
         resources: Default::default(),
         usage: Vec::new(),
         sessions: Vec::new(),
+        local_paused: false,
         profile: None,
     };
     assert_eq!(

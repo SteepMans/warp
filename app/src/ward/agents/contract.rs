@@ -281,6 +281,11 @@ pub struct HeartbeatRequest {
     pub resources: Resources,
     pub usage: Vec<UsageReport>,
     pub sessions: Vec<SessionBeat>,
+    /// "Take tasks" is off in this Ward: every assignment is refused here, whatever the pause
+    /// of the service says. Without it the service cannot see the setting and keeps offering
+    /// the machine tasks; with it the scheduler leaves the machine alone until a heartbeat says
+    /// `false` again.
+    pub local_paused: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<ProfileBeat>,
 }
