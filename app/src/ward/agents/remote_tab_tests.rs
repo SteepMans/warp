@@ -1,4 +1,5 @@
 use super::*;
+use warp_core::ui::theme::AnsiColorIdentifier;
 
 const TASK: &str = "#4726 Реверс. Попробовать добавить салюты";
 const BRANCH: &str = "feature/4726-fireworks-sync";
@@ -172,6 +173,33 @@ fn the_state_of_the_stream_follows_the_viewer() {
             "{text}"
         );
     }
+}
+
+/// The group of remote tabs loses the color an older Ward gave it, and keeps one the user
+/// picked.
+#[test]
+fn the_group_of_remote_tabs_has_no_fill_of_its_own() {
+    let auto = SelectedTabColor::Color(project_groups::auto_group_color(GROUP_NAME));
+    assert_eq!(group_color(auto), SelectedTabColor::Cleared);
+    assert_eq!(
+        group_color(SelectedTabColor::Cleared),
+        SelectedTabColor::Cleared
+    );
+    assert_eq!(
+        group_color(SelectedTabColor::Unset),
+        SelectedTabColor::Unset
+    );
+    let picked = [
+        AnsiColorIdentifier::Blue,
+        AnsiColorIdentifier::Cyan,
+        AnsiColorIdentifier::Green,
+        AnsiColorIdentifier::Magenta,
+    ]
+    .into_iter()
+    .map(SelectedTabColor::Color)
+    .find(|color| *color != auto)
+    .unwrap();
+    assert_eq!(group_color(picked), picked);
 }
 
 /// The viewer titles its console with the state of the stream; the header reads it from there.

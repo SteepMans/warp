@@ -5,6 +5,7 @@
 //!   is the task, so a narrow row still reads it; the machine and the branch of the session go
 //!   to the line under it ([`RemoteTab::row_label`]), the remote icon of that line takes the
 //!   color of the stream ([`Link`]), and the hover names the machine and the task in full.
+//! - The group has no fill of its own ([`group_color`]): its rows are highlighted as any other.
 //! - The pane header stays on while the tab lives: "Удалённое управление: steep-pc · #4726 …",
 //!   where the stream is and how to disconnect. It is outside the terminal, so the output of
 //!   the session cannot overwrite it. Where the stream is, the viewer says in the title of its
@@ -18,6 +19,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use warpui::EntityId;
+
+use crate::tab::SelectedTabColor;
+use crate::ward::project_groups;
 
 /// The tab group of the remote tabs.
 pub const GROUP_NAME: &str = "Удалённое управление";
@@ -225,6 +229,18 @@ impl RemoteTab {
     /// The tooltip of the tab.
     pub fn tooltip(&self) -> String {
         format!("Удалённое управление: {}", self.full_title())
+    }
+}
+
+/// The color the group of remote tabs keeps. Ward used to give it the color of its project
+/// groups, and that tinted the whole group, header and rows, louder than the highlight of the
+/// active tab. Now the group goes without one, its rows are highlighted as any other and the
+/// remote icon marks the tab. A color the user picked for the group is kept.
+pub fn group_color(current: SelectedTabColor) -> SelectedTabColor {
+    if current == SelectedTabColor::Color(project_groups::auto_group_color(GROUP_NAME)) {
+        SelectedTabColor::Cleared
+    } else {
+        current
     }
 }
 

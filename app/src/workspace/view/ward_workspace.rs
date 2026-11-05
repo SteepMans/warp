@@ -505,7 +505,8 @@ impl Workspace {
     }
 
     /// Puts the tab of a session on another machine into the group of remote tabs, apart from
-    /// the projects of this machine.
+    /// the projects of this machine. The group has no fill of its own, also when an older Ward
+    /// colored it ([`remote_tab::group_color`]).
     pub(crate) fn ward_place_remote_tab(
         &mut self,
         pane_group_id: EntityId,
@@ -515,6 +516,20 @@ impl Workspace {
             return;
         }
         self.ward_move_tab_to_named_group(pane_group_id, remote_tab::GROUP_NAME, ctx);
+        let group = self.tab_groups.values_mut().find(|group| {
+            group
+                .name
+                .as_deref()
+                .is_some_and(|name| project_groups::same_group_name(name, remote_tab::GROUP_NAME))
+        });
+        if let Some(group) = group {
+            let color = remote_tab::group_color(group.color);
+            if color != group.color {
+                group.color = color;
+                ctx.dispatch_global_action("workspace:save_app", ());
+                ctx.notify();
+            }
+        }
     }
 
     /// Moves a tab to the end of the group with the given name, creating the group when no
