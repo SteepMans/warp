@@ -1,8 +1,10 @@
 //! The tab of a session on another machine ([`super::attach`]) as Ward shows it: a tab of its
 //! own that cannot pass for a local one.
 //!
-//! - The tab goes into the group "Удалённое управление", its name starts with the machine and
-//!   its tab carries the remote icon; in the vertical tabs its row says which machine it is.
+//! - The tab goes into the group "Удалённое управление" and carries the remote icon. Its name
+//!   is the task, so a narrow row still reads it; the machine and the branch of the session go
+//!   to the line under it ([`RemoteTab::row_label`]), the remote icon of that line takes the
+//!   color of the stream ([`Link`]), and the hover names the machine and the task in full.
 //! - The pane header stays on while the tab lives: "Удалённое управление: steep-pc · #4726 …",
 //!   where the stream is and how to disconnect. It is outside the terminal, so the output of
 //!   the session cannot overwrite it. Where the stream is, the viewer says in the title of its
@@ -28,6 +30,14 @@ pub const DETACH_HINT: &str = "Ctrl+] — отключиться";
 pub const STATUS_PREFIX: &str = "Ward: ";
 pub const WARNING_PREFIX: &str = "Ward! ";
 const MAX_STATUS_CHARS: usize = 160;
+
+/// How the viewer words its states, as `attach.ps1` writes them: the stream is live, the
+/// service waits for the Ward of the session, the stream is over, and the warning of an older
+/// Ward there. Any other warning is the Ward of the session gone and asked for again.
+pub(crate) const LIVE_TEXT: &str = "подключено";
+pub(crate) const WAITING_TEXT: &str = "ждём Ward на ";
+pub(crate) const ENDED_TEXT: &str = "трансляция закончилась";
+pub(crate) const LEGACY_TEXT: &str = "Ward старой версии";
 
 /// Where the stream of a remote tab is, as its viewer says.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,6 +66,65 @@ pub fn viewer_status(title: &str) -> Option<ViewerStatus> {
     })
 }
 
+/// Where the stream of a remote tab is, for its row in the tab list: the remote icon there
+/// takes its color, and a row without a branch names it. The same states as the viewer has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Link {
+    /// The viewer starts or opens the socket of the service.
+    Connecting,
+    /// The service waits for the Ward of the session: the session is starting.
+    Waiting,
+    /// The Ward of the session streams.
+    Live,
+    /// An older Ward streams: the screen may come out doubled.
+    Legacy,
+    /// The Ward of the session went away and is asked for again.
+    Reconnecting,
+    /// The viewer is over, or the stream ended.
+    Ended,
+}
+
+impl Link {
+    /// The state of the stream, given where the viewer is and what it titled its console with.
+    pub fn of(phase: Phase, status: Option<&ViewerStatus>) -> Self {
+        let status = match phase {
+            Phase::Ended => return Link::Ended,
+            Phase::Starting => return Link::Connecting,
+            Phase::Live => match status {
+                Some(status) => status,
+                None => return Link::Connecting,
+            },
+        };
+        if status.warning {
+            if status.text.contains(LEGACY_TEXT) {
+                Link::Legacy
+            } else {
+                Link::Reconnecting
+            }
+        } else if status.text == LIVE_TEXT {
+            Link::Live
+        } else if status.text == ENDED_TEXT {
+            Link::Ended
+        } else if status.text.starts_with(WAITING_TEXT) {
+            Link::Waiting
+        } else {
+            Link::Connecting
+        }
+    }
+
+    /// A word or two for the row of a tab without a branch.
+    pub fn label(self) -> &'static str {
+        match self {
+            Link::Connecting => "подключение…",
+            Link::Waiting => "ждём Ward",
+            Link::Live => "подключено",
+            Link::Legacy => "старый Ward",
+            Link::Reconnecting => "переподключение…",
+            Link::Ended => "отключено",
+        }
+    }
+}
+
 /// One tab of a session on another machine.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteTab {
@@ -63,6 +132,8 @@ pub struct RemoteTab {
     pub worker: String,
     /// The task, `#4726 …`.
     pub task: String,
+    /// The branch of the session; empty when the page did not say.
+    pub branch: String,
     /// The block of the viewer's command, once the shell started it.
     block: Option<String>,
 }
@@ -79,10 +150,15 @@ pub enum Phase {
 }
 
 impl RemoteTab {
-    pub fn new(worker: impl Into<String>, task: impl Into<String>) -> Self {
+    pub fn new(
+        worker: impl Into<String>,
+        task: impl Into<String>,
+        branch: impl Into<String>,
+    ) -> Self {
         Self {
             worker: worker.into(),
             task: task.into(),
+            branch: branch.into(),
             block: None,
         }
     }
@@ -104,13 +180,19 @@ impl RemoteTab {
         }
     }
 
+    /// The machine and the task in full, `steep-pc · #4726 …`: for the hover of the tab, whose
+    /// name is the task alone.
+    pub fn full_title(&self) -> String {
+        format!("{} · {}", self.machine(), self.task)
+    }
+
     /// The line of the pane header.
     pub fn header(&self, phase: Phase) -> String {
         match phase {
             Phase::Starting | Phase::Live => {
-                format!("Удалённое управление: {} · {}", self.machine(), self.task)
+                format!("Удалённое управление: {}", self.full_title())
             }
-            Phase::Ended => format!("Отключено от {} · {}", self.machine(), self.task),
+            Phase::Ended => format!("Отключено от {}", self.full_title()),
         }
     }
 
@@ -123,17 +205,26 @@ impl RemoteTab {
         }
     }
 
-    /// The line of the row in the vertical tabs.
-    pub fn row_label(&self, phase: Phase) -> String {
-        match phase {
-            Phase::Starting | Phase::Live => format!("Удалённое управление · {}", self.machine()),
-            Phase::Ended => format!("Отключено · {}", self.machine()),
+    /// The line under the name of the tab in the vertical tabs: the machine and the branch of
+    /// the session, `steep-pc · feature/4726-fireworks-sync`; without a branch, the machine and
+    /// where the stream is. Without a machine, the branch or the state alone: the remote icon in
+    /// front of the line already says it is another machine.
+    pub fn row_label(&self, link: Link) -> String {
+        let detail = if self.branch.is_empty() {
+            link.label()
+        } else {
+            self.branch.as_str()
+        };
+        if self.worker.is_empty() {
+            detail.to_owned()
+        } else {
+            format!("{} · {detail}", self.worker)
         }
     }
 
     /// The tooltip of the tab.
     pub fn tooltip(&self) -> String {
-        format!("Удалённое управление: {} · {}", self.machine(), self.task)
+        format!("Удалённое управление: {}", self.full_title())
     }
 }
 

@@ -18,7 +18,7 @@ use crate::pane_group::PaneId;
 use crate::terminal::TerminalView;
 use crate::ui_components::icons::Icon;
 use crate::ward::agent_state::{AgentState, agent_snapshot, format_in_state};
-use crate::ward::agents::remote_tab::Phase;
+use crate::ward::agents::remote_tab::Link;
 use crate::ward::attention::{self, AgentStatusFilter, AttentionCounts};
 use crate::ward::project_groups::remote_control_session_name;
 use crate::workspace::Workspace;
@@ -115,26 +115,34 @@ pub(super) fn render_agent_status_line(
     )
 }
 
-/// The line of a tab that controls a session on another machine: the remote icon, that it is
-/// remote control and of which machine, greyed out once the viewer is over.
+/// The line under the name of a tab that controls a session on another machine: the remote
+/// icon in the color of the stream, the machine and the branch of the session, or where the
+/// stream is when there is no branch (`RemoteTab::row_label`). A compact row shows it in place
+/// of the working directory and the branch of this machine, which say nothing of the session.
+/// `font_size` is the one of the line it goes to.
 pub(super) fn render_remote_line(
     terminal_view: &TerminalView,
+    font_size: f32,
     appearance: &Appearance,
 ) -> Option<Box<dyn Element>> {
-    let (tab, phase) = terminal_view.ward_remote_tab()?;
+    let (tab, link) = terminal_view.ward_remote_link()?;
     let theme = appearance.theme();
-    let color = if phase == Phase::Ended {
-        theme.sub_text_color(theme.background()).into_solid()
+    let text_color = if link == Link::Ended {
+        theme.hint_text_color(theme.background())
     } else {
-        theme.ansi_fg_magenta()
+        theme.sub_text_color(theme.background())
     };
-    let glyph = ConstrainedBox::new(Icon::Laptop.to_warpui_icon(color.into()).finish())
-        .with_width(STATE_GLYPH_SIZE)
-        .with_height(STATE_GLYPH_SIZE)
-        .finish();
-    let label = Text::new_inline(tab.row_label(phase), appearance.ui_font_family(), 12.)
+    let glyph = ConstrainedBox::new(
+        Icon::Laptop
+            .to_warpui_icon(remote_link_color(link, appearance).into())
+            .finish(),
+    )
+    .with_width(font_size)
+    .with_height(font_size)
+    .finish();
+    let label = Text::new_inline(tab.row_label(link), appearance.ui_font_family(), font_size)
         .with_clip(ClipConfig::ellipsis())
-        .with_color(color)
+        .with_color(text_color.into())
         .finish();
 
     Some(
@@ -146,6 +154,48 @@ pub(super) fn render_remote_line(
             .with_child(Shrinkable::new(1., label).finish())
             .finish(),
     )
+}
+
+/// The color of the remote icon in the row: the remote color while the stream is live, the
+/// same dimmed while it connects or waits for the Ward of the session, the warning color when
+/// that Ward is old or gone, grey once the viewer is over.
+fn remote_link_color(link: Link, appearance: &Appearance) -> ColorU {
+    let theme = appearance.theme();
+    match link {
+        Link::Live => theme.ansi_fg_magenta(),
+        Link::Connecting | Link::Waiting => coloru_with_opacity(theme.ansi_fg_magenta(), 50),
+        Link::Legacy | Link::Reconnecting => theme.ui_warning_color(),
+        Link::Ended => theme.sub_text_color(theme.background()).into_solid(),
+    }
+}
+
+/// The hover of a remote tab, whose name is the task alone: the machine and the task in full,
+/// and the branch of the session.
+pub(super) fn render_remote_detail(
+    terminal_view: &TerminalView,
+    color: WarpThemeFill,
+    appearance: &Appearance,
+) -> Option<Box<dyn Element>> {
+    let (tab, _) = terminal_view.ward_remote_tab()?;
+    let mut detail = Flex::column()
+        .with_cross_axis_alignment(CrossAxisAlignment::Start)
+        .with_spacing(4.)
+        .with_child(super::render_detail_wrapping_text(
+            tab.full_title(),
+            12.,
+            color,
+            None,
+            appearance,
+        ));
+    if !tab.branch.is_empty() {
+        detail.add_child(super::render_git_branch_text(
+            &tab.branch,
+            color,
+            12.,
+            appearance,
+        ));
+    }
+    Some(detail.finish())
 }
 
 /// Agent counts over the tabs of a group, for its header.
@@ -335,8 +385,8 @@ pub(super) fn filter_tabs_by_agent_status(
         .collect()
 }
 
-/// Extra search text for a terminal row: the agent's task, its question or other detail, and
-/// the remote-control session name.
+/// Extra search text for a terminal row: the agent's task, its question or other detail, the
+/// remote-control session name, and the machine and the branch of a remote tab.
 pub(super) fn agent_search_fragments(
     terminal_view: &crate::terminal::TerminalView,
     app: &AppContext,
@@ -345,6 +395,13 @@ pub(super) fn agent_search_fragments(
     if let Some(snapshot) = agent_snapshot(terminal_view.id(), app) {
         fragments.extend(snapshot.task);
         fragments.extend(snapshot.detail);
+    }
+    if let Some((tab, _)) = terminal_view.ward_remote_tab() {
+        fragments.extend(
+            [tab.worker, tab.branch]
+                .into_iter()
+                .filter(|s| !s.is_empty()),
+        );
     }
     if crate::features::is_fork_oss()
         && let Some(name) = terminal_view

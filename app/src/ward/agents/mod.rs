@@ -805,14 +805,14 @@ fn open_attach_tab(tab: attach::Attach, ctx: &mut AppContext) -> Result<(), Stri
     attach::write_script(&script).map_err(|err| format!("could not write the viewer: {err}"))?;
     let attach::Attach {
         url,
-        title,
         task,
         worker,
+        branch,
     } = tab;
-    let remote = remote_tab::RemoteTab::new(worker.clone(), task.clone());
+    let remote = remote_tab::RemoteTab::new(worker.clone(), task.clone(), branch);
     let mut env_vars: HashMap<std::ffi::OsString, std::ffi::OsString> = HashMap::new();
     env_vars.insert(attach::URL_ENV_VAR.into(), url.into());
-    env_vars.insert(attach::TITLE_ENV_VAR.into(), task.into());
+    env_vars.insert(attach::TITLE_ENV_VAR.into(), task.clone().into());
     env_vars.insert(attach::WORKER_ENV_VAR.into(), worker.into());
     let tab = UriTab {
         options: NewTerminalOptions {
@@ -820,7 +820,8 @@ fn open_attach_tab(tab: attach::Attach, ctx: &mut AppContext) -> Result<(), Stri
             env_vars,
             ..Default::default()
         },
-        title: Some(title),
+        // The task alone: the machine is on the line under it and in the hover.
+        title: Some(task),
         command: Some(attach::tab_command(&script)),
         ack: None,
     };

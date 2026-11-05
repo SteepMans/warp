@@ -4,10 +4,10 @@
 //! The page of the card knows the session and can get a viewer ticket from the service (the
 //! browser viewer uses the same one); this Ward knows neither. So the page asks this Ward on the
 //! loopback answer of [`super::presence`]: `POST http://127.0.0.1:{PORT}/ward/attach` with
-//! `{"sessionId":…,"ticket":…,"title":…,"worker":…}`. Only the origin of the Chimney this worker
-//! is connected to is heard, as for the presence answer. The page never names a host: the
-//! viewer socket is built from this worker's own service address, so a page cannot point Ward
-//! anywhere else.
+//! `{"sessionId":…,"ticket":…,"title":…,"worker":…,"branch":…}` (the page of an older Chimney
+//! sends no branch). Only the origin of the Chimney this worker is connected to is heard, as for
+//! the presence answer. The page never names a host: the viewer socket is built from this
+//! worker's own service address, so a page cannot point Ward anywhere else.
 //!
 //! The tab runs a small viewer ([`SCRIPT`], Windows PowerShell with a few lines of C#): it
 //! connects to the viewer socket, prints the raw output of the session's tab as it comes and
@@ -49,23 +49,25 @@ pub const SUPPORTED: bool = cfg!(windows);
 
 const MAX_TITLE_CHARS: usize = 120;
 const MAX_WORKER_CHARS: usize = 64;
+const MAX_BRANCH_CHARS: usize = 120;
 
-/// A tab to open: the viewer socket with its ticket, the name of the tab, the task and the
-/// machine of the session (empty when the page did not say).
+/// A tab to open: the viewer socket with its ticket, the task (the name of the tab), the
+/// machine and the branch of the session (empty when the page did not say).
 #[derive(Clone, PartialEq, Eq)]
 pub struct Attach {
     pub url: String,
-    pub title: String,
     pub task: String,
     pub worker: String,
+    pub branch: String,
 }
 
 /// The ticket is a secret for a minute: it is not printed even in debug output.
 impl std::fmt::Debug for Attach {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Attach")
-            .field("title", &self.title)
+            .field("task", &self.task)
             .field("worker", &self.worker)
+            .field("branch", &self.branch)
             .finish_non_exhaustive()
     }
 }
@@ -79,6 +81,8 @@ struct Body {
     title: Option<String>,
     #[serde(default)]
     worker: Option<String>,
+    #[serde(default)]
+    branch: Option<String>,
 }
 
 /// Why a request to connect was turned down; goes back to the page as is.
@@ -115,9 +119,9 @@ pub fn parse(body: &str, base_url: &str) -> Result<Attach, Rejected> {
     let url = viewer_url(base_url, session_id, ticket).ok_or(Rejected::NoAddress)?;
     Ok(Attach {
         url,
-        title: tab_title(body.title.as_deref(), body.worker.as_deref()),
         task: task_title(body.title.as_deref()),
         worker: clean(body.worker.as_deref(), MAX_WORKER_CHARS),
+        branch: clean(body.branch.as_deref(), MAX_BRANCH_CHARS),
     })
 }
 
@@ -168,25 +172,15 @@ fn clean(text: Option<&str>, max: usize) -> String {
     text.chars().take(max).collect()
 }
 
-/// The task of the session as one short line.
+/// The task of the session as one short line, the name of its tab. The machine is not in it:
+/// in a narrow tab it left two letters of the task, so it goes to the line under the name and
+/// to the hover ([`super::remote_tab`]).
 pub fn task_title(title: Option<&str>) -> String {
     let title = clean(title, MAX_TITLE_CHARS);
     if title.is_empty() {
         "Сессия агента".to_owned()
     } else {
         title
-    }
-}
-
-/// The name of the tab: the machine the session runs on first, so that a narrow tab still
-/// shows it, then the task.
-pub fn tab_title(title: Option<&str>, worker: Option<&str>) -> String {
-    let title = task_title(title);
-    let worker = clean(worker, MAX_WORKER_CHARS);
-    if worker.is_empty() {
-        format!("Удалённо · {title}")
-    } else {
-        format!("{worker} · {title}")
     }
 }
 

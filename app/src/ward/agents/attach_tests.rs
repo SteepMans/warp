@@ -10,6 +10,7 @@ fn body(session: &str, ticket: &str) -> String {
         "ticket": ticket,
         "title": "#4711 Подключиться к сессии",
         "worker": "steep-pc",
+        "branch": "feature/4711-attach",
     })
     .to_string()
 }
@@ -38,9 +39,9 @@ fn a_request_of_the_card_becomes_a_tab() {
         attach.url,
         format!("wss://chimney.steep-man.ru/agents/api/v1/stream/{SESSION}?ticket={TICKET}")
     );
-    assert_eq!(attach.title, "steep-pc · #4711 Подключиться к сессии");
     assert_eq!(attach.task, "#4711 Подключиться к сессии");
     assert_eq!(attach.worker, "steep-pc");
+    assert_eq!(attach.branch, "feature/4711-attach");
 }
 
 #[test]
@@ -94,33 +95,54 @@ fn the_ticket_is_not_in_debug_output() {
     assert!(printed.contains("steep-pc"), "{printed}");
 }
 
+/// The name of the tab is the task alone, as one short line: the machine goes under it.
 #[test]
-fn the_title_is_one_short_line_with_the_machine_first() {
-    assert_eq!(tab_title(None, None), "Удалённо · Сессия агента");
+fn the_title_is_the_task_as_one_short_line() {
+    assert_eq!(task_title(None), "Сессия агента");
+    assert_eq!(task_title(Some("  ")), "Сессия агента");
     assert_eq!(
-        tab_title(Some("  #1\nзадача\u{1b}[31m  "), Some("steep-pc")),
-        "steep-pc · #1 задача [31m"
-    );
-    assert_eq!(
-        tab_title(Some("#2 задача"), Some(" steep\npc ")),
-        "steep pc · #2 задача"
+        task_title(Some("  #1\nзадача\u{1b}[31m  ")),
+        "#1 задача [31m"
     );
     let long = "я".repeat(500);
-    let title = tab_title(Some(long.as_str()), None);
     assert_eq!(
-        title.chars().count(),
-        MAX_TITLE_CHARS + "Удалённо · ".chars().count()
+        task_title(Some(long.as_str())).chars().count(),
+        MAX_TITLE_CHARS
     );
-    assert_eq!(task_title(Some("  ")), "Сессия агента");
+
+    let body = serde_json::json!({
+        "sessionId": SESSION,
+        "ticket": TICKET,
+        "title": "#4726 Реверс. Попробовать добавить салюты",
+        "worker": " steep\npc ",
+        "branch": format!("  feature/4726-fireworks-sync\n{}", "x".repeat(500)),
+    })
+    .to_string();
+    let attach = parse(&body, BASE).unwrap();
+    assert_eq!(attach.task, "#4726 Реверс. Попробовать добавить салюты");
+    assert_eq!(attach.worker, "steep pc");
+    assert!(attach.branch.starts_with("feature/4726-fireworks-sync x"));
+    assert_eq!(attach.branch.chars().count(), MAX_BRANCH_CHARS);
 }
 
+/// The page of an older Chimney sends no branch, and a page may leave out the machine too.
 #[test]
-fn a_request_without_a_machine_still_opens_a_tab() {
+fn a_request_without_a_machine_or_a_branch_still_opens_a_tab() {
     let body = serde_json::json!({ "sessionId": SESSION, "ticket": TICKET }).to_string();
     let attach = parse(&body, BASE).unwrap();
     assert_eq!(attach.worker, "");
+    assert_eq!(attach.branch, "");
     assert_eq!(attach.task, "Сессия агента");
-    assert_eq!(attach.title, "Удалённо · Сессия агента");
+
+    let body = serde_json::json!({
+        "sessionId": SESSION,
+        "ticket": TICKET,
+        "title": "#4711 Задача",
+        "worker": "steep-pc",
+        "branch": null,
+    })
+    .to_string();
+    assert_eq!(parse(&body, BASE).unwrap().branch, "");
 }
 
 #[test]
@@ -278,7 +300,7 @@ fn the_viewer_passes_its_checks() {
 #[cfg(windows)]
 #[test]
 fn the_header_reads_every_state_the_viewer_titles_its_console_with() {
-    use super::super::remote_tab::viewer_status;
+    use super::super::remote_tab::{Link, Phase, viewer_status};
 
     let report = run_viewer_checks();
     let titles: Vec<(&str, &str)> = report
@@ -301,6 +323,12 @@ fn the_header_reads_every_state_the_viewer_titles_its_console_with() {
             matches!(link, "Legacy" | "Reconnecting"),
             "{link}: {title}"
         );
+        // The row of the tab takes every state of the viewer for the one of the same name.
+        assert_eq!(
+            format!("{:?}", Link::of(Phase::Live, Some(&status))),
+            link,
+            "{title}"
+        );
     }
 }
 
@@ -312,6 +340,18 @@ fn the_viewer_titles_its_console_as_the_header_reads_it() {
     assert!(SCRIPT.contains(&format!(r#"Prefix = "{STATUS_PREFIX}""#)));
     assert!(SCRIPT.contains(&format!(r#"WarningPrefix = "{WARNING_PREFIX}""#)));
     assert!(SCRIPT.contains("Console.Title = text"));
+}
+
+/// The row of a remote tab tells the states of the stream apart by the words of the viewer:
+/// they are the ones the script writes.
+#[test]
+fn the_row_reads_the_states_in_the_words_of_the_viewer() {
+    use super::super::remote_tab::{ENDED_TEXT, LEGACY_TEXT, LIVE_TEXT, WAITING_TEXT};
+
+    assert!(SCRIPT.contains(&format!(r#"return "{LIVE_TEXT}";"#)));
+    assert!(SCRIPT.contains(&format!(r#"return "{ENDED_TEXT}";"#)));
+    assert!(SCRIPT.contains(&format!(r#"return "{WAITING_TEXT}" + machine"#)));
+    assert!(SCRIPT.contains(&format!(r#"+ machine + " {LEGACY_TEXT}:"#)));
 }
 
 /// The output of the session goes through the filter before it is written here.
