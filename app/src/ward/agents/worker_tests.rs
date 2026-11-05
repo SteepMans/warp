@@ -1937,10 +1937,11 @@ const CODEX_TURN_STARTED: &str =
     "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n";
 
 /// Codex could not even start its turn: the API refused the model and Codex went back to an
-/// empty prompt. There is no answer to review: the session fails with the error, and its agent
-/// is ended.
+/// empty prompt. There is no answer to review, but the error may pass and the agent holds the
+/// context of the session: it waits for the owner with the error, alive, and the owner's next
+/// message puts it back to work.
 #[test]
-fn an_executor_whose_turn_ended_on_an_error_fails_with_it() {
+fn an_executor_whose_turn_ended_on_an_error_waits_for_the_owner() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("agents-work");
     let transcript = dir.path().join("rollout.jsonl");
@@ -1967,11 +1968,18 @@ fn an_executor_whose_turn_ended_on_an_error_fails_with_it() {
 
     std::thread::sleep(Duration::from_millis(300));
     futures::executor::block_on(worker.advance(&mut session));
-    assert!(session.is_done());
-    assert_eq!(session.status, SessionStatus::Failed);
+    assert!(!session.is_done(), "the owner decides, not the error");
+    assert_eq!(session.status, SessionStatus::Blocked);
     let message = session.message.clone().unwrap_or_default();
-    assert!(message.contains("ошибкой API"), "{message}");
-    assert!(message.contains("model_not_found"), "{message}");
+    assert_eq!(
+        message,
+        "Агент закончил ход ошибкой API: The 'claude-sonnet-5-5' model is not supported when \
+         using Codex with a ChatGPT account. (model_not_found). Напишите в сессию, чтобы \
+         продолжить, или остановите"
+    );
+    let request = session.outbox.back().unwrap();
+    assert_eq!(request.status, SessionStatus::Blocked);
+    assert_eq!(request.reason.as_deref(), Some(REASON_OWNER_QUESTION));
     assert!(
         session
             .outbox
@@ -1979,7 +1987,30 @@ fn an_executor_whose_turn_ended_on_an_error_fails_with_it() {
             .all(|request| request.status != SessionStatus::Review),
         "an error is no answer"
     );
-    assert_eq!(*machine.stopped.lock(), vec![EXECUTOR_PID]);
+    // The agent and its context stay.
+    assert!(machine.stopped.lock().is_empty());
+
+    // The status is reported once, however long the agent stays quiet.
+    let reported = session.outbox.len();
+    std::thread::sleep(Duration::from_millis(300));
+    futures::executor::block_on(worker.advance(&mut session));
+    assert_eq!(session.outbox.len(), reported);
+    assert_eq!(session.status, SessionStatus::Blocked);
+
+    // The owner writes «продолжай»: Codex starts a new turn and the session runs again.
+    let resumed = concat!(
+        "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",",
+        "\"message\":\"продолжай\"}}\n",
+    );
+    std::fs::write(
+        &transcript,
+        format!("{CODEX_TURN_STARTED}{refused}\n{CODEX_TURN_STARTED}{resumed}"),
+    )
+    .unwrap();
+    futures::executor::block_on(worker.advance(&mut session));
+    assert!(!session.is_done());
+    assert_eq!(session.status, SessionStatus::Running);
+    assert!(machine.stopped.lock().is_empty());
 }
 
 /// A refusal for the subscription limit ends the turn on an error too, but the limit owns it:

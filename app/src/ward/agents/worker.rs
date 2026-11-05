@@ -354,6 +354,8 @@ const MESSAGE_USAGE_LIMIT: &str = "Агент упёрся в лимит под�
 const MESSAGE_IDLE_ANSWER: &str = "Работа готова: агент выдал финальный ответ и ждёт вас. Сессия открыта: можно написать в неё или остановить";
 const MESSAGE_OWNER_QUESTION: &str = "Агент задал вопрос и ждёт ответа владельца";
 const MESSAGE_AGENT_ERROR: &str = "Агент закончил ход ошибкой API вместо ответа";
+const MESSAGE_AGENT_ERROR_WAITS: &str = "Агент закончил ход ошибкой API";
+const MESSAGE_AGENT_ERROR_NEXT: &str = "Напишите в сессию, чтобы продолжить, или остановите";
 const MESSAGE_PREPARING: &str = "Подготовка: оркестратор собирает досье и промпт";
 const MESSAGE_PREPARE_TOO_LONG: &str = "Подготовка не уложилась в prepareMaxDurationMin";
 const MESSAGE_PREPARE_NO_PLAN: &str = "Оркестратор завершился, а plan.json не оставил";
@@ -2978,27 +2980,31 @@ impl Worker {
     }
 
     /// The agent ended its turn on an error of its API and waits at an empty prompt: there is
-    /// no answer to review, so the session fails with the error in its message, and its agent
-    /// is ended, as for a session that never started. A refusal for the subscription limit is
-    /// left to [`Self::read_journal`], which has made the session `blocked` until the reset.
-    /// `true`: the session is over.
-    fn turn_failed(&self, session: &mut Session, error: &str) -> bool {
-        if session
-            .provider
-            .limit_hit(&session.journal.tail())
-            .is_some()
+    /// no answer to review, but the error may well pass (a dropped stream, an overloaded or
+    /// failing API), and ending the agent would lose the context of the whole session. So it
+    /// waits for the owner the way a question does: `blocked` with the error in its message,
+    /// the agent and its tab left as they are, a `message` command reaching the tab, and the
+    /// next lines of the transcript putting it back to `running` (see [`Self::read_journal`]).
+    /// A refusal for the subscription limit is left to [`Self::read_journal`] too, which has
+    /// made the session `blocked` until the reset.
+    fn ended_on_error(&self, session: &mut Session, error: &str) {
+        if session.status == SessionStatus::Blocked
+            || session
+                .provider
+                .limit_hit(&session.journal.tail())
+                .is_some()
         {
-            return false;
+            return;
         }
         log::warn!(
-            "Ward agents: session {} ended its turn on an error of the API: {error}",
+            "Ward agents: session {} ended its turn on an error of the API and waits for the \
+             owner: {error}",
             session.assignment.session_id
         );
-        self.stop_agent(session);
-        let mut request = session.status_request(SessionStatus::Failed);
-        request.message = Some(agent_error_message(error));
-        finish(session, request);
-        true
+        let mut request = session.status_request(SessionStatus::Blocked);
+        request.reason = Some(REASON_OWNER_QUESTION.to_owned());
+        request.message = Some(agent_error_waits_message(error));
+        session.set_status(request);
     }
 
     /// A launched session: finds the agent session, ships the transcript, handles stop and
@@ -3107,11 +3113,7 @@ impl Worker {
                 match turn {
                     LastTurn::Answered => self.answered(session),
                     LastTurn::Asked => self.ask_owner(session),
-                    LastTurn::Failed(error) => {
-                        if self.turn_failed(session, &error) {
-                            return;
-                        }
-                    }
+                    LastTurn::Failed(error) => self.ended_on_error(session, &error),
                     LastTurn::Working => {}
                 }
             }
@@ -3532,13 +3534,26 @@ fn finish(session: &mut Session, request: StatusRequest) {
     session.phase = Phase::Done;
 }
 
-/// The message of a session whose agent ended its turn on an error of the API, with the error.
+/// The message of a preparation whose orchestrator ended its turn on an error of the API, with
+/// the error.
 fn agent_error_message(error: &str) -> String {
     let error = provider::one_line(error, MAX_AGENT_ERROR_CHARS);
     if error.is_empty() {
         MESSAGE_AGENT_ERROR.to_owned()
     } else {
         format!("{MESSAGE_AGENT_ERROR}: {error}")
+    }
+}
+
+/// The message of an executor that ended its turn on an error of the API and waits for the
+/// owner, with the error and what the owner can do about it.
+fn agent_error_waits_message(error: &str) -> String {
+    let error = provider::one_line(error, MAX_AGENT_ERROR_CHARS);
+    let error = error.trim_end_matches('.');
+    if error.is_empty() {
+        format!("{MESSAGE_AGENT_ERROR_WAITS}. {MESSAGE_AGENT_ERROR_NEXT}")
+    } else {
+        format!("{MESSAGE_AGENT_ERROR_WAITS}: {error}. {MESSAGE_AGENT_ERROR_NEXT}")
     }
 }
 
