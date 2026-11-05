@@ -242,8 +242,9 @@ pub trait Provider: Send + Sync {
     /// The executable looked up in `PATH`.
     fn binary(&self) -> &'static str;
 
-    /// `session_name`: `<taskNumber> <title>`; `model`: `None` for the agent's default;
-    /// `resume`: the agent session to continue instead of starting a new one.
+    /// `session_name`: `<taskNumber> <title>`; `model`: `None` for the agent's default, a model
+    /// of this agent's family otherwise (see [`launch_model`]); `resume`: the agent session to
+    /// continue instead of starting a new one.
     fn command(
         &self,
         session_name: &str,
@@ -295,6 +296,33 @@ pub fn all() -> [&'static dyn Provider; 2] {
 
 pub fn by_id(id: &str) -> Option<&'static dyn Provider> {
     all().into_iter().find(|provider| provider.id() == id)
+}
+
+/// The agent a model belongs to, read the way the service reads it
+/// (`ProviderSelector.modelFamily`): an id that starts with `claude` is Claude's, any other one
+/// is Codex's.
+pub fn model_family(model: &str) -> &'static str {
+    if model.trim().to_lowercase().starts_with("claude") {
+        claude::ID
+    } else {
+        codex::ID
+    }
+}
+
+/// The model `provider` is started with: `model` trimmed, or `None` for the agent's default when
+/// there is none or it belongs to the other agent. A model of the other family is no model for
+/// this agent at all — Codex answers `claude-*` with `400 model_not_found` and does nothing — so
+/// the agent starts with its own default instead, and the log says why.
+pub fn launch_model<'a>(provider: &dyn Provider, model: Option<&'a str>) -> Option<&'a str> {
+    let model = model.map(str::trim).filter(|model| !model.is_empty())?;
+    if model_family(model) == provider.id() {
+        return Some(model);
+    }
+    log::warn!(
+        "Ward agents: {model} is not a model of {}, it starts with its default model",
+        provider.id()
+    );
+    None
 }
 
 /// Lower case, forward slashes, no trailing slash on Windows; as is elsewhere. For comparing

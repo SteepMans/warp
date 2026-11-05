@@ -1640,11 +1640,7 @@ impl Worker {
         // The orchestrator may be another agent than the executor, and its model comes from
         // the profile: judgement work, not the machine's default.
         let orchestrator = provider::by_id(vault.provider.trim()).unwrap_or(session.provider);
-        let model = vault
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|model| !model.is_empty());
+        let model = provider::launch_model(orchestrator, vault.model.as_deref());
         let name = prepare::session_name(&session.assignment.task_ref, &session.assignment.title);
         let command = orchestrator.command(&name, model, None);
         let script = launch::runner_script(kind, &dir, &vault_dir, &command, true);
@@ -2317,12 +2313,8 @@ impl Worker {
         let _ = std::fs::remove_file(agents.join(launch::EXIT_CODE_FILE));
         let _ = std::fs::remove_file(agents.join(launch::RUNNER_PID_FILE));
         let name = launch::session_name(&session.assignment.task_ref, &session.assignment.title);
-        let model = session
-            .assignment
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|model| !model.is_empty());
+        // The model may come from the plan, and the orchestrator may have meant another agent.
+        let model = provider::launch_model(session.provider, session.assignment.model.as_deref());
         let command = session.provider.command(&name, model, resume);
         let script = launch::runner_script(kind, &agents, worktree, &command, resume.is_none());
         let runner = agents.join(kind.file_name());
@@ -2499,7 +2491,8 @@ impl Worker {
         }
         // The agent of the plan is not acted on: the service picks it by the subscription
         // limits of the machine, and the choice was made when the assignment was taken. Only
-        // the model of the plan is taken, in `plan::apply`.
+        // the model of the plan is taken, in `plan::apply`, and it reaches the agent only when
+        // it is a model of that agent ([`provider::launch_model`]).
         let repo = match launch::parse_repo(&session.assignment.repo) {
             Some(repo) => repo,
             None => {
@@ -2862,12 +2855,7 @@ impl Worker {
         let _ = std::fs::remove_file(files.join(launch::EXIT_CODE_FILE));
         let _ = std::fs::remove_file(files.join(launch::RUNNER_PID_FILE));
         let name = launch::session_name(&session.assignment.task_ref, &session.assignment.title);
-        let model = session
-            .assignment
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|model| !model.is_empty());
+        let model = provider::launch_model(session.provider, session.assignment.model.as_deref());
         let command = session.provider.command(&name, model, Some(&agent));
         let script = launch::runner_script(kind, &files, &cwd, &command, false);
         let runner = files.join(kind.file_name());
