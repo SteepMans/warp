@@ -18,6 +18,7 @@ use std::path::Path;
 use super::contract::{Assignment, TaskRef};
 use super::plan::Plan;
 use super::profile::Vault;
+use super::provider::{claude, codex, model_family};
 
 /// `prepareMaxDurationMin` when the assignment does not say: a setting of the service
 /// (`AGENTS_PREPARE_MAX_MIN`), so Ward only falls back for an older service.
@@ -78,6 +79,9 @@ pub struct PromptContext<'a> {
     /// Where `plan.json` goes, absolute, with forward slashes.
     pub plan_path: &'a Path,
     pub max_duration_min: u64,
+    /// The agent of the executor (`claude`, `codex`), picked when the assignment was taken: the
+    /// plan does not change it, so the model of the plan has to be one of its own.
+    pub provider: &'a str,
 }
 
 /// The prompt of the orchestrator session: the card, the order of the playbook, what the
@@ -119,8 +123,8 @@ pub fn orchestrator_prompt(ctx: &PromptContext<'_>) -> String {
          карточку и связанные заметки, решить, нужно ли досье, завести или обновить его в \
          {}/<Проект>/, проверить, не стоит ли рядом ещё несколько таких же мелких задач того \
          же репозитория (группировка), выбрать репозиторий, базовую ветку и имя ветки, \
-         собрать промпт по шаблону {} и выбрать модель по правилу шаблона. Блок «Контекст» \
-         карточки — по {}.\n\n",
+         собрать промпт по шаблону {} и выбрать модель исполнителю (раздел «Исполнитель» \
+         ниже). Блок «Контекст» карточки — по {}.\n\n",
         vault.inside(vault.playbook()),
         vault.inside(vault.dossier_dir()),
         vault.inside(vault.prompt_template()),
@@ -193,15 +197,17 @@ pub fn orchestrator_prompt(ctx: &PromptContext<'_>) -> String {
         );
     }
 
+    text.push_str(&executor_section(ctx.provider));
+
     text.push_str("## Результат\n\n");
     text.push_str(&format!(
         "Последним действием запиши файл {plan_path} — один объект JSON, без текста вокруг:\n\n"
     ));
-    text.push_str(&plan_example(assignment, number));
+    text.push_str(&plan_example(assignment, ctx.provider, number));
     text.push_str(
         "\n- `repo`, `branch` и `prompt` обязательны: без них подготовка считается неудачной.\n\
          - `prompt` — полный промпт исполнителю по шаблону, вместе с паспортом запуска.\n\
-         - `provider` — `claude` или `codex`; `model` — id модели или `null`.\n\
+         - `provider` — агент исполнителя; `model` — id модели этого агента или `null`.\n\
          - `dossierPath` — путь досье внутри волта, `runId` — `run-ГГГГММДД-NNN`.\n\
          - `summary` — одна-две строки: о чём эта сессия, для экрана агентов и карточки.\n\
          - `tags` — одно-четыре коротких тега в нижнем регистре: проект (метка карточки или \
@@ -227,8 +233,55 @@ pub fn orchestrator_prompt(ctx: &PromptContext<'_>) -> String {
     text
 }
 
-/// The shape of `plan.json` in the prompt, with the values the assignment already fixed.
-fn plan_example(assignment: &Assignment, number: u64) -> String {
+/// The model of the executor the example of the plan shows when the assignment fixed none.
+const DEFAULT_CLAUDE_MODEL: &str = "claude-sonnet-5-5";
+
+/// Who runs the executor and which model it can take. The rule of the prompt template picks
+/// Claude models only, and Codex refuses every one of them (`400 model_not_found`) and does
+/// nothing, so for Codex the orchestrator is told to leave the model to the agent.
+fn executor_section(provider: &str) -> String {
+    let mut text = String::from("## Исполнитель\n\n");
+    text.push_str(&format!(
+        "Исполнителя запустит агент `{provider}`: его выбрал сервис по лимитам подписок \
+         машины, и план его не меняет. В `provider` плана — `{provider}`. "
+    ));
+    text.push_str(match provider {
+        claude::ID => {
+            "Модель — модель Claude (`claude-*`) по правилу шаблона или `null` (модель агента \
+             по умолчанию)."
+        }
+        codex::ID => {
+            "Правило шаблона о моделях Claude к нему не относится: модель `claude-*` Codex не \
+             запустит и ничего не сделает. Если модель не задана выше, в `model` — `null`, \
+             Codex возьмёт свою модель по умолчанию."
+        }
+        _ => "Если модель не задана выше, в `model` — `null`: агент возьмёт свою модель по умолчанию.",
+    });
+    text.push_str(
+        " Модель другого агента не предлагать. В паспорте запуска `ai` и `model` — те же, что \
+         в плане.\n\n",
+    );
+    text
+}
+
+/// The model the example of the plan shows: the one the assignment fixed when it is the
+/// executor's, the default of the template for Claude, none for any other agent.
+fn example_model(assignment: &Assignment, provider: &str) -> Option<String> {
+    let given = assignment
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty() && model_family(model) == provider);
+    match given {
+        Some(model) => Some(model.to_owned()),
+        None if provider == claude::ID => Some(DEFAULT_CLAUDE_MODEL.to_owned()),
+        None => None,
+    }
+}
+
+/// The shape of `plan.json` in the prompt, with the values the assignment already fixed and
+/// the executor's agent.
+fn plan_example(assignment: &Assignment, provider: &str, number: u64) -> String {
     let field = |value: &str, placeholder: &str| {
         let value = value.trim();
         if value.is_empty() {
@@ -247,23 +300,13 @@ fn plan_example(assignment: &Assignment, number: u64) -> String {
         prompt: "<полный промпт исполнителю>".to_owned(),
         dossier_path: "11-Задачи/Активные/<Проект>/<префикс>. <Задача>.md".to_owned(),
         run_id: "run-ГГГГММДД-NNN".to_owned(),
-        provider: field(&assignment.provider, "claude"),
-        model: Some(
-            assignment
-                .model
-                .as_deref()
-                .map(str::trim)
-                .filter(|model| !model.is_empty())
-                .unwrap_or("claude-sonnet-5-5")
-                .to_owned(),
-        ),
+        provider: provider.to_owned(),
+        model: example_model(assignment, provider),
         summary: "<одна-две строки: о чём сессия>".to_owned(),
         tags: vec!["<проект>".to_owned(), "<модуль>".to_owned()],
         grouped: vec![number],
     };
     let mut text = serde_json::to_string_pretty(&plan).unwrap_or_default();
-    // `auto` is the service's word for "choose yourself", not a provider the plan may name.
-    text = text.replace("\"provider\": \"auto\"", "\"provider\": \"claude\"");
     text.push('\n');
     text
 }

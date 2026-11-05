@@ -1636,6 +1636,7 @@ impl Worker {
             vault,
             plan_path: &plan_path,
             max_duration_min: limit_min,
+            provider: session.provider.id(),
         });
         std::fs::write(dir.join(launch::PROMPT_FILE), prompt).map_err(|err| err.to_string())?;
         let _ = std::fs::remove_file(dir.join(launch::EXIT_CODE_FILE));
