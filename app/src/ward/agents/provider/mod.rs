@@ -77,7 +77,7 @@ pub struct LimitHit {
 /// What the end of a transcript says the agent is doing, for a session whose transcript stopped
 /// growing. An agent in remote control mode does not end its process after its answer, so the
 /// last turn is the only thing that tells a finished session from one still going.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LastTurn {
     /// The agent owes something: a tool call without its result, the owner's message not
     /// answered yet, or an end of transcript Ward cannot read. Nothing is concluded from it.
@@ -86,6 +86,9 @@ pub enum LastTurn {
     Answered,
     /// The agent ended its turn with a question for the owner and waits for the answer.
     Asked,
+    /// The agent ended its turn on an error of its API instead of an answer and waits at an
+    /// empty prompt: the text of the error as the owner reads it, empty when there was none.
+    Failed(String),
 }
 
 /// Who said one line of a session's chat.

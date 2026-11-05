@@ -13,7 +13,10 @@
 //!   `token_count` with `rate_limit_reached_type`.
 //! - Last turn: the newest event or item of the rollout that says something about it —
 //!   `task_complete` and `agent_message` end a turn, a `function_call` waits for its output,
-//!   `task_started` and `user_message` are a turn still going. Codex runs with
+//!   `task_started` and `user_message` are a turn still going. A `task_complete` with an
+//!   `error` (Codex 0.147 and later), or an `error` event right before a `task_complete`
+//!   without the agent's last message (earlier ones), is a turn that ended on an error of the
+//!   API: [`super::LastTurn::Failed`], not an answer. Codex runs with
 //!   `--dangerously-bypass-approvals-and-sandbox`, so it asks the owner nothing and
 //!   [`super::LastTurn::Asked`] never comes of a rollout.
 //! - Chat: the same events read as replies ([`parse_said`]) — `user_message` is the owner,
@@ -170,13 +173,69 @@ pub fn parse_limit_hit(tail: &str) -> Option<LimitHit> {
     Some(LimitHit { resets_at })
 }
 
+/// The message of an error of the API as the owner reads it. Codex keeps the body of the
+/// answer as it came, `{"type":"error","status":400,"error":{"message":…,"code":…}}`: the
+/// message and the code are taken out of it, any other text stays as it is.
+pub fn readable_error(message: &str) -> String {
+    let message = message.trim();
+    let Ok(body) = serde_json::from_str::<Value>(message) else {
+        return message.to_owned();
+    };
+    let error = body
+        .get("error")
+        .filter(|error| error.is_object())
+        .unwrap_or(&body);
+    let Some(text) = non_empty_str(error.get("message")) else {
+        return message.to_owned();
+    };
+    match non_empty_str(error.get("code")) {
+        Some(code) => format!("{text} ({code})"),
+        None => text,
+    }
+}
+
+/// The raw message of the error `task_complete` carries when its turn ended on one; Codex
+/// 0.147 and later put it there instead of an `error` event of its own.
+fn task_error(payload: &Value) -> Option<&str> {
+    match payload.get("error")? {
+        Value::Null => None,
+        Value::String(text) => Some(text.as_str()),
+        error => Some(
+            error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        ),
+    }
+}
+
 /// What the last turn of the rollout was; see the module header for the events it reads.
 pub fn parse_last_turn(tail: &str) -> LastTurn {
+    // A `task_complete` without the agent's last message is looked past: an `error` event
+    // right before it is the error the turn ended on (Codex before 0.147).
+    let mut completed = false;
     for line in tail.lines().rev() {
         let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
         };
-        match value.pointer("/payload/type").and_then(Value::as_str) {
+        let payload = value.get("payload").unwrap_or(&Value::Null);
+        match payload.get("type").and_then(Value::as_str) {
+            Some("task_complete") if !completed => {
+                if let Some(error) = task_error(payload) {
+                    return LastTurn::Failed(readable_error(error));
+                }
+                if non_empty_str(payload.get("last_agent_message")).is_some() {
+                    return LastTurn::Answered;
+                }
+                completed = true;
+            }
+            Some("error") if completed => {
+                let message = payload
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                return LastTurn::Failed(readable_error(message));
+            }
             Some("task_complete" | "agent_message") => return LastTurn::Answered,
             Some(
                 "task_started"
@@ -185,12 +244,23 @@ pub fn parse_last_turn(tail: &str) -> LastTurn {
                 | "function_call_output"
                 | "custom_tool_call"
                 | "local_shell_call",
-            ) => return LastTurn::Working,
-            // Reasoning, token counts and errors say nothing about the end of the turn.
+            ) => {
+                return if completed {
+                    LastTurn::Answered
+                } else {
+                    LastTurn::Working
+                };
+            }
+            // Reasoning and token counts say nothing about the end of the turn, and neither does
+            // an error the turn went on after.
             _ => continue,
         }
     }
-    LastTurn::Working
+    if completed {
+        LastTurn::Answered
+    } else {
+        LastTurn::Working
+    }
 }
 
 /// What one event of a rollout says in the chat: the owner's message, the agent's message, the

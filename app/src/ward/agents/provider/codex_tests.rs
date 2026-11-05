@@ -318,3 +318,76 @@ fn the_last_turn_of_a_rollout_ends_with_the_task() {
     );
     assert_eq!(parse_last_turn(""), LastTurn::Working);
 }
+
+/// The `task_complete` of a turn Codex CLI 0.148 could not even start: the model of the plan
+/// was a Claude one, and the API's answer is kept in the error as it came.
+const MODEL_REFUSED: &str = r#"{"timestamp":"2026-11-05T09:37:05.571Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"01a1ab11-74cc","last_agent_message":null,"error":{"message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'claude-sonnet-5-5' model is not supported when using Codex with a ChatGPT account.\",\"code\":\"model_not_found\"}}","codex_error_info":"other"},"started_at":1793871410,"completed_at":1793871425,"duration_ms":15183}}"#;
+
+/// A turn that ended on an error of the API is no answer, whichever way Codex wrote it down.
+#[test]
+fn a_turn_that_ended_on_an_error_is_no_answer() {
+    let started = r#"{"type":"event_msg","payload":{"type":"task_started"}}"#;
+    assert_eq!(
+        parse_last_turn(&format!("{started}\n{MODEL_REFUSED}\n{TOKEN_COUNT}\n")),
+        LastTurn::Failed(
+            "The 'claude-sonnet-5-5' model is not supported when using Codex with a ChatGPT \
+             account. (model_not_found)"
+                .to_owned()
+        )
+    );
+    // An error that is no answer of the API stays as it is.
+    let dropped = r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":null,"error":{"message":"stream disconnected before completion","codex_error_info":"other"}}}"#;
+    assert_eq!(
+        parse_last_turn(&format!("{started}\n{dropped}\n")),
+        LastTurn::Failed("stream disconnected before completion".to_owned())
+    );
+
+    // Codex before 0.147: an `error` event right before a `task_complete` without the last
+    // message of the agent.
+    let error = r#"{"type":"event_msg","payload":{"type":"error","message":"unexpected status 400 Bad Request"}}"#;
+    let complete =
+        r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":null}}"#;
+    assert_eq!(
+        parse_last_turn(&format!("{started}\n{error}\n{TOKEN_COUNT}\n{complete}\n")),
+        LastTurn::Failed("unexpected status 400 Bad Request".to_owned())
+    );
+
+    // An error the turn went on after is not where it ended.
+    let call = r#"{"type":"response_item","payload":{"type":"function_call","name":"shell"}}"#;
+    let answer = r#"{"type":"event_msg","payload":{"type":"agent_message","message":"Готово"}}"#;
+    assert_eq!(
+        parse_last_turn(&format!(
+            "{started}\n{error}\n{call}\n{answer}\n{complete}\n"
+        )),
+        LastTurn::Answered
+    );
+    assert_eq!(
+        parse_last_turn(&format!("{started}\n{error}\n{call}\n")),
+        LastTurn::Working
+    );
+    let answered =
+        r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"Готово"}}"#;
+    assert_eq!(
+        parse_last_turn(&format!("{started}\n{error}\n{answered}\n")),
+        LastTurn::Answered
+    );
+    // A turn of tools that ended without a message or an error is done all the same.
+    assert_eq!(
+        parse_last_turn(&format!("{started}\n{call}\n{complete}\n")),
+        LastTurn::Answered
+    );
+}
+
+#[test]
+fn an_error_of_the_api_reads_as_its_message() {
+    assert_eq!(
+        readable_error(
+            r#"{"type":"error","status":400,"error":{"message":"Bad model","code":"model_not_found"}}"#
+        ),
+        "Bad model (model_not_found)"
+    );
+    assert_eq!(readable_error(r#"{"message":"Overloaded"}"#), "Overloaded");
+    assert_eq!(readable_error(r#"{"status":500}"#), r#"{"status":500}"#);
+    assert_eq!(readable_error("  plain text  "), "plain text");
+    assert_eq!(readable_error(""), "");
+}

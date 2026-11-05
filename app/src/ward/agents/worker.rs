@@ -353,6 +353,7 @@ const MESSAGE_NOT_STARTED: &str =
 const MESSAGE_USAGE_LIMIT: &str = "Агент упёрся в лимит подписки";
 const MESSAGE_IDLE_ANSWER: &str = "Работа готова: агент выдал финальный ответ и ждёт вас. Сессия открыта: можно написать в неё или остановить";
 const MESSAGE_OWNER_QUESTION: &str = "Агент задал вопрос и ждёт ответа владельца";
+const MESSAGE_AGENT_ERROR: &str = "Агент закончил ход ошибкой API вместо ответа";
 const MESSAGE_PREPARING: &str = "Подготовка: оркестратор собирает досье и промпт";
 const MESSAGE_PREPARE_TOO_LONG: &str = "Подготовка не уложилась в prepareMaxDurationMin";
 const MESSAGE_PREPARE_NO_PLAN: &str = "Оркестратор завершился, а plan.json не оставил";
@@ -375,6 +376,9 @@ const MESSAGE_AGENT_GONE: &str =
 const MESSAGE_PREPARE_AGENT_GONE: &str =
     "Ward перезапустился, процесс оркестратора не выжил, плана он не оставил";
 const MESSAGE_NO_TAB: &str = "Сообщение не доставлено: открытой вкладки сессии не нашлось";
+
+/// How much of the error of the API the message of a failed session keeps.
+const MAX_AGENT_ERROR_CHARS: usize = 500;
 
 /// Finished sessions the panel keeps.
 const MAX_FINISHED_SESSIONS: usize = 20;
@@ -2423,16 +2427,23 @@ impl Worker {
             return;
         }
         // The orchestrator ended its turn without a plan and is still there: its last words are
-        // questions for the owner, written as text or with the question tool alike.
+        // questions for the owner, written as text or with the question tool alike. A turn that
+        // ended on an error of the API asks nothing: the preparation failed.
         if self.gone_quiet(session) {
             self.read_journal(session);
-            if self.gone_quiet(session)
-                && session.provider.last_turn(&session.journal.tail()) != LastTurn::Working
-                && session.status != SessionStatus::Blocked
-            {
-                self.ask_owner(session);
-                if let Some(prepare) = session.prepare.as_mut() {
-                    prepare.asked_at = Some(Instant::now());
+            if self.gone_quiet(session) && session.status != SessionStatus::Blocked {
+                match session.provider.last_turn(&session.journal.tail()) {
+                    LastTurn::Working => {}
+                    LastTurn::Failed(error) => {
+                        self.fail_preparation(session, &agent_error_message(&error));
+                        return;
+                    }
+                    LastTurn::Answered | LastTurn::Asked => {
+                        self.ask_owner(session);
+                        if let Some(prepare) = session.prepare.as_mut() {
+                            prepare.asked_at = Some(Instant::now());
+                        }
+                    }
                 }
             }
         }
@@ -2965,6 +2976,30 @@ impl Worker {
         session.set_status(request);
     }
 
+    /// The agent ended its turn on an error of its API and waits at an empty prompt: there is
+    /// no answer to review, so the session fails with the error in its message, and its agent
+    /// is ended, as for a session that never started. A refusal for the subscription limit is
+    /// left to [`Self::read_journal`], which has made the session `blocked` until the reset.
+    /// `true`: the session is over.
+    fn turn_failed(&self, session: &mut Session, error: &str) -> bool {
+        if session
+            .provider
+            .limit_hit(&session.journal.tail())
+            .is_some()
+        {
+            return false;
+        }
+        log::warn!(
+            "Ward agents: session {} ended its turn on an error of the API: {error}",
+            session.assignment.session_id
+        );
+        self.stop_agent(session);
+        let mut request = session.status_request(SessionStatus::Failed);
+        request.message = Some(agent_error_message(error));
+        finish(session, request);
+        true
+    }
+
     /// A launched session: finds the agent session, ships the transcript, handles stop and
     /// message commands and notices the exit — the exit code, the runner that went, a stop that
     /// ran out of grace, or a transcript that stood still after the agent's last turn.
@@ -3071,6 +3106,11 @@ impl Worker {
                 match turn {
                     LastTurn::Answered => self.answered(session),
                     LastTurn::Asked => self.ask_owner(session),
+                    LastTurn::Failed(error) => {
+                        if self.turn_failed(session, &error) {
+                            return;
+                        }
+                    }
                     LastTurn::Working => {}
                 }
             }
@@ -3489,6 +3529,16 @@ impl Worker {
 fn finish(session: &mut Session, request: StatusRequest) {
     session.set_status(request);
     session.phase = Phase::Done;
+}
+
+/// The message of a session whose agent ended its turn on an error of the API, with the error.
+fn agent_error_message(error: &str) -> String {
+    let error = provider::one_line(error, MAX_AGENT_ERROR_CHARS);
+    if error.is_empty() {
+        MESSAGE_AGENT_ERROR.to_owned()
+    } else {
+        format!("{MESSAGE_AGENT_ERROR}: {error}")
+    }
 }
 
 /// Whether the service takes this status from a worker (`FROM_WORKER` of the contract): a
