@@ -14,9 +14,14 @@
 # The raw output fits a screen of its own size only. So the viewer sends the size of this tab
 # ({"type":"size","cols","rows"}) when it connects and whenever the tab is resized: the session's
 # tab takes it, and its machine redraws the screen at that size. Until then the output is held,
-# not drawn (see Screen): what was drawn for another size is dropped, the redraw is shown. A
-# machine that never takes the size (an older Ward or service) gets the old behavior after a few
-# seconds: what came is drawn as it is.
+# not drawn (see Screen): what was drawn for another size is dropped, the redraw is shown. The
+# Ward of the session introduces itself first ({"type":"hello","features":["size","redraw"]});
+# one that does not is older, may never take the size and gets the old behavior after a few
+# seconds: what came is drawn as it is, and the viewer says the screen may come out doubled.
+#
+# Where the stream is goes to the title of this console: "Ward: <state>", "Ward! <warning>". The
+# header of the tab shows it (remote_tab.rs), since the output of the session draws over
+# anything printed here.
 
 $ErrorActionPreference = 'Stop'
 $url = $env:WARD_ATTACH_URL
@@ -314,6 +319,52 @@ namespace WardAttach
         }
     }
 
+    /// The JSON control frames of the service, read without a JSON library.
+    public static class Frames
+    {
+        public static string Field(string json, string name)
+        {
+            Match match = Regex.Match(json, "\"" + name + "\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
+            if (!match.Success)
+            {
+                return null;
+            }
+            try
+            {
+                return Regex.Unescape(match.Groups[1].Value);
+            }
+            catch
+            {
+                return match.Groups[1].Value;
+            }
+        }
+
+        public static int Number(string json, string name)
+        {
+            Match match = Regex.Match(json, "\"" + name + "\"\\s*:\\s*(\\d+)");
+            int value;
+            return match.Success && int.TryParse(match.Groups[1].Value, out value) ? value : 0;
+        }
+
+        /// Whether `{"type":"hello","features":[…]}` names the feature.
+        public static bool Has(string json, string feature)
+        {
+            Match list = Regex.Match(json, "\"features\"\\s*:\\s*\\[([^\\]]*)\\]");
+            if (!list.Success)
+            {
+                return false;
+            }
+            foreach (Match item in Regex.Matches(list.Groups[1].Value, "\"((?:[^\"\\\\]|\\\\.)*)\""))
+            {
+                if (item.Groups[1].Value == feature)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
     /// What the viewer does with its screen after a frame.
     public sealed class Step
     {
@@ -328,46 +379,88 @@ namespace WardAttach
     /// The screen of the session in this tab. The output of the session's tab is held, not
     /// drawn, until that tab has the size of this one. Output that came while it had another
     /// size is dropped and the screen wiped: the session's machine redraws after the change.
-    /// When the sizes do not meet within HoldFor (an older Ward or service), what was held is
-    /// drawn as it is.
+    ///
+    /// The Ward of the session says in its hello what it does: takes the size of this tab
+    /// ("size"), and draws the screen again even at a size its tab has already ("redraw"; it
+    /// takes another size for a moment and then this one). With it, this tab holds the output
+    /// whenever either size changes, and at the start waits for that redraw rather than drawing
+    /// the recent output, which may begin in the middle of the screen. A Ward that said nothing
+    /// before its screen is older: when the sizes do not meet within HoldFor, what was held is
+    /// drawn as it is. Nor does a newer one get forever: past RedrawFor the same happens.
     public sealed class Screen
     {
         public static readonly TimeSpan HoldFor = TimeSpan.FromSeconds(3);
+        public static readonly TimeSpan RedrawFor = TimeSpan.FromSeconds(5);
         const int HeldCap = 4 * 1024 * 1024;
 
         readonly List<byte[]> held = new List<byte[]>();
         int heldBytes;
-        bool holding;
-        bool sized;
-        bool foreign;
-        DateTime deadline = DateTime.MaxValue;
+        int ownCols;
+        int ownRows;
         int remoteCols;
         int remoteRows;
+        bool holding;
+        // What is held, or on the screen, was drawn for another size.
+        bool foreign;
+        bool sized;
+        bool introduced;
+        bool follows;
+        bool redraws;
+        bool heard;
+        DateTime deadline = DateTime.MaxValue;
 
         /// Without the size of this tab there is nothing to wait for: output is drawn at once.
-        public Screen(bool knowsOwnSize)
+        public Screen(int ownCols, int ownRows)
         {
-            holding = knowsOwnSize;
+            this.ownCols = ownCols;
+            this.ownRows = ownRows;
+            Reset();
         }
 
         public bool Holding { get { return holding; } }
         public int RemoteCols { get { return remoteCols; } }
         public int RemoteRows { get { return remoteRows; } }
+        /// A size or output of the session's tab came since the screen started.
+        public bool Heard { get { return heard; } }
+        /// The Ward of the session introduced itself since the screen started.
+        public bool Introduced { get { return introduced; } }
+        /// The Ward of the session is older: its screen came without a hello.
+        public bool Legacy { get { return heard && !introduced; } }
+
+        bool KnowsOwnSize { get { return ownCols > 0 && ownRows > 0; } }
+
+        TimeSpan Wait { get { return follows ? RedrawFor : HoldFor; } }
 
         /// The session's machine starts its screen over (it connected again).
-        public void Reset(bool knowsOwnSize)
+        public void Reset()
         {
             held.Clear();
             heldBytes = 0;
-            holding = knowsOwnSize;
-            sized = false;
+            holding = KnowsOwnSize;
             foreign = false;
+            sized = false;
+            introduced = false;
+            follows = false;
+            redraws = false;
+            heard = false;
+            remoteCols = 0;
+            remoteRows = 0;
             deadline = DateTime.MaxValue;
+        }
+
+        /// The hello of the Ward of the session: whether its tab takes the size of this one and
+        /// draws its screen again at a size it has.
+        public void Hello(bool takesSize, bool redrawsScreen)
+        {
+            introduced = true;
+            follows = takesSize;
+            redraws = takesSize && redrawsScreen;
         }
 
         /// A piece of output of the session's tab.
         public Step Output(byte[] chunk, DateTime now)
         {
+            heard = true;
             Step step = new Step();
             if (!holding)
             {
@@ -390,36 +483,59 @@ namespace WardAttach
             return step;
         }
 
-        /// The size of the session's tab, against the size of this one.
-        public Step Size(int cols, int rows, int ownCols, int ownRows, DateTime now)
+        /// The size of the session's tab.
+        public Step Size(int cols, int rows, DateTime now)
         {
+            heard = true;
             Step step = new Step();
             remoteCols = cols;
             remoteRows = rows;
-            if (!holding)
+            sized = true;
+            if (!KnowsOwnSize)
             {
                 return step;
             }
-            sized = true;
-            if (cols != ownCols || rows != ownRows)
+            bool mine = cols == ownCols && rows == ownRows;
+            if (!holding)
+            {
+                // The session's tab took another size (for another viewer, or for a redraw):
+                // what comes now is drawn for that one.
+                if (!mine && follows)
+                {
+                    Hold(now);
+                }
+                return step;
+            }
+            if (!mine)
             {
                 foreign = true;
                 StartWaiting(now);
                 return step;
             }
-            holding = false;
-            deadline = DateTime.MaxValue;
-            if (foreign)
+            if (!foreign && redraws)
             {
-                step.Clear = true;
+                // The sizes meet already, and the session's machine draws the screen again for
+                // this tab: that redraw is the screen, not the recent output.
+                StartWaiting(now);
+                return step;
             }
-            else
+            return Release(step, foreign);
+        }
+
+        /// This tab was resized. The session's tab follows it and draws again; until then what
+        /// comes is for the former size. An older Ward may not follow: its output goes on.
+        public void Own(int cols, int rows, DateTime now)
+        {
+            if (cols == ownCols && rows == ownRows)
             {
-                step.Draw.AddRange(held);
+                return;
             }
-            held.Clear();
-            heldBytes = 0;
-            return step;
+            ownCols = cols;
+            ownRows = rows;
+            if (follows && KnowsOwnSize)
+            {
+                Hold(now);
+            }
         }
 
         /// How long the next frame may be waited for before Tick; infinite while not holding.
@@ -441,12 +557,32 @@ namespace WardAttach
             {
                 return step;
             }
+            step.Warn = sized && (remoteCols != ownCols || remoteRows != ownRows);
+            return Release(step, false);
+        }
+
+        void Hold(DateTime now)
+        {
+            holding = true;
+            foreign = true;
+            deadline = now + Wait;
+        }
+
+        Step Release(Step step, bool clear)
+        {
             holding = false;
             deadline = DateTime.MaxValue;
-            step.Warn = foreign;
-            step.Draw.AddRange(held);
+            if (clear)
+            {
+                step.Clear = true;
+            }
+            else
+            {
+                step.Draw.AddRange(held);
+            }
             held.Clear();
             heldBytes = 0;
+            foreign = false;
             return step;
         }
 
@@ -454,8 +590,63 @@ namespace WardAttach
         {
             if (deadline == DateTime.MaxValue)
             {
-                deadline = now + HoldFor;
+                deadline = now + Wait;
             }
+        }
+    }
+
+    /// Where the stream of the session is.
+    public enum Link
+    {
+        /// The socket of the service is being opened, or the Ward of the session connected again.
+        Connecting,
+        /// The service waits for the Ward of the session: the session is starting.
+        Waiting,
+        /// The Ward of the session streams.
+        Live,
+        /// An older Ward streams: it may never take the size of this tab.
+        Legacy,
+        /// The Ward of the session went away; the service is asked for it again.
+        Reconnecting,
+        /// The stream is over.
+        Ended,
+    }
+
+    /// What the viewer says of the stream, in this tab and in its title. The header of the tab
+    /// reads the title: "Ward: <state>", and "Ward! <state>" for a warning (remote_tab.rs).
+    public static class Status
+    {
+        public const string Prefix = "Ward: ";
+        public const string WarningPrefix = "Ward! ";
+
+        public static string Text(Link link, string worker)
+        {
+            string machine = string.IsNullOrEmpty(worker) ? "машине сессии" : worker;
+            switch (link)
+            {
+                case Link.Connecting:
+                    return "подключаемся к " + machine;
+                case Link.Waiting:
+                    return "ждём Ward на " + machine + " (сессия запускается, агент ещё не стартовал)";
+                case Link.Live:
+                    return "подключено";
+                case Link.Legacy:
+                    return "на " + machine + " Ward старой версии: экран может задваиваться, обновите Ward там";
+                case Link.Reconnecting:
+                    return "Ward на " + machine + " отключился, переподключаемся";
+                default:
+                    return "трансляция закончилась";
+            }
+        }
+
+        public static bool Warning(Link link)
+        {
+            return link == Link.Legacy || link == Link.Reconnecting;
+        }
+
+        public static string Title(Link link, string worker)
+        {
+            return (Warning(link) ? WarningPrefix : Prefix) + Text(link, worker);
         }
     }
 
@@ -481,6 +672,14 @@ namespace WardAttach
         const string Restore = "\u001b[?1049l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1006l\u001b[?2004l\u001b[?1004l\u001b[?25h\u001b[0m";
         const string Wipe = "\u001b[0m\u001b[H\u001b[2J\u001b[3J";
         static readonly TimeSpan SizeCheck = TimeSpan.FromMilliseconds(250);
+        /// How often the frames loop looks at the size of this tab and at its timers.
+        static readonly TimeSpan Housekeeping = TimeSpan.FromMilliseconds(250);
+        /// How often the service is asked for the stream again while the Ward of the session is
+        /// not there, for how long while the session starts, and how long a Ward that went away
+        /// is waited for.
+        public static readonly TimeSpan ResumeEvery = TimeSpan.FromSeconds(20);
+        public static readonly TimeSpan AskFor = TimeSpan.FromMinutes(10);
+        public static readonly TimeSpan GiveUpAfter = TimeSpan.FromSeconds(60);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         static extern IntPtr GetStdHandle(int which);
@@ -500,12 +699,24 @@ namespace WardAttach
         static readonly object writing = new object();
         // ClientWebSocket takes one send at a time: keys and sizes go from two threads.
         static readonly object sending = new object();
+        static readonly object sizing = new object();
         static IntPtr output;
         static bool consoleOut;
         static Stream rawOut;
         static volatile bool detached;
-        static volatile int ownCols;
-        static volatile int ownRows;
+        static int ownCols;
+        static int ownRows;
+        static string machine;
+        static Link link;
+        // Status lines of the viewer are on the screen, and nothing of the session yet.
+        static bool statusOnScreen;
+        // Something of the session was drawn since its screen started.
+        static bool sessionOnScreen;
+        // When to ask the service for the stream again, until when to ask, and when to stop
+        // waiting for a Ward that went away.
+        static DateTime resumeAt = DateTime.MaxValue;
+        static DateTime askUntil = DateTime.MaxValue;
+        static DateTime giveUpAt = DateTime.MaxValue;
 
         public static int Run(string url, string title, string worker)
         {
@@ -521,9 +732,9 @@ namespace WardAttach
                 SetConsoleMode(output, outMode | ProcessedOutput | VirtualTerminalProcessing);
             }
 
-            string name = string.IsNullOrEmpty(title) ? "" : " «" + title + "»";
-            string machine = string.IsNullOrEmpty(worker) ? "" : " на " + worker;
-            Say("подключение к сессии" + name + machine + "…");
+            machine = worker;
+            link = Link.Ended;
+            Enter(Link.Connecting);
             ClientWebSocket socket = new ClientWebSocket();
             socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
             try
@@ -532,7 +743,7 @@ namespace WardAttach
             }
             catch (Exception e)
             {
-                Say("не удалось подключиться: " + Reason(e)
+                Finish("не удалось подключиться: " + Reason(e)
                     + ". Билет на подключение одноразовый: нажмите «Подключиться» в карточке ещё раз.");
                 return 1;
             }
@@ -542,8 +753,7 @@ namespace WardAttach
             int rows;
             if (ReadSize(out cols, out rows))
             {
-                ownCols = cols;
-                ownRows = rows;
+                SetOwnSize(cols, rows);
                 SendSize(socket);
             }
             Thread sizes = new Thread(delegate () { WatchSize(socket); });
@@ -591,25 +801,30 @@ namespace WardAttach
             Decoder decoder = new UTF8Encoding(false).GetDecoder();
             Filter filter = new Filter();
             MemoryStream text = new MemoryStream();
-            Screen screen = new Screen(ownCols > 0);
+            int cols;
+            int rows;
+            GetOwnSize(out cols, out rows);
+            Screen screen = new Screen(cols, rows);
             Task<WebSocketReceiveResult> pending = null;
-            bool drawn = false;
             while (true)
             {
-                WebSocketReceiveResult result;
+                WebSocketReceiveResult result = null;
                 try
                 {
                     if (pending == null)
                     {
                         pending = socket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
                     }
-                    if (!pending.Wait(screen.Left(DateTime.UtcNow)))
+                    TimeSpan wait = screen.Left(DateTime.UtcNow);
+                    if (wait == Timeout.InfiniteTimeSpan || wait > Housekeeping)
                     {
-                        drawn |= Apply(screen.Tick(DateTime.UtcNow), screen, decoder, filter, chars);
-                        continue;
+                        wait = Housekeeping;
                     }
-                    result = pending.GetAwaiter().GetResult();
-                    pending = null;
+                    if (pending.Wait(wait))
+                    {
+                        result = pending.GetAwaiter().GetResult();
+                        pending = null;
+                    }
                 }
                 catch (Exception e)
                 {
@@ -621,6 +836,28 @@ namespace WardAttach
                     Finish("связь прервалась: " + Reason(e));
                     return 1;
                 }
+                DateTime now = DateTime.UtcNow;
+                GetOwnSize(out cols, out rows);
+                screen.Own(cols, rows, now);
+                if (result == null)
+                {
+                    Apply(screen.Tick(now), screen, decoder, filter, chars);
+                    if (now >= giveUpAt)
+                    {
+                        Finish("трансляция закончилась: Ward на " + MachineName() + " не вернулся за минуту. Подключиться снова — кнопкой в карточке.");
+                        Close(socket);
+                        return 0;
+                    }
+                    if (now >= resumeAt)
+                    {
+                        if (now < askUntil)
+                        {
+                            SendResume(socket);
+                        }
+                        resumeAt = now < askUntil ? now + ResumeEvery : DateTime.MaxValue;
+                    }
+                    continue;
+                }
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
                     Finish(detached ? "отключено. Сессия на своей машине продолжает работу." : "трансляция закончилась.");
@@ -631,7 +868,9 @@ namespace WardAttach
                 {
                     byte[] chunk = new byte[result.Count];
                     Buffer.BlockCopy(buffer, 0, chunk, 0, result.Count);
-                    drawn |= Apply(screen.Output(chunk, DateTime.UtcNow), screen, decoder, filter, chars);
+                    Apply(screen.Output(chunk, now), screen, decoder, filter, chars);
+                    Heard(screen);
+                    Apply(screen.Tick(now), screen, decoder, filter, chars);
                     continue;
                 }
                 text.Write(buffer, 0, result.Count);
@@ -641,63 +880,115 @@ namespace WardAttach
                 }
                 string frame = Encoding.UTF8.GetString(text.ToArray());
                 text.SetLength(0);
-                string type = Field(frame, "type");
-                if (type == "waiting")
+                string type = Frames.Field(frame, "type");
+                if (type == "hello")
                 {
-                    if (!drawn)
+                    screen.Hello(Frames.Has(frame, "size"), Frames.Has(frame, "redraw"));
+                    Heard(screen);
+                }
+                else if (type == "waiting")
+                {
+                    // The service asked the Ward of the session for the stream; a Ward that
+                    // does not know the session yet lets the command go, so it is asked again
+                    // while the session starts.
+                    if (link != Link.Reconnecting)
                     {
-                        Say("ждём Ward на машине сессии…");
+                        Enter(Link.Waiting);
+                    }
+                    if (askUntil == DateTime.MaxValue)
+                    {
+                        askUntil = now + AskFor;
+                        resumeAt = now + ResumeEvery;
                     }
                 }
                 else if (type == "reset")
                 {
                     // The Ward of the session connected again: its screen starts over, and it
                     // is told the size of this tab again.
-                    if (drawn)
+                    if (sessionOnScreen)
                     {
                         Write("\u001b[0m\u001b[H\u001b[2J");
                     }
                     decoder.Reset();
                     filter.Reset();
-                    drawn = false;
-                    screen.Reset(ownCols > 0);
+                    sessionOnScreen = false;
+                    screen.Reset();
+                    StopAsking();
+                    Enter(Link.Connecting);
                     SendSize(socket);
                 }
                 else if (type == "size")
                 {
-                    Step step = screen.Size(Number(frame, "cols"), Number(frame, "rows"), ownCols, ownRows, DateTime.UtcNow);
-                    drawn |= Apply(step, screen, decoder, filter, chars);
+                    Apply(screen.Size(Frames.Number(frame, "cols"), Frames.Number(frame, "rows"), now), screen, decoder, filter, chars);
+                    Heard(screen);
                 }
                 else if (type == "ended")
                 {
-                    Finish("Ward на машине сессии закончил трансляцию. Подключиться снова — кнопкой в карточке.");
-                    Close(socket);
-                    return 0;
+                    // The Ward of the session went away; it comes back with a new connection
+                    // (reset) when the service asks it again.
+                    Enter(Link.Reconnecting);
+                    SendResume(socket);
+                    resumeAt = now + ResumeEvery;
+                    giveUpAt = now + GiveUpAfter;
+                    askUntil = giveUpAt;
                 }
                 else if (type == "error")
                 {
-                    string message = Field(frame, "message");
+                    string message = Frames.Field(frame, "message");
                     Finish(string.IsNullOrEmpty(message) ? "трансляция недоступна." : message);
                     Close(socket);
                     return 1;
                 }
+                Apply(screen.Tick(now), screen, decoder, filter, chars);
             }
         }
 
-        /// Does what the screen asks; true when anything of the session was drawn.
-        static bool Apply(Step step, Screen screen, Decoder decoder, Filter filter, char[] chars)
+        /// The Ward of the session is there: it said hello, or its screen came.
+        static void Heard(Screen screen)
+        {
+            if (!screen.Introduced && !screen.Heard)
+            {
+                return;
+            }
+            StopAsking();
+            if (screen.Legacy)
+            {
+                Enter(Link.Legacy);
+            }
+            else if (link != Link.Live)
+            {
+                Enter(Link.Live);
+            }
+        }
+
+        static void StopAsking()
+        {
+            resumeAt = DateTime.MaxValue;
+            askUntil = DateTime.MaxValue;
+            giveUpAt = DateTime.MaxValue;
+        }
+
+        /// Does what the screen asks.
+        static void Apply(Step step, Screen screen, Decoder decoder, Filter filter, char[] chars)
         {
             if (step.Clear)
             {
                 Write(Wipe);
+                statusOnScreen = false;
                 decoder.Reset();
                 filter.Reset();
+            }
+            if (step.Draw.Count > 0 && statusOnScreen && !sessionOnScreen)
+            {
+                // The lines of the viewer were for the time before the screen; the header of
+                // the tab goes on saying where the stream is.
+                Write(Wipe);
+                statusOnScreen = false;
             }
             if (step.Warn)
             {
                 WarnIfSmaller(screen.RemoteCols, screen.RemoteRows);
             }
-            bool drawn = false;
             foreach (byte[] chunk in step.Draw)
             {
                 int offset = 0;
@@ -708,12 +999,33 @@ namespace WardAttach
                     if (decoded > 0)
                     {
                         Write(filter.Feed(new string(chars, 0, decoded)));
-                        drawn = true;
+                        sessionOnScreen = true;
                     }
                     offset += count;
                 }
             }
-            return drawn;
+        }
+
+        /// A new state of the stream: in the title for the header of the tab, and as a line here
+        /// while nothing of the session is on the screen to be spoiled by it.
+        static void Enter(Link next)
+        {
+            if (link == next)
+            {
+                return;
+            }
+            link = next;
+            SetTitle(Status.Title(next, machine));
+            if (!sessionOnScreen)
+            {
+                Say(Status.Text(next, machine));
+                statusOnScreen = true;
+            }
+        }
+
+        static string MachineName()
+        {
+            return string.IsNullOrEmpty(machine) ? "машине сессии" : machine;
         }
 
         /// The keys typed here go to the session's tab as they are: Enter, Ctrl+C, Esc, arrows.
@@ -786,13 +1098,33 @@ namespace WardAttach
                 Thread.Sleep(SizeCheck);
                 int cols;
                 int rows;
-                if (!ReadSize(out cols, out rows) || (cols == ownCols && rows == ownRows))
+                int oldCols;
+                int oldRows;
+                GetOwnSize(out oldCols, out oldRows);
+                if (!ReadSize(out cols, out rows) || (cols == oldCols && rows == oldRows))
                 {
                     continue;
                 }
+                SetOwnSize(cols, rows);
+                SendSize(socket);
+            }
+        }
+
+        static void GetOwnSize(out int cols, out int rows)
+        {
+            lock (sizing)
+            {
+                cols = ownCols;
+                rows = ownRows;
+            }
+        }
+
+        static void SetOwnSize(int cols, int rows)
+        {
+            lock (sizing)
+            {
                 ownCols = cols;
                 ownRows = rows;
-                SendSize(socket);
             }
         }
 
@@ -818,13 +1150,21 @@ namespace WardAttach
 
         static void SendSize(ClientWebSocket socket)
         {
-            int cols = ownCols;
-            int rows = ownRows;
+            int cols;
+            int rows;
+            GetOwnSize(out cols, out rows);
             if (cols <= 0 || rows <= 0)
             {
                 return;
             }
             byte[] frame = Encoding.UTF8.GetBytes("{\"type\":\"size\",\"cols\":" + cols + ",\"rows\":" + rows + "}");
+            Send(socket, frame, frame.Length, WebSocketMessageType.Text);
+        }
+
+        /// Asks the service for the stream again: the Ward of the session is not connected.
+        static void SendResume(ClientWebSocket socket)
+        {
+            byte[] frame = Encoding.UTF8.GetBytes("{\"type\":\"resume\"}");
             Send(socket, frame, frame.Length, WebSocketMessageType.Text);
         }
 
@@ -880,30 +1220,6 @@ namespace WardAttach
             catch { }
         }
 
-        static string Field(string json, string name)
-        {
-            Match match = Regex.Match(json, "\"" + name + "\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
-            if (!match.Success)
-            {
-                return null;
-            }
-            try
-            {
-                return Regex.Unescape(match.Groups[1].Value);
-            }
-            catch
-            {
-                return match.Groups[1].Value;
-            }
-        }
-
-        static int Number(string json, string name)
-        {
-            Match match = Regex.Match(json, "\"" + name + "\"\\s*:\\s*(\\d+)");
-            int value;
-            return match.Success && int.TryParse(match.Groups[1].Value, out value) ? value : 0;
-        }
-
         static string Reason(Exception e)
         {
             while ((e is AggregateException || e.Message.Length == 0) && e.InnerException != null)
@@ -920,6 +1236,8 @@ namespace WardAttach
 
         static void Finish(string text)
         {
+            link = Link.Ended;
+            SetTitle(Status.Title(Link.Ended, machine));
             Write(Restore);
             Say(text);
         }
@@ -927,6 +1245,19 @@ namespace WardAttach
         static void Say(string text)
         {
             Write("\r\n\u001b[36mWard: " + text + "\u001b[0m\r\n");
+        }
+
+        static void SetTitle(string text)
+        {
+            if (!consoleOut)
+            {
+                return;
+            }
+            try
+            {
+                Console.Title = text;
+            }
+            catch { }
         }
 
         static void Write(string text)

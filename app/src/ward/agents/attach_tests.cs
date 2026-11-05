@@ -1,6 +1,6 @@
 // The checks of the viewer's C# (attach.ps1), compiled after it into one source: it has the
 // usings. attach_tests.rs runs them under Windows PowerShell, as the tab runs the viewer, and
-// reads the file Suite.Run writes: a line per check.
+// reads the file Suite.Run writes: a line per check and the title of every state of the stream.
 
 namespace WardAttachTests
 {
@@ -24,7 +24,23 @@ namespace WardAttachTests
             Check("the filter keeps links", FilterKeepsLinks);
             Check("the filter puts together sequences cut between pieces", FilterJoinsPieces);
             Check("an escape ends an unfinished string", FilterEscapeEndsAString);
+            Check("hello is read with its features", FramesReadHello);
+            Check("a newer Ward that takes another size: the redraw is drawn", ScreenRedrawAtAnotherSize);
+            Check("a newer Ward at the same size: the redraw is drawn, not the recent output", ScreenRedrawAtTheSameSize);
+            Check("a newer Ward whose redraw does not come: the recent output after a while", ScreenRedrawThatDoesNotCome);
+            Check("output before any size is not drawn at a foreign size", ScreenOutputBeforeAnySize);
+            Check("an older Ward at another size: the output as it is after HoldFor", ScreenOlderWardAtAnotherSize);
+            Check("an older Ward at the same size: the output at once", ScreenOlderWardAtTheSameSize);
+            Check("this tab resized: held until the session's tab follows", ScreenOwnResize);
+            Check("the session's tab took a size of another viewer", ScreenAnotherViewer);
+            Check("a new connection of the Ward starts the screen over", ScreenReset);
+            Check("without the size of this tab output is drawn at once", ScreenWithoutOwnSize);
+            Check("the states of the stream are said with the machine", StatusTexts);
 
+            foreach (Link link in Enum.GetValues(typeof(Link)))
+            {
+                lines.Add("title\t" + link + "\t" + Status.Title(link, "steep-pc"));
+            }
             File.WriteAllLines(outPath, lines.ToArray(), new UTF8Encoding(false));
             return failures == 0 ? 0 : 1;
         }
@@ -115,6 +131,173 @@ namespace WardAttachTests
             Equal("az", Feed("a" + E + "[1;2" + "\u0018" + "z"));
         }
 
+        static void FramesReadHello()
+        {
+            string hello = "{\"type\":\"hello\",\"version\":\"v0.2026.11.05\",\"features\":[\"size\",\"redraw\"]}";
+            Equal("hello", Frames.Field(hello, "type"));
+            True(Frames.Has(hello, "size"), "size");
+            True(Frames.Has(hello, "redraw"), "redraw");
+            True(!Frames.Has(hello, "keys"), "keys");
+            True(!Frames.Has("{\"type\":\"hello\",\"version\":\"x\"}", "size"), "no features");
+            True(!Frames.Has("{\"type\":\"size\",\"cols\":120,\"rows\":40}", "size"), "a size frame");
+            True(Frames.Has("{\"type\":\"hello\", \"features\" : [ \"redraw\" , \"size\" ]}", "size"), "spaces");
+            Equal("120", Frames.Number("{\"type\":\"size\",\"cols\":120,\"rows\":40}", "cols").ToString());
+        }
+
+        static void ScreenRedrawAtAnotherSize()
+        {
+            DateTime t = Start();
+            Screen s = new Screen(100, 30);
+            s.Hello(true, true);
+            Nothing(s.Size(120, 40, t));
+            Nothing(s.Output(B("recent output at 120x40"), t));
+            True(s.Holding && !s.Legacy, "holding, a newer Ward");
+            Step step = s.Size(100, 30, t.AddMilliseconds(200));
+            True(step.Clear, "the screen is wiped");
+            Equal("", Drawn(step));
+            Equal("redraw", Drawn(s.Output(B("redraw"), t.AddMilliseconds(300))));
+        }
+
+        static void ScreenRedrawAtTheSameSize()
+        {
+            DateTime t = Start();
+            Screen s = new Screen(100, 30);
+            s.Hello(true, true);
+            Nothing(s.Size(100, 30, t));
+            True(s.Holding, "the redraw is waited for");
+            Nothing(s.Output(B("recent output"), t));
+            Nothing(s.Size(100, 29, t.AddMilliseconds(100)));
+            Nothing(s.Output(B("at 100x29"), t.AddMilliseconds(150)));
+            Step step = s.Size(100, 30, t.AddMilliseconds(400));
+            True(step.Clear, "the screen is wiped");
+            Equal("", Drawn(step));
+            Equal("redraw", Drawn(s.Output(B("redraw"), t.AddMilliseconds(450))));
+            True(!s.Holding, "live");
+        }
+
+        static void ScreenRedrawThatDoesNotCome()
+        {
+            DateTime t = Start();
+            Screen s = new Screen(100, 30);
+            s.Hello(true, true);
+            Nothing(s.Size(100, 30, t));
+            Nothing(s.Output(B("recent output"), t));
+            Nothing(s.Tick(t + Screen.RedrawFor - TimeSpan.FromMilliseconds(1)));
+            Step step = s.Tick(t + Screen.RedrawFor);
+            True(!step.Clear && !step.Warn, "drawn as it is, at the same size");
+            Equal("recent output", Drawn(step));
+            Equal("more", Drawn(s.Output(B("more"), t + Screen.RedrawFor)));
+        }
+
+        static void ScreenOutputBeforeAnySize()
+        {
+            DateTime t = Start();
+            Screen s = new Screen(100, 30);
+            s.Hello(true, true);
+            Nothing(s.Output(B("of any size"), t));
+            Step step = s.Size(100, 30, t);
+            True(step.Clear, "wiped");
+            Equal("", Drawn(step));
+        }
+
+        static void ScreenOlderWardAtAnotherSize()
+        {
+            DateTime t = Start();
+            Screen s = new Screen(100, 30);
+            Nothing(s.Size(205, 61, t));
+            True(s.Legacy, "an older Ward");
+            Nothing(s.Output(B("recent output at 205x61"), t));
+            Nothing(s.Tick(t + Screen.HoldFor - TimeSpan.FromMilliseconds(1)));
+            Step step = s.Tick(t + Screen.HoldFor);
+            True(step.Warn && !step.Clear, "drawn as it is, with a warning");
+            Equal("recent output at 205x61", Drawn(step));
+            Equal("more", Drawn(s.Output(B("more"), t + Screen.HoldFor)));
+            // An older Ward does not follow this tab: nothing to wait for.
+            s.Own(90, 25, t + Screen.HoldFor);
+            Equal("after", Drawn(s.Output(B("after"), t + Screen.HoldFor)));
+        }
+
+        static void ScreenOlderWardAtTheSameSize()
+        {
+            DateTime t = Start();
+            Screen s = new Screen(100, 30);
+            Nothing(s.Size(100, 30, t));
+            True(s.Legacy && !s.Holding, "an older Ward, nothing to wait for");
+            Equal("recent output", Drawn(s.Output(B("recent output"), t)));
+        }
+
+        static void ScreenOwnResize()
+        {
+            DateTime t = Start();
+            Screen s = Live(t);
+            s.Own(90, 25, t);
+            True(s.Holding, "held after the resize");
+            Nothing(s.Output(B("for 100x30"), t));
+            Nothing(s.Size(100, 30, t));
+            Step step = s.Size(90, 25, t.AddMilliseconds(300));
+            True(step.Clear, "wiped");
+            Equal("redraw", Drawn(s.Output(B("redraw"), t.AddMilliseconds(350))));
+        }
+
+        static void ScreenAnotherViewer()
+        {
+            DateTime t = Start();
+            Screen s = Live(t);
+            Nothing(s.Size(80, 20, t));
+            True(s.Holding, "held for another size");
+            Nothing(s.Output(B("for 80x20"), t));
+            Step step = s.Tick(t + Screen.RedrawFor);
+            True(step.Warn, "a warning");
+            Equal("for 80x20", Drawn(step));
+        }
+
+        static void ScreenReset()
+        {
+            DateTime t = Start();
+            Screen s = Live(t);
+            s.Reset();
+            True(s.Holding && !s.Introduced && !s.Heard && !s.Legacy, "started over");
+            Nothing(s.Size(100, 30, t));
+            True(s.Legacy, "no hello this time: an older Ward");
+        }
+
+        static void ScreenWithoutOwnSize()
+        {
+            DateTime t = Start();
+            Screen s = new Screen(0, 0);
+            True(!s.Holding, "nothing to hold for");
+            Nothing(s.Size(120, 40, t));
+            Equal("x", Drawn(s.Output(B("x"), t)));
+        }
+
+        static void StatusTexts()
+        {
+            Equal("Ward: подключаемся к steep-pc", Status.Title(Link.Connecting, "steep-pc"));
+            Equal("Ward: ждём Ward на steep-pc (сессия запускается, агент ещё не стартовал)", Status.Title(Link.Waiting, "steep-pc"));
+            Equal("Ward: подключено", Status.Title(Link.Live, "steep-pc"));
+            Equal("Ward! на steep-pc Ward старой версии: экран может задваиваться, обновите Ward там", Status.Title(Link.Legacy, "steep-pc"));
+            Equal("Ward! Ward на steep-pc отключился, переподключаемся", Status.Title(Link.Reconnecting, "steep-pc"));
+            Equal("Ward: трансляция закончилась", Status.Title(Link.Ended, "steep-pc"));
+            Equal("подключаемся к машине сессии", Status.Text(Link.Connecting, ""));
+            Equal("ждём Ward на машине сессии (сессия запускается, агент ещё не стартовал)", Status.Text(Link.Waiting, null));
+        }
+
+        /// A screen of a newer Ward that is live at 100x30.
+        static Screen Live(DateTime t)
+        {
+            Screen s = new Screen(100, 30);
+            s.Hello(true, true);
+            s.Size(120, 40, t);
+            s.Size(100, 30, t);
+            True(!s.Holding, "live");
+            return s;
+        }
+
+        static DateTime Start()
+        {
+            return new DateTime(2026, 11, 5, 5, 13, 0, DateTimeKind.Utc);
+        }
+
         static void Check(string name, Action test)
         {
             try
@@ -129,11 +312,27 @@ namespace WardAttachTests
             }
         }
 
+        static void Nothing(Step step)
+        {
+            if (step.Clear || step.Warn || step.Draw.Count > 0)
+            {
+                throw new Exception("expected nothing to do, got clear=" + step.Clear + " warn=" + step.Warn + " draw=" + Show(Drawn(step)));
+            }
+        }
+
         static void Equal(string expected, string actual)
         {
             if (expected != actual)
             {
                 throw new Exception("expected " + Show(expected) + ", got " + Show(actual));
+            }
+        }
+
+        static void True(bool value, string what)
+        {
+            if (!value)
+            {
+                throw new Exception("not so: " + what);
             }
         }
 
@@ -151,6 +350,21 @@ namespace WardAttachTests
                 kept.Append(filter.Feed(piece));
             }
             return kept.ToString();
+        }
+
+        static byte[] B(string text)
+        {
+            return Encoding.UTF8.GetBytes(text);
+        }
+
+        static string Drawn(Step step)
+        {
+            StringBuilder drawn = new StringBuilder();
+            foreach (byte[] chunk in step.Draw)
+            {
+                drawn.Append(Encoding.UTF8.GetString(chunk));
+            }
+            return drawn.ToString();
         }
     }
 }

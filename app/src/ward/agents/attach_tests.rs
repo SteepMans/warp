@@ -173,13 +173,28 @@ fn the_viewer_holds_the_output_until_the_sizes_meet() {
     for part in [
         "public sealed class Screen",
         "HoldFor = TimeSpan.FromSeconds(3)",
+        "RedrawFor = TimeSpan.FromSeconds(5)",
+        "screen.Hello(",
         "screen.Size(",
         "screen.Output(",
+        "screen.Own(",
         "screen.Tick(",
         "screen.Reset(",
     ] {
         assert!(SCRIPT.contains(part), "{part}");
     }
+}
+
+/// The viewer reads in the hello the features the Ward of the session names, and asks the
+/// service for the stream again with the frame the service reads.
+#[test]
+fn the_viewer_reads_the_hello_of_the_stream() {
+    for feature in super::super::stream::FEATURES {
+        let read = format!("Frames.Has(frame, \"{feature}\")");
+        assert!(SCRIPT.contains(&read), "{read}");
+    }
+    assert!(SCRIPT.contains(r#"type == "hello""#));
+    assert!(SCRIPT.contains(r#""{\"type\":\"resume\"}""#));
 }
 
 /// The C# of the viewer, as `Add-Type` compiles it in the tab.
@@ -255,7 +270,7 @@ fn the_viewer_passes_its_checks() {
         .iter()
         .filter(|line| line.starts_with("ok\t"))
         .count();
-    assert!(passed >= 7, "{report:#?}");
+    assert!(passed >= 19, "{report:#?}");
 }
 
 /// The output of the session goes through the filter before it is written here.

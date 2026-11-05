@@ -20,7 +20,12 @@
 //!
 //! The viewer also sends the size of its tab, and the session's tab takes it, so the raw output
 //! fits this screen ([`super::stream`]); until it does, the viewer holds the output back. The
-//! tab itself is marked as remote control of that machine ([`super::remote_tab`]).
+//! hello of the stream tells it whether the Ward there takes the size and redraws; without one
+//! it is an older Ward, and the viewer says the screen may come out doubled. Where the stream
+//! is (connecting, waiting for the Ward of the session, live, that Ward gone and asked for
+//! again, over) goes to the title of the viewer's console, since the output of the session
+//! draws over anything printed in the tab. The tab itself is marked as remote control of that
+//! machine ([`super::remote_tab`]).
 
 use std::path::{Path, PathBuf};
 
