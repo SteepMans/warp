@@ -3392,8 +3392,11 @@ impl ansi::Handler for TerminalModel {
 
         let bytes = input.bytes();
 
-        // Send a copy of the bytes to subscribers.
-        self.event_proxy.send_pty_read_event(bytes);
+        // Send a copy of the bytes to subscribers, as the PTY gave them: a flushed synchronized
+        // output frame repeats bytes they already got with the raw read (see below).
+        if !input.is_synchronized_output_frame() {
+            self.event_proxy.send_pty_read_event(bytes);
+        }
 
         // Send a copy of the bytes for the active shared session, if applicable.
         // When processing a synchronized output frame, `on_finish_byte_processing` is called
