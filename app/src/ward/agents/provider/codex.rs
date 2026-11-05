@@ -6,7 +6,9 @@
 //! - Account: `auth.json` (`auth_mode`, whether `tokens` or `OPENAI_API_KEY` are present; the
 //!   values are skipped while parsing).
 //! - Limits and plan: the last `token_count` event with `rate_limits` (`primary`, `secondary`,
-//!   `plan_type`) in the newest rollouts.
+//!   `plan_type`) in the newest rollouts. They are as fresh as the last Codex turn on this
+//!   machine, which may be weeks ago: a window that has started over since is reported empty
+//!   ([`usage_reports`]).
 //! - Limit refusal: after the last turn started, an `error` event about the usage limit or a
 //!   `token_count` with `rate_limit_reached_type`.
 //! - Last turn: the newest event or item of the rollout that says something about it —
@@ -23,7 +25,7 @@ use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
-use chrono::{DateTime, TimeZone as _, Utc};
+use chrono::{DateTime, TimeDelta, TimeZone as _, Utc};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 use serde_json::Value;
@@ -270,16 +272,42 @@ pub fn parse_account(auth_json: Option<&str>, plan_type: Option<String>) -> Acco
     }
 }
 
-/// Usage windows of the contract from the last rate limits.
-pub fn usage_reports(limits: Option<&RateLimits>) -> Vec<UsageReport> {
-    let report = |name: &str, window: Option<&Window>| UsageReport {
-        provider: ID.to_owned(),
-        window: name.to_owned(),
-        window_minutes: window.and_then(|window| window.window_minutes),
-        used_percent: window.and_then(|window| window.used_percent),
-        resets_at: window.and_then(|window| window.resets_at).map(rfc3339),
-        observed_at: limits.and_then(|limits| limits.observed_at).map(rfc3339),
-        source: if limits.is_some() { "rollout" } else { "none" }.to_owned(),
+/// Whether the window has started over by `now`: its reset time has passed or, without one, a
+/// whole window has gone by since Codex reported it (`observed_at`).
+fn started_over(window: &Window, observed_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    match (window.resets_at, window.window_minutes, observed_at) {
+        (Some(resets_at), _, _) => resets_at <= now,
+        (None, Some(minutes), Some(observed_at)) => TimeDelta::try_minutes(minutes)
+            .and_then(|length| observed_at.checked_add_signed(length))
+            .is_some_and(|end| end <= now),
+        _ => false,
+    }
+}
+
+/// Usage windows of the contract from the last rate limits. A window that has started over by
+/// `now` (see `started_over`) is reported empty, as it was at its reset, with the next reset
+/// unknown: the percent of the rollout belongs to the window before. Codex may not have run
+/// here for weeks, and an old 94% must neither show nor keep Codex from taking assignments
+/// until its next turn reports the new window.
+pub fn usage_reports(limits: Option<&RateLimits>, now: DateTime<Utc>) -> Vec<UsageReport> {
+    let observed_at = limits.and_then(|limits| limits.observed_at);
+    let report = |name: &str, window: Option<&Window>| {
+        let (used_percent, resets_at, observed_at) = match window {
+            Some(window) if started_over(window, observed_at, now) => {
+                (Some(0.0), None, window.resets_at)
+            }
+            Some(window) => (window.used_percent, window.resets_at, observed_at),
+            None => (None, None, observed_at),
+        };
+        UsageReport {
+            provider: ID.to_owned(),
+            window: name.to_owned(),
+            window_minutes: window.and_then(|window| window.window_minutes),
+            used_percent,
+            resets_at: resets_at.map(rfc3339),
+            observed_at: observed_at.map(rfc3339),
+            source: if limits.is_some() { "rollout" } else { "none" }.to_owned(),
+        }
     };
     let mut reports = vec![report(
         "primary",
@@ -419,8 +447,8 @@ impl Provider for Codex {
         parse_account(auth.as_deref(), plan)
     }
 
-    fn usage(&self, homes: &Homes, _ward: &WardUsage, _now: DateTime<Utc>) -> Vec<UsageReport> {
-        usage_reports(Self::latest_limits(homes).as_ref())
+    fn usage(&self, homes: &Homes, _ward: &WardUsage, now: DateTime<Utc>) -> Vec<UsageReport> {
+        usage_reports(Self::latest_limits(homes).as_ref(), now)
     }
 
     fn limit_hit(&self, tail: &str) -> Option<LimitHit> {
