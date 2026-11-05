@@ -4753,7 +4753,7 @@ fn render_terminal_row_content(
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Start);
     content.add_child(first_line_element);
-    if let Some(remote_line) = ward::render_remote_line(terminal_view, appearance) {
+    if let Some(remote_line) = ward::render_remote_line(terminal_view, 12., appearance) {
         content.add_child(Container::new(remote_line).with_margin_top(2.).finish());
     }
     if let Some(agent_line) = ward::render_agent_status_line(terminal_view.id(), appearance, app) {
@@ -7076,6 +7076,9 @@ fn render_terminal_detail_section(
         .with_cross_axis_alignment(CrossAxisAlignment::Start)
         .with_spacing(DETAIL_SIDECAR_SECTION_GAP);
 
+    if let Some(remote) = ward::render_remote_detail(terminal_view, text_colors.main, appearance) {
+        section.add_child(remote);
+    }
     if let Some(status) = status.as_ref() {
         section.add_child(render_detail_status_pill(status, appearance));
     }
@@ -7602,6 +7605,8 @@ fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn El
                     )
                 }
             };
+            // Ward: a remote tab names the machine and the branch of its session instead.
+            let subtitle = ward::render_remote_line(terminal_view, 10., appearance).or(subtitle);
 
             (title, subtitle)
         } else {

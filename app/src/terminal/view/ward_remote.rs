@@ -25,7 +25,7 @@ use crate::appearance::Appearance;
 use crate::terminal::model::TerminalModel;
 use crate::terminal::model::block::BlockId;
 use crate::ui_components::icons::Icon;
-use crate::ward::agents::remote_tab::{self, Phase, RemoteTab};
+use crate::ward::agents::remote_tab::{self, Link, Phase, RemoteTab};
 
 impl TerminalView {
     /// Gives the PTY of this terminal `cols` x `rows` of a viewer on another machine, or the
@@ -65,6 +65,17 @@ impl TerminalView {
         let tab = remote_tab::of_view(self.view_id)?;
         let phase = ward_remote_phase(&tab, &self.model.lock());
         Some((tab, phase))
+    }
+
+    /// The remote tab this terminal is, with where its stream is as the viewer titles its
+    /// console; `None` for any other terminal.
+    pub fn ward_remote_link(&self) -> Option<(RemoteTab, Link)> {
+        let (tab, phase) = self.ward_remote_tab()?;
+        let link = Link::of(
+            phase,
+            remote_tab::viewer_status(&self.terminal_title).as_ref(),
+        );
+        Some((tab, link))
     }
 
     /// The tab was marked as remote, or its viewer started or ended: the header follows.
