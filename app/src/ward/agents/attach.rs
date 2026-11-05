@@ -13,7 +13,10 @@
 //! connects to the viewer socket, prints the raw output of the session's tab as it comes and
 //! sends the keys typed here as binary frames, like the viewer in the browser. The address with
 //! the ticket goes to it in an environment variable, not on the command line, and the ticket is
-//! good for one connection within a minute. Ctrl+] disconnects; the session goes on.
+//! good for one connection within a minute. Ctrl+] disconnects; the session goes on. What the
+//! output asks of the terminal of the session's machine is not for this one: queries (the
+//! answers would go to the session as keys), the marks of Warp's shell and agent integration,
+//! titles and keyboard modes are left out of what is printed.
 //!
 //! The viewer also sends the size of its tab, and the session's tab takes it, so the raw output
 //! fits this screen ([`super::stream`]); until it does, the viewer holds the output back. The

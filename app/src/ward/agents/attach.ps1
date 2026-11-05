@@ -3,8 +3,13 @@
 # Ward writes this file and runs it in a tab of its own with WARD_ATTACH_URL (the viewer socket
 # of the agents service with a one-time ticket), WARD_ATTACH_TITLE (the task) and
 # WARD_ATTACH_WORKER (the machine of the session). The viewer connects to the socket, prints the
-# raw output of the session's tab and sends the keys typed here back as binary frames, as the
+# output of the session's tab and sends the keys typed here back as binary frames, as the
 # viewer in the browser does. Ctrl+] disconnects; the session on its own machine goes on.
+#
+# The output is the raw output of a terminal on another machine, and that terminal already
+# answered what the session asked of it. What would make this terminal answer again (the answer
+# would go to the session as typed keys), or take this tab for a shell or an agent of its own,
+# is left out (see Filter): queries, the marks of Warp's shell and agent integration, titles.
 #
 # The raw output fits a screen of its own size only. So the viewer sends the size of this tab
 # ({"type":"size","cols","rows"}) when it connects and whenever the tab is resized: the session's
@@ -43,6 +48,272 @@ using System.Threading.Tasks;
 
 namespace WardAttach
 {
+    /// The output of the session's tab as this terminal may be given it. The terminal of the
+    /// session's machine was given the same output and answered its queries already; asked again
+    /// here, this one would answer too, and the answer would go to the session as typed keys. So
+    /// what draws the screen goes on (text, colors, cursor moves, the alternate screen, links,
+    /// bracketed paste, focus and mouse reports), and the rest is left out: queries and reports,
+    /// the marks of Warp's shell and agent integration and every other OSC but links, DCS, APC,
+    /// PM and SOS strings, the keyboard and window modes of the other terminal, its title.
+    /// Sequences cut between two pieces of output are put together first.
+    public sealed class Filter
+    {
+        enum Mode { Ground, Escape, Csi, Osc, OscEscape, Drop, DropEscape }
+
+        const char Esc = '\u001b';
+        const char Bel = '\u0007';
+        const int MaxSequence = 4096;
+        const int MaxDropped = 1024 * 1024;
+        // DEC private modes of the other terminal that are not this tab's to take: win32 input
+        // (9001), color scheme reports (2031), in-band resize reports (2048), mouse in pixels (1016).
+        static readonly HashSet<string> DroppedModes = new HashSet<string> { "9001", "2031", "2048", "1016" };
+
+        Mode mode = Mode.Ground;
+        readonly StringBuilder sequence = new StringBuilder();
+        int dropped;
+
+        public void Reset()
+        {
+            mode = Mode.Ground;
+            sequence.Clear();
+            dropped = 0;
+        }
+
+        public string Feed(string text)
+        {
+            StringBuilder kept = new StringBuilder(text.Length);
+            int i = 0;
+            while (i < text.Length)
+            {
+                char c = text[i];
+                switch (mode)
+                {
+                    case Mode.Ground:
+                        if (c == Esc)
+                        {
+                            Begin(Mode.Escape, c);
+                        }
+                        else
+                        {
+                            kept.Append(c);
+                        }
+                        break;
+                    case Mode.Escape:
+                        if (c == '[')
+                        {
+                            mode = Mode.Csi;
+                            sequence.Append(c);
+                        }
+                        else if (c == ']')
+                        {
+                            mode = Mode.Osc;
+                            sequence.Append(c);
+                        }
+                        else if (c == 'P' || c == '_' || c == '^' || c == 'X')
+                        {
+                            // DCS, APC, PM, SOS.
+                            mode = Mode.Drop;
+                            dropped = 0;
+                        }
+                        else if (c == Esc)
+                        {
+                            Begin(Mode.Escape, c);
+                        }
+                        else if (c == 'Z')
+                        {
+                            // DECID asks the terminal who it is.
+                            mode = Mode.Ground;
+                        }
+                        else if (c == '\u0018' || c == '\u001a')
+                        {
+                            mode = Mode.Ground;
+                        }
+                        else
+                        {
+                            kept.Append(Esc).Append(c);
+                            mode = Mode.Ground;
+                        }
+                        break;
+                    case Mode.Csi:
+                        if (c == Esc)
+                        {
+                            Begin(Mode.Escape, c);
+                        }
+                        else if (c == '\u0018' || c == '\u001a')
+                        {
+                            mode = Mode.Ground;
+                        }
+                        else if (c < ' ')
+                        {
+                            // A control inside a sequence acts at once.
+                            kept.Append(c);
+                        }
+                        else
+                        {
+                            sequence.Append(c);
+                            if (c >= '@' && c <= '~')
+                            {
+                                kept.Append(Csi(sequence.ToString()));
+                                mode = Mode.Ground;
+                            }
+                            else if (sequence.Length > MaxSequence)
+                            {
+                                mode = Mode.Ground;
+                            }
+                        }
+                        break;
+                    case Mode.Osc:
+                        if (c == Bel)
+                        {
+                            kept.Append(Osc(sequence.ToString(), "\u0007"));
+                            mode = Mode.Ground;
+                        }
+                        else if (c == Esc)
+                        {
+                            mode = Mode.OscEscape;
+                        }
+                        else if (c == '\u0018' || c == '\u001a')
+                        {
+                            mode = Mode.Ground;
+                        }
+                        else
+                        {
+                            sequence.Append(c);
+                            if (sequence.Length > MaxSequence)
+                            {
+                                mode = Mode.Drop;
+                                dropped = 0;
+                            }
+                        }
+                        break;
+                    case Mode.OscEscape:
+                        if (c == '\\')
+                        {
+                            kept.Append(Osc(sequence.ToString(), "\u001b\\"));
+                            mode = Mode.Ground;
+                            break;
+                        }
+                        // An escape ends the string: what follows is a new sequence.
+                        Begin(Mode.Escape, Esc);
+                        continue;
+                    case Mode.Drop:
+                        if (c == Esc)
+                        {
+                            mode = Mode.DropEscape;
+                        }
+                        else if (c == Bel || c == '\u0018' || c == '\u001a' || ++dropped > MaxDropped)
+                        {
+                            mode = Mode.Ground;
+                        }
+                        break;
+                    case Mode.DropEscape:
+                        if (c == '\\')
+                        {
+                            mode = Mode.Ground;
+                            break;
+                        }
+                        Begin(Mode.Escape, Esc);
+                        continue;
+                }
+                i++;
+            }
+            return kept.ToString();
+        }
+
+        void Begin(Mode next, char first)
+        {
+            mode = next;
+            sequence.Clear();
+            sequence.Append(first);
+        }
+
+        /// A whole CSI sequence: itself, the part of it to keep, or nothing.
+        static string Csi(string whole)
+        {
+            char final = whole[whole.Length - 1];
+            string body = whole.Substring(2, whole.Length - 3);
+            char prefix = body.Length > 0 && "<=>?".IndexOf(body[0]) >= 0 ? body[0] : '\0';
+            string rest = prefix == '\0' ? body : body.Substring(1);
+            int end = rest.Length;
+            while (end > 0 && rest[end - 1] >= ' ' && rest[end - 1] <= '/')
+            {
+                end--;
+            }
+            string parameters = rest.Substring(0, end);
+            string intermediates = rest.Substring(end);
+            bool plain = intermediates.Length == 0;
+            switch (final)
+            {
+                case 'c':
+                    // DA1, DA2, DA3.
+                    return "";
+                case 'n':
+                    // Status and cursor position reports.
+                    return "";
+                case 't':
+                    // Window operations: reports, resizing, the title stack.
+                    return plain ? "" : whole;
+                case 'u':
+                    // The kitty keyboard protocol; a plain one restores the cursor.
+                    return prefix != '\0' ? "" : whole;
+                case 'm':
+                    // Key modifier modes and their queries; a plain one is colors.
+                    return prefix != '\0' ? "" : whole;
+                case 'q':
+                    // XTVERSION.
+                    return prefix == '>' ? "" : whole;
+                case 'x':
+                    // DECREQTPARM.
+                    return plain ? "" : whole;
+                case 'p':
+                case 'w':
+                    // DECRQM, DECRQPSR.
+                    return intermediates.IndexOf('$') >= 0 ? "" : whole;
+                case '|':
+                    // DECSCPP changes the width of the window.
+                    return intermediates.IndexOf('$') >= 0 ? "" : whole;
+                case 'y':
+                    // DECRQCRA.
+                    return intermediates.IndexOf('*') >= 0 ? "" : whole;
+                case 'S':
+                    // XTSMGRAPHICS.
+                    return prefix == '?' ? "" : whole;
+                case 'h':
+                case 'l':
+                    if (prefix != '?' || !plain)
+                    {
+                        return whole;
+                    }
+                    List<string> modes = new List<string>();
+                    foreach (string m in parameters.Split(';'))
+                    {
+                        if (!DroppedModes.Contains(m))
+                        {
+                            modes.Add(m);
+                        }
+                    }
+                    if (modes.Count == 0)
+                    {
+                        return "";
+                    }
+                    return "\u001b[?" + string.Join(";", modes.ToArray()) + final;
+                default:
+                    return whole;
+            }
+        }
+
+        /// A whole OSC string: links stay, the rest is the other terminal's.
+        static string Osc(string body, string terminator)
+        {
+            // body starts with "\e]".
+            if (body.StartsWith("\u001b]8;", StringComparison.Ordinal))
+            {
+                return body + terminator;
+            }
+            return "";
+        }
+    }
+
     /// What the viewer does with its screen after a frame.
     public sealed class Step
     {
@@ -318,6 +589,7 @@ namespace WardAttach
             byte[] buffer = new byte[64 * 1024];
             char[] chars = new char[64 * 1024 + 8];
             Decoder decoder = new UTF8Encoding(false).GetDecoder();
+            Filter filter = new Filter();
             MemoryStream text = new MemoryStream();
             Screen screen = new Screen(ownCols > 0);
             Task<WebSocketReceiveResult> pending = null;
@@ -333,7 +605,7 @@ namespace WardAttach
                     }
                     if (!pending.Wait(screen.Left(DateTime.UtcNow)))
                     {
-                        drawn |= Apply(screen.Tick(DateTime.UtcNow), screen, decoder, chars);
+                        drawn |= Apply(screen.Tick(DateTime.UtcNow), screen, decoder, filter, chars);
                         continue;
                     }
                     result = pending.GetAwaiter().GetResult();
@@ -359,7 +631,7 @@ namespace WardAttach
                 {
                     byte[] chunk = new byte[result.Count];
                     Buffer.BlockCopy(buffer, 0, chunk, 0, result.Count);
-                    drawn |= Apply(screen.Output(chunk, DateTime.UtcNow), screen, decoder, chars);
+                    drawn |= Apply(screen.Output(chunk, DateTime.UtcNow), screen, decoder, filter, chars);
                     continue;
                 }
                 text.Write(buffer, 0, result.Count);
@@ -386,6 +658,7 @@ namespace WardAttach
                         Write("\u001b[0m\u001b[H\u001b[2J");
                     }
                     decoder.Reset();
+                    filter.Reset();
                     drawn = false;
                     screen.Reset(ownCols > 0);
                     SendSize(socket);
@@ -393,7 +666,7 @@ namespace WardAttach
                 else if (type == "size")
                 {
                     Step step = screen.Size(Number(frame, "cols"), Number(frame, "rows"), ownCols, ownRows, DateTime.UtcNow);
-                    drawn |= Apply(step, screen, decoder, chars);
+                    drawn |= Apply(step, screen, decoder, filter, chars);
                 }
                 else if (type == "ended")
                 {
@@ -412,12 +685,13 @@ namespace WardAttach
         }
 
         /// Does what the screen asks; true when anything of the session was drawn.
-        static bool Apply(Step step, Screen screen, Decoder decoder, char[] chars)
+        static bool Apply(Step step, Screen screen, Decoder decoder, Filter filter, char[] chars)
         {
             if (step.Clear)
             {
                 Write(Wipe);
                 decoder.Reset();
+                filter.Reset();
             }
             if (step.Warn)
             {
@@ -433,7 +707,7 @@ namespace WardAttach
                     int decoded = decoder.GetChars(chunk, offset, count, chars, 0, false);
                     if (decoded > 0)
                     {
-                        Write(new string(chars, 0, decoded));
+                        Write(filter.Feed(new string(chars, 0, decoded)));
                         drawn = true;
                     }
                     offset += count;
