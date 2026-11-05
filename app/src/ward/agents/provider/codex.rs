@@ -22,7 +22,7 @@
 //!   [`super::LastTurn::Asked`] never comes of a rollout.
 //! - Chat: the same events read as replies ([`parse_said`]) — `user_message` is the owner,
 //!   `agent_message` the agent, a `function_call` (also `custom_tool_call`, `local_shell_call`)
-//!   a line of its own; `error` is Ward's line.
+//!   a line of its own; `error`, and the `error` of `task_complete`, is Ward's line.
 
 use std::fs::File;
 use std::io::{Read as _, Seek as _, SeekFrom};
@@ -315,8 +315,16 @@ pub fn parse_said(entry: &Value) -> Vec<Said> {
         }
         Some("error") => one(Said::new(
             Voice::Ward,
-            format!("Ошибка агента: {}", text("message")),
+            format!("Ошибка агента: {}", readable_error(&text("message"))),
         )),
+        // Codex 0.147 and later write the error a turn ended on into its `task_complete`.
+        Some("task_complete") => match task_error(payload) {
+            Some(error) => one(Said::new(
+                Voice::Ward,
+                format!("Ошибка агента: {}", readable_error(error)),
+            )),
+            None => Vec::new(),
+        },
         _ => Vec::new(),
     }
 }

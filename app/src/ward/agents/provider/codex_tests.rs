@@ -415,3 +415,26 @@ fn an_error_of_the_api_reads_as_its_message() {
     assert_eq!(readable_error("  plain text  "), "plain text");
     assert_eq!(readable_error(""), "");
 }
+
+/// The error a turn ended on is Ward's line of the chat, in either shape Codex wrote it.
+#[test]
+fn the_error_of_a_turn_is_a_line_of_wards_in_the_chat() {
+    let said = |line: &str| parse_said(&serde_json::from_str(line).unwrap());
+    assert_eq!(
+        said(MODEL_REFUSED),
+        [Said::new(
+            Voice::Ward,
+            "Ошибка агента: The 'claude-sonnet-5-5' model is not supported when using Codex \
+             with a ChatGPT account. (model_not_found)"
+        )]
+    );
+    assert_eq!(
+        said(r#"{"type":"event_msg","payload":{"type":"error","message":"stream disconnected"}}"#),
+        [Said::new(Voice::Ward, "Ошибка агента: stream disconnected")]
+    );
+    // A turn that ended well says nothing of its own.
+    assert!(
+        said(r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"Готово"}}"#)
+            .is_empty()
+    );
+}
