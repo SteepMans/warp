@@ -13,11 +13,19 @@
 //! connects to the viewer socket, prints the raw output of the session's tab as it comes and
 //! sends the keys typed here as binary frames, like the viewer in the browser. The address with
 //! the ticket goes to it in an environment variable, not on the command line, and the ticket is
-//! good for one connection within a minute. Ctrl+] disconnects; the session goes on.
+//! good for one connection within a minute. Ctrl+] disconnects; the session goes on. What the
+//! output asks of the terminal of the session's machine is not for this one: queries (the
+//! answers would go to the session as keys), the marks of Warp's shell and agent integration,
+//! titles and keyboard modes are left out of what is printed.
 //!
 //! The viewer also sends the size of its tab, and the session's tab takes it, so the raw output
 //! fits this screen ([`super::stream`]); until it does, the viewer holds the output back. The
-//! tab itself is marked as remote control of that machine ([`super::remote_tab`]).
+//! hello of the stream tells it whether the Ward there takes the size and redraws; without one
+//! it is an older Ward, and the viewer says the screen may come out doubled. Where the stream
+//! is (connecting, waiting for the Ward of the session, live, that Ward gone and asked for
+//! again, over) goes to the title of the viewer's console, since the output of the session
+//! draws over anything printed in the tab. The tab itself is marked as remote control of that
+//! machine ([`super::remote_tab`]).
 
 use std::path::{Path, PathBuf};
 

@@ -173,11 +173,150 @@ fn the_viewer_holds_the_output_until_the_sizes_meet() {
     for part in [
         "public sealed class Screen",
         "HoldFor = TimeSpan.FromSeconds(3)",
+        "RedrawFor = TimeSpan.FromSeconds(5)",
+        "screen.Hello(",
         "screen.Size(",
         "screen.Output(",
+        "screen.Own(",
         "screen.Tick(",
         "screen.Reset(",
     ] {
         assert!(SCRIPT.contains(part), "{part}");
     }
+}
+
+/// The viewer reads in the hello the features the Ward of the session names, and asks the
+/// service for the stream again with the frame the service reads.
+#[test]
+fn the_viewer_reads_the_hello_of_the_stream() {
+    for feature in super::super::stream::FEATURES {
+        let read = format!("Frames.Has(frame, \"{feature}\")");
+        assert!(SCRIPT.contains(&read), "{read}");
+    }
+    assert!(SCRIPT.contains(r#"type == "hello""#));
+    assert!(SCRIPT.contains(r#""{\"type\":\"resume\"}""#));
+}
+
+/// The C# of the viewer, as `Add-Type` compiles it in the tab.
+#[cfg(windows)]
+fn viewer_source() -> &'static str {
+    let start = SCRIPT.find("$source = @'").expect("the viewer has its C#");
+    let body = &SCRIPT[start..];
+    let body = &body[body.find('\n').expect("the C# starts on a line of its own") + 1..];
+    let end = body.find("\n'@").expect("the C# ends");
+    body[..end].trim_end_matches('\r')
+}
+
+/// The checks of the viewer's C# (`attach_tests.cs`), compiled after it: it has the usings.
+#[cfg(windows)]
+const VIEWER_CHECKS: &str = include_str!("attach_tests.cs");
+
+/// Compiles the viewer with its checks under Windows PowerShell, as the tab compiles the
+/// viewer, and runs them.
+#[cfg(windows)]
+const CHECKS_DRIVER: &str = r#"param([string]$Source, [string]$Out)
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition ([IO.File]::ReadAllText($Source, [Text.Encoding]::UTF8)) -Language CSharp -IgnoreWarnings
+exit ([WardAttachTests.Suite]::Run($Out))
+"#;
+
+/// The lines of the report of the viewer's checks: `ok`, `FAIL` with the reason, and whatever
+/// else the checks write.
+#[cfg(windows)]
+fn run_viewer_checks() -> Vec<String> {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("viewer.cs");
+    let driver = dir.path().join("run.ps1");
+    let report = dir.path().join("report.txt");
+    std::fs::write(&source, format!("{}\n{VIEWER_CHECKS}", viewer_source())).unwrap();
+    std::fs::write(&driver, CHECKS_DRIVER).unwrap();
+    let output = std::process::Command::new("powershell")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(&driver)
+        .arg("-Source")
+        .arg(&source)
+        .arg("-Out")
+        .arg(&report)
+        .output()
+        .expect("Windows PowerShell runs");
+    let lines = std::fs::read_to_string(&report).unwrap_or_default();
+    assert!(
+        output.status.success(),
+        "the checks of the viewer failed:\n{lines}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    lines.lines().map(str::to_owned).collect()
+}
+
+/// The viewer itself, compiled as the tab compiles it: the filter of the output, the screen
+/// and the frames of the service (see `attach_tests.cs`).
+#[cfg(windows)]
+#[test]
+fn the_viewer_passes_its_checks() {
+    let report = run_viewer_checks();
+    let failed: Vec<&String> = report
+        .iter()
+        .filter(|line| line.starts_with("FAIL"))
+        .collect();
+    assert!(failed.is_empty(), "{failed:#?}");
+    let passed = report
+        .iter()
+        .filter(|line| line.starts_with("ok\t"))
+        .count();
+    assert!(passed >= 19, "{report:#?}");
+}
+
+/// The header of the tab reads the states of the stream off the title the viewer gives its
+/// console: every one of them, the warnings as warnings.
+#[cfg(windows)]
+#[test]
+fn the_header_reads_every_state_the_viewer_titles_its_console_with() {
+    use super::super::remote_tab::viewer_status;
+
+    let report = run_viewer_checks();
+    let titles: Vec<(&str, &str)> = report
+        .iter()
+        .filter_map(|line| {
+            let mut parts = line.splitn(3, '\t');
+            (parts.next() == Some("title")).then(|| {
+                (
+                    parts.next().unwrap_or_default(),
+                    parts.next().unwrap_or_default(),
+                )
+            })
+        })
+        .collect();
+    assert_eq!(titles.len(), 6, "{report:#?}");
+    for (link, title) in titles {
+        let status = viewer_status(title).unwrap_or_else(|| panic!("{link}: {title}"));
+        assert_eq!(
+            status.warning,
+            matches!(link, "Legacy" | "Reconnecting"),
+            "{link}: {title}"
+        );
+    }
+}
+
+/// The prefixes of the titles are the ones the header reads.
+#[test]
+fn the_viewer_titles_its_console_as_the_header_reads_it() {
+    use super::super::remote_tab::{STATUS_PREFIX, WARNING_PREFIX};
+
+    assert!(SCRIPT.contains(&format!(r#"Prefix = "{STATUS_PREFIX}""#)));
+    assert!(SCRIPT.contains(&format!(r#"WarningPrefix = "{WARNING_PREFIX}""#)));
+    assert!(SCRIPT.contains("Console.Title = text"));
+}
+
+/// The output of the session goes through the filter before it is written here.
+#[test]
+fn the_viewer_writes_the_output_through_its_filter() {
+    assert!(SCRIPT.contains("public sealed class Filter"));
+    assert!(SCRIPT.contains("Write(filter.Feed("));
 }

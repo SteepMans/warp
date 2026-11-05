@@ -8,8 +8,9 @@
 //! What goes over the socket:
 //! - Ward to the viewers: binary frames are the raw output of the tab, exactly what the
 //!   terminal itself was given, so a terminal emulator in the browser draws the same screen;
-//!   text frames are JSON: `{"type":"size","cols":…,"rows":…}` when the size of the tab is known
-//!   or changes, `{"type":"ping"}` to keep proxies from closing a quiet socket.
+//!   text frames are JSON: first `{"type":"hello","version":…,"features":[…]}`
+//!   ([`hello_message`]), then `{"type":"size","cols":…,"rows":…}` when the size of the tab is
+//!   known or changes, `{"type":"ping"}` to keep proxies from closing a quiet socket.
 //! - The viewers to Ward: binary frames are keystrokes, written into the tab as if typed there.
 //!   Text frames are JSON ([`ViewerFrame`]); any other text is ignored.
 //!
@@ -27,6 +28,12 @@
 //! the stream, gives the tab back the size of its pane ([`Sizing`]). After the change the agent
 //! and the console redraw the screen at the new size, and the new size goes to the viewers at
 //! once.
+//!
+//! A viewer is given the whole screen even when the tab has its size already and the recent
+//! output is empty or starts in the middle of the screen: the tab then takes a row less for a
+//! moment and the size of the viewer after ([`Resize::steps`]), so the console and the agent
+//! draw again. The hello tells a viewer that this Ward takes its size (`size`) and redraws
+//! (`redraw`); a viewer that gets no hello is streamed by an older Ward and says so.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -151,6 +158,15 @@ pub fn ping_message() -> String {
     serde_json::json!({ "type": "ping" }).to_string()
 }
 
+/// What the tab does for a viewer, as the hello says: it takes the size of the viewer's screen
+/// (`size`) and draws the screen again even at a size it has already (`redraw`).
+pub const FEATURES: [&str; 2] = ["size", "redraw"];
+
+/// The first frame of a stream: which Ward streams and what it does for a viewer.
+pub fn hello_message(version: &str) -> String {
+    serde_json::json!({ "type": "hello", "version": version, "features": FEATURES }).to_string()
+}
+
 /// The biggest screen a viewer may give the tab; a bigger one is not a terminal.
 pub const MAX_COLS: usize = 1000;
 pub const MAX_ROWS: usize = 500;
@@ -198,12 +214,29 @@ pub enum Resize {
     Back,
 }
 
+/// How long the tab keeps the other size of a redraw, see [`Resize::steps`].
+pub const REDRAW_PAUSE: std::time::Duration = std::time::Duration::from_millis(300);
+
 impl Resize {
     /// Columns and rows to give the tab; `None` for the size of its pane.
     pub fn size(self) -> Option<(usize, usize)> {
         match self {
             Resize::To { cols, rows } => Some((cols, rows)),
             Resize::Back => None,
+        }
+    }
+
+    /// The resizes of the PTY that carry this one out while the tab is `current`, in order and
+    /// [`REDRAW_PAUSE`] apart. A size the tab has already changes nothing in the PTY, so neither
+    /// the console nor the agent would draw the screen again for the viewer who asked: the tab
+    /// takes a row less (a row more at a single row) first.
+    pub fn steps(self, current: Option<(usize, usize)>) -> Vec<Resize> {
+        match self {
+            Resize::To { cols, rows } if current == Some((cols, rows)) => {
+                let other = if rows > 1 { rows - 1 } else { rows + 1 };
+                vec![Resize::To { cols, rows: other }, self]
+            }
+            _ => vec![self],
         }
     }
 }

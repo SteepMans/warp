@@ -8,7 +8,8 @@
 //!
 //! On the machine of the viewer, the tab of a session elsewhere (`crate::ward::agents::remote_tab`)
 //! hides the command that runs the viewer and the input box while the viewer runs, and its pane
-//! header says it is remote control and of which machine.
+//! header says it is remote control, of which machine, and where the stream is (the viewer
+//! titles its console with it).
 
 #[cfg(not(target_arch = "wasm32"))]
 use session_sharing_protocol::common::WindowSize;
@@ -68,10 +69,19 @@ impl TerminalView {
 
     /// The tab was marked as remote, or its viewer started or ended: the header follows.
     pub fn ward_remote_tab_changed(&mut self, ctx: &mut ViewContext<Self>) {
+        self.refresh_pane_header(ctx);
         self.pane_configuration.update(ctx, |config, ctx| {
             config.notify_header_content_changed(ctx);
         });
         ctx.notify();
+    }
+
+    /// Whether the header leaves out the indicator of the active pane. A remote tab shows its
+    /// header even as the only pane of its tab, where Warp shows none: there the indicator
+    /// would only put a triangle of the accent color in the corner of the terminal. In a split
+    /// it marks the active pane, as for any other.
+    pub(super) fn ward_remote_hides_active_pane_indicator(&self, app: &AppContext) -> bool {
+        remote_tab::is_remote(self.view_id) && !self.split_pane_state(app).is_in_split_pane()
     }
 
     /// Whether the input box of this terminal is hidden for a remote tab: until its viewer is
@@ -116,7 +126,8 @@ impl TerminalView {
     }
 
     /// The title of the pane header of a remote tab: the remote icon, the machine and the task,
-    /// and how to disconnect. `is_dragging` keeps every child rigid while the pane is dragged.
+    /// where the stream is while the viewer runs (a warning in its own color), and how to
+    /// disconnect. `is_dragging` keeps every child rigid while the pane is dragged.
     pub(super) fn ward_render_remote_header_title(
         &self,
         is_dragging: bool,
@@ -153,6 +164,31 @@ impl TerminalView {
             row.add_child(title);
         } else {
             row.add_child(Shrinkable::new(1., title).finish());
+        }
+        let status = if phase == Phase::Live {
+            remote_tab::viewer_status(&self.terminal_title)
+        } else {
+            None
+        };
+        if let Some(status) = status {
+            let color = if status.warning {
+                theme.ui_warning_color()
+            } else {
+                text_color
+            };
+            let status = Container::new(
+                Text::new_inline(status.text, font_family, font_size)
+                    .with_color(color)
+                    .with_clip(ClipConfig::ellipsis())
+                    .finish(),
+            )
+            .with_margin_left(12.)
+            .finish();
+            if is_dragging {
+                row.add_child(status);
+            } else {
+                row.add_child(Shrinkable::new(1., status).finish());
+            }
         }
         if let Some(hint) = RemoteTab::hint(phase) {
             row.add_child(

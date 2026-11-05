@@ -109,7 +109,8 @@ impl TerminalView {
     }
 
     pub fn refresh_pane_header(&mut self, ctx: &mut ViewContext<Self>) {
-        let is_active_session = self.is_active_session(ctx);
+        let is_active_session =
+            self.is_active_session(ctx) && !self.ward_remote_hides_active_pane_indicator(ctx);
         self.pane_configuration
             .update(ctx, move |pane_config, ctx| {
                 pane_config.set_show_active_pane_indicator(is_active_session, ctx);
