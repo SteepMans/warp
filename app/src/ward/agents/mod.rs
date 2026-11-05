@@ -489,10 +489,10 @@ async fn run_stream(job: StreamJob) {
     streams.lock().remove(&pane);
 }
 
-/// Connects to the service and streams the tab: its size, the recent output, then every new
-/// read; the keys of the viewers go into the tab, and the size a viewer gives it goes to its
-/// PTY ([`stream::Sizing`]). Over when the service closes the socket, the socket breaks or the
-/// tab is gone.
+/// Connects to the service and streams the tab: the hello, its size, the recent output, then
+/// every new read; the keys of the viewers go into the tab, and the size a viewer gives it goes
+/// to its PTY ([`stream::Sizing`]). Over when the service closes the socket, the socket breaks
+/// or the tab is gone.
 async fn stream_tab(
     job: StreamJob,
     sizing: Arc<parking_lot::Mutex<stream::Sizing>>,
@@ -515,6 +515,11 @@ async fn stream_tab(
     )
     .await?;
     let (mut sink, mut incoming) = socket.split().await;
+    // The viewers learn first which Ward this is: a viewer that gets no hello takes the tab for
+    // an older Ward's, which may not follow its size.
+    let version = ChannelState::app_version().unwrap_or("unknown");
+    sink.send(websocket::Message::new_text(stream::hello_message(version)))
+        .await?;
     let size = pane_size(&spawner, &pane).await;
     if let Some((cols, rows)) = size {
         sink.send(websocket::Message::new_text(stream::size_message(

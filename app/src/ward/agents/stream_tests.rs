@@ -70,6 +70,24 @@ fn control_messages_are_json() {
     assert_eq!(ping["type"], "ping");
 }
 
+/// The viewer in Ward on another machine reads the hello to know that the tab takes its size.
+#[test]
+fn the_stream_starts_with_a_hello_that_names_what_the_tab_does() {
+    let hello: serde_json::Value =
+        serde_json::from_str(&hello_message("v0.2026.11.05.09.00")).unwrap();
+    assert_eq!(hello["type"], "hello");
+    assert_eq!(hello["version"], "v0.2026.11.05.09.00");
+    let features: Vec<&str> = hello["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|feature| feature.as_str().unwrap())
+        .collect();
+    assert!(features.contains(&"size"), "{features:?}");
+    // A viewer does not take the hello for a frame of its own.
+    assert_eq!(parse_viewer_frame(&hello_message("v1")), None);
+}
+
 #[test]
 fn a_viewer_gives_its_size_in_a_text_frame() {
     assert_eq!(

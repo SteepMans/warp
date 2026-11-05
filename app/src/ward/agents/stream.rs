@@ -8,8 +8,9 @@
 //! What goes over the socket:
 //! - Ward to the viewers: binary frames are the raw output of the tab, exactly what the
 //!   terminal itself was given, so a terminal emulator in the browser draws the same screen;
-//!   text frames are JSON: `{"type":"size","cols":…,"rows":…}` when the size of the tab is known
-//!   or changes, `{"type":"ping"}` to keep proxies from closing a quiet socket.
+//!   text frames are JSON: first `{"type":"hello","version":…,"features":[…]}`
+//!   ([`hello_message`]), then `{"type":"size","cols":…,"rows":…}` when the size of the tab is
+//!   known or changes, `{"type":"ping"}` to keep proxies from closing a quiet socket.
 //! - The viewers to Ward: binary frames are keystrokes, written into the tab as if typed there.
 //!   Text frames are JSON ([`ViewerFrame`]); any other text is ignored.
 //!
@@ -26,7 +27,8 @@
 //! the service passes on only the latest). `{"type":"release"}` from the service, or the end of
 //! the stream, gives the tab back the size of its pane ([`Sizing`]). After the change the agent
 //! and the console redraw the screen at the new size, and the new size goes to the viewers at
-//! once.
+//! once. The hello tells a viewer that this Ward takes its size (`size`); a viewer that gets no
+//! hello is streamed by an older Ward and says so.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -149,6 +151,14 @@ pub fn size_message(cols: usize, rows: usize) -> String {
 
 pub fn ping_message() -> String {
     serde_json::json!({ "type": "ping" }).to_string()
+}
+
+/// What the tab does for a viewer, as the hello says: it takes the size of the viewer's screen.
+pub const FEATURES: [&str; 1] = ["size"];
+
+/// The first frame of a stream: which Ward streams and what it does for a viewer.
+pub fn hello_message(version: &str) -> String {
+    serde_json::json!({ "type": "hello", "version": version, "features": FEATURES }).to_string()
 }
 
 /// The biggest screen a viewer may give the tab; a bigger one is not a terminal.
