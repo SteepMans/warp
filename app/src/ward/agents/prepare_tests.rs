@@ -96,6 +96,7 @@ fn the_orchestrator_prompt_carries_the_card_the_playbook_and_the_plan() {
         vault: &vault,
         plan_path: &plan_path,
         max_duration_min: 30,
+        provider: "claude",
     });
 
     assert!(prompt.contains("steep-pc"), "{prompt}");
@@ -166,6 +167,7 @@ fn what_the_assignment_fixed_is_in_the_prompt_as_given() {
         vault: &vault,
         plan_path: &PathBuf::from("/tmp/plan.json"),
         max_duration_min: 15,
+        provider: "claude",
     });
     assert!(prompt.contains("- репозиторий: https://github.com/SteepMans/warp.git"));
     assert!(prompt.contains("- базовая ветка: master"));
@@ -188,7 +190,55 @@ fn what_the_assignment_fixed_is_in_the_prompt_as_given() {
     assert!(!prompt.contains("\"prompt\": \"Готовый промпт от менеджера\""));
     assert!(!prompt.contains("\"provider\": \"auto\""), "{prompt}");
     assert!(prompt.contains("\"provider\": \"claude\""));
+    assert!(prompt.contains("\"model\": \"claude-opus-5-5\""));
     assert!(prompt.contains("15 минут"));
+}
+
+/// The orchestrator is told which agent runs the executor, so the model of its plan is one of
+/// that agent's: Codex refuses `claude-*` and does nothing, and the rule of the template knows
+/// Claude models only.
+#[test]
+fn the_orchestrator_knows_the_agent_of_the_executor() {
+    let vault = vault();
+    let plan_path = PathBuf::from("/tmp/plan.json");
+    let plain = assignment();
+    // A model of Codex the assignment fixed.
+    let given = Assignment {
+        model: Some("gpt-5.5".to_owned()),
+        ..assignment()
+    };
+    let context = |assignment, provider| PromptContext {
+        assignment,
+        worker_name: "DESKTOP-NU1O6F3",
+        vault: &vault,
+        plan_path: &plan_path,
+        max_duration_min: 30,
+        provider,
+    };
+
+    let codex = orchestrator_prompt(&context(&plain, "codex"));
+    assert!(codex.contains("## Исполнитель"), "{codex}");
+    assert!(codex.contains("агент `codex`"), "{codex}");
+    assert!(
+        codex.contains("модель `claude-*` Codex не запустит"),
+        "{codex}"
+    );
+    assert!(codex.contains("\"provider\": \"codex\""), "{codex}");
+    assert!(codex.contains("\"model\": null"), "{codex}");
+    assert!(!codex.contains("claude-sonnet-5-5"), "{codex}");
+    assert!(!codex.contains("\"provider\": \"claude\""), "{codex}");
+    // A model of Codex the assignment fixed is repeated as it is.
+    let codex_given = orchestrator_prompt(&context(&given, "codex"));
+    assert!(
+        codex_given.contains("\"model\": \"gpt-5.5\""),
+        "{codex_given}"
+    );
+
+    let claude = orchestrator_prompt(&context(&plain, "claude"));
+    assert!(claude.contains("агент `claude`"), "{claude}");
+    assert!(claude.contains("модель Claude (`claude-*`) по правилу шаблона"));
+    assert!(claude.contains("\"provider\": \"claude\""));
+    assert!(claude.contains("\"model\": \"claude-sonnet-5-5\""));
 }
 
 #[test]
@@ -208,6 +258,7 @@ fn the_prompt_follows_the_vault_paths_of_the_profile() {
         vault: &vault,
         plan_path: &PathBuf::from("D:/work/.agents/s/plan.json"),
         max_duration_min: 30,
+        provider: "claude",
     });
     assert!(prompt.contains("D:/vault/playbooks/manager.md"));
     assert!(prompt.contains("D:/vault/templates/prompt.md"));

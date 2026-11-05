@@ -86,6 +86,35 @@ fn command_depends_on_provider_and_model() {
     );
 }
 
+/// A model reaches only the agent of its family: Codex refuses `claude-*` and does nothing, and
+/// Claude Code knows no OpenAI model. Either agent then starts with its default.
+#[test]
+fn a_model_of_the_other_agent_is_not_passed_to_it() {
+    assert_eq!(model_family("claude-sonnet-5-5"), "claude");
+    assert_eq!(model_family(" Claude-Opus-5-5 "), "claude");
+    assert_eq!(model_family("gpt-5.5"), "codex");
+
+    let claude = by_id("claude").unwrap();
+    let codex = by_id("codex").unwrap();
+    assert_eq!(launch_model(codex, Some("claude-sonnet-5-5")), None);
+    assert_eq!(launch_model(claude, Some("gpt-5.5")), None);
+    assert_eq!(
+        launch_model(claude, Some(" claude-opus-5-5 ")),
+        Some("claude-opus-5-5")
+    );
+    assert_eq!(launch_model(codex, Some("gpt-5.5")), Some("gpt-5.5"));
+    assert_eq!(launch_model(codex, Some("  ")), None);
+    assert_eq!(launch_model(claude, None), None);
+
+    // Codex given a Claude model of the plan starts without `-m`.
+    let command = codex.command(
+        "4953 x",
+        launch_model(codex, Some("claude-sonnet-5-5")),
+        None,
+    );
+    assert_eq!(command.args, ["--dangerously-bypass-approvals-and-sandbox"]);
+}
+
 #[test]
 fn same_path_ignores_slashes_and_case_on_windows() {
     assert!(same_path("/a/b/", Path::new("/a/b")));

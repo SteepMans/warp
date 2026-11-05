@@ -9,16 +9,20 @@
 //!   `plan_type`) in the newest rollouts. They are as fresh as the last Codex turn on this
 //!   machine, which may be weeks ago: a window that has started over since is reported empty
 //!   ([`usage_reports`]).
-//! - Limit refusal: after the last turn started, an `error` event about the usage limit or a
-//!   `token_count` with `rate_limit_reached_type`.
+//! - Limit refusal: after the last turn started, an `error` event about the usage limit, the
+//!   `error` of `task_complete` about it (Codex 0.147 and later) or a `token_count` with
+//!   `rate_limit_reached_type`.
 //! - Last turn: the newest event or item of the rollout that says something about it —
 //!   `task_complete` and `agent_message` end a turn, a `function_call` waits for its output,
-//!   `task_started` and `user_message` are a turn still going. Codex runs with
+//!   `task_started` and `user_message` are a turn still going. A `task_complete` with an
+//!   `error` (Codex 0.147 and later), or an `error` event right before a `task_complete`
+//!   without the agent's last message (earlier ones), is a turn that ended on an error of the
+//!   API: [`super::LastTurn::Failed`], not an answer. Codex runs with
 //!   `--dangerously-bypass-approvals-and-sandbox`, so it asks the owner nothing and
 //!   [`super::LastTurn::Asked`] never comes of a rollout.
 //! - Chat: the same events read as replies ([`parse_said`]) — `user_message` is the owner,
 //!   `agent_message` the agent, a `function_call` (also `custom_tool_call`, `local_shell_call`)
-//!   a line of its own; `error` is Ward's line.
+//!   a line of its own; `error`, and the `error` of `task_complete`, is Ward's line.
 
 use std::fs::File;
 use std::io::{Read as _, Seek as _, SeekFrom};
@@ -124,6 +128,11 @@ fn event_type(value: &Value) -> Option<&str> {
         .flatten()
 }
 
+/// Whether the message of an error is Codex's refusal for the usage limit.
+fn is_usage_limit(message: &str) -> bool {
+    message.to_lowercase().contains("usage limit")
+}
+
 /// Whether the last turn in rollout text ended on the usage limit.
 pub fn parse_limit_hit(tail: &str) -> Option<LimitHit> {
     let mut latest_limits: Option<RateLimits> = None;
@@ -138,9 +147,19 @@ pub fn parse_limit_hit(tail: &str) -> Option<LimitHit> {
                 let message = value
                     .pointer("/payload/message")
                     .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_lowercase();
-                if message.contains("usage limit") {
+                    .unwrap_or_default();
+                if is_usage_limit(message) {
+                    hit = true;
+                }
+            }
+            Some("task_complete") => {
+                let payload = value.get("payload").unwrap_or(&Value::Null);
+                let info = payload
+                    .pointer("/error/codex_error_info")
+                    .and_then(Value::as_str);
+                if task_error(payload).is_some_and(is_usage_limit)
+                    || info == Some("usage_limit_exceeded")
+                {
                     hit = true;
                 }
             }
@@ -170,13 +189,69 @@ pub fn parse_limit_hit(tail: &str) -> Option<LimitHit> {
     Some(LimitHit { resets_at })
 }
 
+/// The message of an error of the API as the owner reads it. Codex keeps the body of the
+/// answer as it came, `{"type":"error","status":400,"error":{"message":…,"code":…}}`: the
+/// message and the code are taken out of it, any other text stays as it is.
+pub fn readable_error(message: &str) -> String {
+    let message = message.trim();
+    let Ok(body) = serde_json::from_str::<Value>(message) else {
+        return message.to_owned();
+    };
+    let error = body
+        .get("error")
+        .filter(|error| error.is_object())
+        .unwrap_or(&body);
+    let Some(text) = non_empty_str(error.get("message")) else {
+        return message.to_owned();
+    };
+    match non_empty_str(error.get("code")) {
+        Some(code) => format!("{text} ({code})"),
+        None => text,
+    }
+}
+
+/// The raw message of the error `task_complete` carries when its turn ended on one; Codex
+/// 0.147 and later put it there instead of an `error` event of its own.
+fn task_error(payload: &Value) -> Option<&str> {
+    match payload.get("error")? {
+        Value::Null => None,
+        Value::String(text) => Some(text.as_str()),
+        error => Some(
+            error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        ),
+    }
+}
+
 /// What the last turn of the rollout was; see the module header for the events it reads.
 pub fn parse_last_turn(tail: &str) -> LastTurn {
+    // A `task_complete` without the agent's last message is looked past: an `error` event
+    // right before it is the error the turn ended on (Codex before 0.147).
+    let mut completed = false;
     for line in tail.lines().rev() {
         let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
         };
-        match value.pointer("/payload/type").and_then(Value::as_str) {
+        let payload = value.get("payload").unwrap_or(&Value::Null);
+        match payload.get("type").and_then(Value::as_str) {
+            Some("task_complete") if !completed => {
+                if let Some(error) = task_error(payload) {
+                    return LastTurn::Failed(readable_error(error));
+                }
+                if non_empty_str(payload.get("last_agent_message")).is_some() {
+                    return LastTurn::Answered;
+                }
+                completed = true;
+            }
+            Some("error") if completed => {
+                let message = payload
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                return LastTurn::Failed(readable_error(message));
+            }
             Some("task_complete" | "agent_message") => return LastTurn::Answered,
             Some(
                 "task_started"
@@ -185,12 +260,23 @@ pub fn parse_last_turn(tail: &str) -> LastTurn {
                 | "function_call_output"
                 | "custom_tool_call"
                 | "local_shell_call",
-            ) => return LastTurn::Working,
-            // Reasoning, token counts and errors say nothing about the end of the turn.
+            ) => {
+                return if completed {
+                    LastTurn::Answered
+                } else {
+                    LastTurn::Working
+                };
+            }
+            // Reasoning and token counts say nothing about the end of the turn, and neither does
+            // an error the turn went on after.
             _ => continue,
         }
     }
-    LastTurn::Working
+    if completed {
+        LastTurn::Answered
+    } else {
+        LastTurn::Working
+    }
 }
 
 /// What one event of a rollout says in the chat: the owner's message, the agent's message, the
@@ -229,8 +315,16 @@ pub fn parse_said(entry: &Value) -> Vec<Said> {
         }
         Some("error") => one(Said::new(
             Voice::Ward,
-            format!("Ошибка агента: {}", text("message")),
+            format!("Ошибка агента: {}", readable_error(&text("message"))),
         )),
+        // Codex 0.147 and later write the error a turn ended on into its `task_complete`.
+        Some("task_complete") => match task_error(payload) {
+            Some(error) => one(Said::new(
+                Voice::Ward,
+                format!("Ошибка агента: {}", readable_error(error)),
+            )),
+            None => Vec::new(),
+        },
         _ => Vec::new(),
     }
 }

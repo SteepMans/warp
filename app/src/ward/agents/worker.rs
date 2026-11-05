@@ -353,6 +353,9 @@ const MESSAGE_NOT_STARTED: &str =
 const MESSAGE_USAGE_LIMIT: &str = "Агент упёрся в лимит подписки";
 const MESSAGE_IDLE_ANSWER: &str = "Работа готова: агент выдал финальный ответ и ждёт вас. Сессия открыта: можно написать в неё или остановить";
 const MESSAGE_OWNER_QUESTION: &str = "Агент задал вопрос и ждёт ответа владельца";
+const MESSAGE_AGENT_ERROR: &str = "Агент закончил ход ошибкой API вместо ответа";
+const MESSAGE_AGENT_ERROR_WAITS: &str = "Агент закончил ход ошибкой API";
+const MESSAGE_AGENT_ERROR_NEXT: &str = "Напишите в сессию, чтобы продолжить, или остановите";
 const MESSAGE_PREPARING: &str = "Подготовка: оркестратор собирает досье и промпт";
 const MESSAGE_PREPARE_TOO_LONG: &str = "Подготовка не уложилась в prepareMaxDurationMin";
 const MESSAGE_PREPARE_NO_PLAN: &str = "Оркестратор завершился, а plan.json не оставил";
@@ -375,6 +378,9 @@ const MESSAGE_AGENT_GONE: &str =
 const MESSAGE_PREPARE_AGENT_GONE: &str =
     "Ward перезапустился, процесс оркестратора не выжил, плана он не оставил";
 const MESSAGE_NO_TAB: &str = "Сообщение не доставлено: открытой вкладки сессии не нашлось";
+
+/// How much of the error of the API the message of a failed session keeps.
+const MAX_AGENT_ERROR_CHARS: usize = 500;
 
 /// Finished sessions the panel keeps.
 const MAX_FINISHED_SESSIONS: usize = 20;
@@ -1632,6 +1638,7 @@ impl Worker {
             vault,
             plan_path: &plan_path,
             max_duration_min: limit_min,
+            provider: session.provider.id(),
         });
         std::fs::write(dir.join(launch::PROMPT_FILE), prompt).map_err(|err| err.to_string())?;
         let _ = std::fs::remove_file(dir.join(launch::EXIT_CODE_FILE));
@@ -1640,11 +1647,7 @@ impl Worker {
         // The orchestrator may be another agent than the executor, and its model comes from
         // the profile: judgement work, not the machine's default.
         let orchestrator = provider::by_id(vault.provider.trim()).unwrap_or(session.provider);
-        let model = vault
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|model| !model.is_empty());
+        let model = provider::launch_model(orchestrator, vault.model.as_deref());
         let name = prepare::session_name(&session.assignment.task_ref, &session.assignment.title);
         let command = orchestrator.command(&name, model, None);
         let script = launch::runner_script(kind, &dir, &vault_dir, &command, true);
@@ -2317,12 +2320,8 @@ impl Worker {
         let _ = std::fs::remove_file(agents.join(launch::EXIT_CODE_FILE));
         let _ = std::fs::remove_file(agents.join(launch::RUNNER_PID_FILE));
         let name = launch::session_name(&session.assignment.task_ref, &session.assignment.title);
-        let model = session
-            .assignment
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|model| !model.is_empty());
+        // The model may come from the plan, and the orchestrator may have meant another agent.
+        let model = provider::launch_model(session.provider, session.assignment.model.as_deref());
         let command = session.provider.command(&name, model, resume);
         let script = launch::runner_script(kind, &agents, worktree, &command, resume.is_none());
         let runner = agents.join(kind.file_name());
@@ -2431,16 +2430,23 @@ impl Worker {
             return;
         }
         // The orchestrator ended its turn without a plan and is still there: its last words are
-        // questions for the owner, written as text or with the question tool alike.
+        // questions for the owner, written as text or with the question tool alike. A turn that
+        // ended on an error of the API asks nothing: the preparation failed.
         if self.gone_quiet(session) {
             self.read_journal(session);
-            if self.gone_quiet(session)
-                && session.provider.last_turn(&session.journal.tail()) != LastTurn::Working
-                && session.status != SessionStatus::Blocked
-            {
-                self.ask_owner(session);
-                if let Some(prepare) = session.prepare.as_mut() {
-                    prepare.asked_at = Some(Instant::now());
+            if self.gone_quiet(session) && session.status != SessionStatus::Blocked {
+                match session.provider.last_turn(&session.journal.tail()) {
+                    LastTurn::Working => {}
+                    LastTurn::Failed(error) => {
+                        self.fail_preparation(session, &agent_error_message(&error));
+                        return;
+                    }
+                    LastTurn::Answered | LastTurn::Asked => {
+                        self.ask_owner(session);
+                        if let Some(prepare) = session.prepare.as_mut() {
+                            prepare.asked_at = Some(Instant::now());
+                        }
+                    }
                 }
             }
         }
@@ -2499,7 +2505,8 @@ impl Worker {
         }
         // The agent of the plan is not acted on: the service picks it by the subscription
         // limits of the machine, and the choice was made when the assignment was taken. Only
-        // the model of the plan is taken, in `plan::apply`.
+        // the model of the plan is taken, in `plan::apply`, and it reaches the agent only when
+        // it is a model of that agent ([`provider::launch_model`]).
         let repo = match launch::parse_repo(&session.assignment.repo) {
             Some(repo) => repo,
             None => {
@@ -2862,12 +2869,7 @@ impl Worker {
         let _ = std::fs::remove_file(files.join(launch::EXIT_CODE_FILE));
         let _ = std::fs::remove_file(files.join(launch::RUNNER_PID_FILE));
         let name = launch::session_name(&session.assignment.task_ref, &session.assignment.title);
-        let model = session
-            .assignment
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|model| !model.is_empty());
+        let model = provider::launch_model(session.provider, session.assignment.model.as_deref());
         let command = session.provider.command(&name, model, Some(&agent));
         let script = launch::runner_script(kind, &files, &cwd, &command, false);
         let runner = files.join(kind.file_name());
@@ -2977,6 +2979,34 @@ impl Worker {
         session.set_status(request);
     }
 
+    /// The agent ended its turn on an error of its API and waits at an empty prompt: there is
+    /// no answer to review, but the error may well pass (a dropped stream, an overloaded or
+    /// failing API), and ending the agent would lose the context of the whole session. So it
+    /// waits for the owner the way a question does: `blocked` with the error in its message,
+    /// the agent and its tab left as they are, a `message` command reaching the tab, and the
+    /// next lines of the transcript putting it back to `running` (see [`Self::read_journal`]).
+    /// A refusal for the subscription limit is left to [`Self::read_journal`] too, which has
+    /// made the session `blocked` until the reset.
+    fn ended_on_error(&self, session: &mut Session, error: &str) {
+        if session.status == SessionStatus::Blocked
+            || session
+                .provider
+                .limit_hit(&session.journal.tail())
+                .is_some()
+        {
+            return;
+        }
+        log::warn!(
+            "Ward agents: session {} ended its turn on an error of the API and waits for the \
+             owner: {error}",
+            session.assignment.session_id
+        );
+        let mut request = session.status_request(SessionStatus::Blocked);
+        request.reason = Some(REASON_OWNER_QUESTION.to_owned());
+        request.message = Some(agent_error_waits_message(error));
+        session.set_status(request);
+    }
+
     /// A launched session: finds the agent session, ships the transcript, handles stop and
     /// message commands and notices the exit — the exit code, the runner that went, a stop that
     /// ran out of grace, or a transcript that stood still after the agent's last turn.
@@ -3083,6 +3113,7 @@ impl Worker {
                 match turn {
                     LastTurn::Answered => self.answered(session),
                     LastTurn::Asked => self.ask_owner(session),
+                    LastTurn::Failed(error) => self.ended_on_error(session, &error),
                     LastTurn::Working => {}
                 }
             }
@@ -3501,6 +3532,29 @@ impl Worker {
 fn finish(session: &mut Session, request: StatusRequest) {
     session.set_status(request);
     session.phase = Phase::Done;
+}
+
+/// The message of a preparation whose orchestrator ended its turn on an error of the API, with
+/// the error.
+fn agent_error_message(error: &str) -> String {
+    let error = provider::one_line(error, MAX_AGENT_ERROR_CHARS);
+    if error.is_empty() {
+        MESSAGE_AGENT_ERROR.to_owned()
+    } else {
+        format!("{MESSAGE_AGENT_ERROR}: {error}")
+    }
+}
+
+/// The message of an executor that ended its turn on an error of the API and waits for the
+/// owner, with the error and what the owner can do about it.
+fn agent_error_waits_message(error: &str) -> String {
+    let error = provider::one_line(error, MAX_AGENT_ERROR_CHARS);
+    let error = error.trim_end_matches('.');
+    if error.is_empty() {
+        format!("{MESSAGE_AGENT_ERROR_WAITS}. {MESSAGE_AGENT_ERROR_NEXT}")
+    } else {
+        format!("{MESSAGE_AGENT_ERROR_WAITS}: {error}. {MESSAGE_AGENT_ERROR_NEXT}")
+    }
 }
 
 /// Whether the service takes this status from a worker (`FROM_WORKER` of the contract): a

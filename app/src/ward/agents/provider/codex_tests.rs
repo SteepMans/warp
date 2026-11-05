@@ -197,6 +197,30 @@ fn limit_hit_from_error_event_or_reached_type() {
     );
 }
 
+/// Codex 0.147 and later end a refused turn with the error on `task_complete`, the refusal for
+/// the limit included; any other error there is no limit.
+#[test]
+fn limit_hit_from_the_error_of_task_complete() {
+    let started = r#"{"type":"event_msg","payload":{"type":"task_started"}}"#;
+    let full = TOKEN_COUNT.replace("13.0", "100.0");
+    let by_message = r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":null,"error":{"message":"You've hit your usage limit. Try again at 5:00 PM.","codex_error_info":"other"}}}"#;
+    assert_eq!(
+        parse_limit_hit(&format!("{started}\n{full}\n{by_message}\n")),
+        Some(LimitHit {
+            resets_at: Utc.timestamp_opt(1787550558, 0).single()
+        })
+    );
+    let by_kind = r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":null,"error":{"message":"","codex_error_info":"usage_limit_exceeded"}}}"#;
+    assert_eq!(
+        parse_limit_hit(&format!("{started}\n{by_kind}\n")),
+        Some(LimitHit { resets_at: None })
+    );
+    assert_eq!(
+        parse_limit_hit(&format!("{started}\n{MODEL_REFUSED}\n")),
+        None
+    );
+}
+
 #[test]
 fn account_skips_token_values() {
     let chatgpt = r#"{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{"id_token":"x","access_token":"y","refresh_token":"z","account_id":"a"},"last_refresh":"2026-10-01T00:00:00Z"}"#;
@@ -317,4 +341,100 @@ fn the_last_turn_of_a_rollout_ends_with_the_task() {
         LastTurn::Working
     );
     assert_eq!(parse_last_turn(""), LastTurn::Working);
+}
+
+/// The `task_complete` of a turn Codex CLI 0.148 could not even start: the model of the plan
+/// was a Claude one, and the API's answer is kept in the error as it came.
+const MODEL_REFUSED: &str = r#"{"timestamp":"2026-11-05T09:37:05.571Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"01a1ab11-74cc","last_agent_message":null,"error":{"message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'claude-sonnet-5-5' model is not supported when using Codex with a ChatGPT account.\",\"code\":\"model_not_found\"}}","codex_error_info":"other"},"started_at":1793871410,"completed_at":1793871425,"duration_ms":15183}}"#;
+
+/// A turn that ended on an error of the API is no answer, whichever way Codex wrote it down.
+#[test]
+fn a_turn_that_ended_on_an_error_is_no_answer() {
+    let started = r#"{"type":"event_msg","payload":{"type":"task_started"}}"#;
+    assert_eq!(
+        parse_last_turn(&format!("{started}\n{MODEL_REFUSED}\n{TOKEN_COUNT}\n")),
+        LastTurn::Failed(
+            "The 'claude-sonnet-5-5' model is not supported when using Codex with a ChatGPT \
+             account. (model_not_found)"
+                .to_owned()
+        )
+    );
+    // An error that is no answer of the API stays as it is.
+    let dropped = r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":null,"error":{"message":"stream disconnected before completion","codex_error_info":"other"}}}"#;
+    assert_eq!(
+        parse_last_turn(&format!("{started}\n{dropped}\n")),
+        LastTurn::Failed("stream disconnected before completion".to_owned())
+    );
+
+    // Codex before 0.147: an `error` event right before a `task_complete` without the last
+    // message of the agent.
+    let error = r#"{"type":"event_msg","payload":{"type":"error","message":"unexpected status 400 Bad Request"}}"#;
+    let complete =
+        r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":null}}"#;
+    assert_eq!(
+        parse_last_turn(&format!("{started}\n{error}\n{TOKEN_COUNT}\n{complete}\n")),
+        LastTurn::Failed("unexpected status 400 Bad Request".to_owned())
+    );
+
+    // An error the turn went on after is not where it ended.
+    let call = r#"{"type":"response_item","payload":{"type":"function_call","name":"shell"}}"#;
+    let answer = r#"{"type":"event_msg","payload":{"type":"agent_message","message":"Готово"}}"#;
+    assert_eq!(
+        parse_last_turn(&format!(
+            "{started}\n{error}\n{call}\n{answer}\n{complete}\n"
+        )),
+        LastTurn::Answered
+    );
+    assert_eq!(
+        parse_last_turn(&format!("{started}\n{error}\n{call}\n")),
+        LastTurn::Working
+    );
+    let answered =
+        r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"Готово"}}"#;
+    assert_eq!(
+        parse_last_turn(&format!("{started}\n{error}\n{answered}\n")),
+        LastTurn::Answered
+    );
+    // A turn of tools that ended without a message or an error is done all the same.
+    assert_eq!(
+        parse_last_turn(&format!("{started}\n{call}\n{complete}\n")),
+        LastTurn::Answered
+    );
+}
+
+#[test]
+fn an_error_of_the_api_reads_as_its_message() {
+    assert_eq!(
+        readable_error(
+            r#"{"type":"error","status":400,"error":{"message":"Bad model","code":"model_not_found"}}"#
+        ),
+        "Bad model (model_not_found)"
+    );
+    assert_eq!(readable_error(r#"{"message":"Overloaded"}"#), "Overloaded");
+    assert_eq!(readable_error(r#"{"status":500}"#), r#"{"status":500}"#);
+    assert_eq!(readable_error("  plain text  "), "plain text");
+    assert_eq!(readable_error(""), "");
+}
+
+/// The error a turn ended on is Ward's line of the chat, in either shape Codex wrote it.
+#[test]
+fn the_error_of_a_turn_is_a_line_of_wards_in_the_chat() {
+    let said = |line: &str| parse_said(&serde_json::from_str(line).unwrap());
+    assert_eq!(
+        said(MODEL_REFUSED),
+        [Said::new(
+            Voice::Ward,
+            "Ошибка агента: The 'claude-sonnet-5-5' model is not supported when using Codex \
+             with a ChatGPT account. (model_not_found)"
+        )]
+    );
+    assert_eq!(
+        said(r#"{"type":"event_msg","payload":{"type":"error","message":"stream disconnected"}}"#),
+        [Said::new(Voice::Ward, "Ошибка агента: stream disconnected")]
+    );
+    // A turn that ended well says nothing of its own.
+    assert!(
+        said(r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"Готово"}}"#)
+            .is_empty()
+    );
 }

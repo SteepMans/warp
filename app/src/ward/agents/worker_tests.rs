@@ -1932,6 +1932,117 @@ fn an_executor_that_answered_and_went_quiet_waits_for_the_owner() {
     assert!(!session.is_done());
 }
 
+/// The start of a turn in a Codex rollout.
+const CODEX_TURN_STARTED: &str =
+    "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n";
+
+/// Codex could not even start its turn: the API refused the model and Codex went back to an
+/// empty prompt. There is no answer to review, but the error may pass and the agent holds the
+/// context of the session: it waits for the owner with the error, alive, and the owner's next
+/// message puts it back to work.
+#[test]
+fn an_executor_whose_turn_ended_on_an_error_waits_for_the_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("agents-work");
+    let transcript = dir.path().join("rollout.jsonl");
+    let refused = serde_json::json!({
+        "type": "event_msg",
+        "payload": {
+            "type": "task_complete",
+            "last_agent_message": null,
+            "error": {
+                "message": "{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'claude-sonnet-5-5' model is not supported when using Codex with a ChatGPT account.\",\"code\":\"model_not_found\"}}",
+                "codex_error_info": "other"
+            }
+        }
+    });
+    std::fs::write(&transcript, format!("{CODEX_TURN_STARTED}{refused}\n")).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let worker = offline_worker(dir.path(), machine.clone(), idle_timing());
+    let mut session = launched_session(&root, Some(transcript.as_path()));
+    session.provider = provider::by_id("codex").unwrap();
+
+    futures::executor::block_on(worker.advance(&mut session));
+    assert!(!session.is_done());
+    assert_eq!(session.status, SessionStatus::Running);
+
+    std::thread::sleep(Duration::from_millis(300));
+    futures::executor::block_on(worker.advance(&mut session));
+    assert!(!session.is_done(), "the owner decides, not the error");
+    assert_eq!(session.status, SessionStatus::Blocked);
+    let message = session.message.clone().unwrap_or_default();
+    assert_eq!(
+        message,
+        "Агент закончил ход ошибкой API: The 'claude-sonnet-5-5' model is not supported when \
+         using Codex with a ChatGPT account. (model_not_found). Напишите в сессию, чтобы \
+         продолжить, или остановите"
+    );
+    let request = session.outbox.back().unwrap();
+    assert_eq!(request.status, SessionStatus::Blocked);
+    assert_eq!(request.reason.as_deref(), Some(REASON_OWNER_QUESTION));
+    assert!(
+        session
+            .outbox
+            .iter()
+            .all(|request| request.status != SessionStatus::Review),
+        "an error is no answer"
+    );
+    // The agent and its context stay.
+    assert!(machine.stopped.lock().is_empty());
+
+    // The status is reported once, however long the agent stays quiet.
+    let reported = session.outbox.len();
+    std::thread::sleep(Duration::from_millis(300));
+    futures::executor::block_on(worker.advance(&mut session));
+    assert_eq!(session.outbox.len(), reported);
+    assert_eq!(session.status, SessionStatus::Blocked);
+
+    // The owner writes «продолжай»: Codex starts a new turn and the session runs again.
+    let resumed = concat!(
+        "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",",
+        "\"message\":\"продолжай\"}}\n",
+    );
+    std::fs::write(
+        &transcript,
+        format!("{CODEX_TURN_STARTED}{refused}\n{CODEX_TURN_STARTED}{resumed}"),
+    )
+    .unwrap();
+    futures::executor::block_on(worker.advance(&mut session));
+    assert!(!session.is_done());
+    assert_eq!(session.status, SessionStatus::Running);
+    assert!(machine.stopped.lock().is_empty());
+}
+
+/// A refusal for the subscription limit ends the turn on an error too, but the limit owns it:
+/// the session stays blocked until the reset, neither failed nor taken for an answer.
+#[test]
+fn a_codex_turn_refused_for_the_limit_stays_blocked() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("agents-work");
+    let transcript = dir.path().join("rollout.jsonl");
+    let refused = concat!(
+        "{\"type\":\"event_msg\",\"payload\":{\"type\":\"error\",",
+        "\"message\":\"You've hit your usage limit. Try again at 5:00 PM.\"}}\n",
+        "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",",
+        "\"last_agent_message\":null}}\n",
+    );
+    std::fs::write(&transcript, format!("{CODEX_TURN_STARTED}{refused}")).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let worker = offline_worker(dir.path(), machine.clone(), idle_timing());
+    let mut session = launched_session(&root, Some(transcript.as_path()));
+    session.provider = provider::by_id("codex").unwrap();
+
+    futures::executor::block_on(worker.advance(&mut session));
+    assert_eq!(session.status, SessionStatus::Blocked);
+    std::thread::sleep(Duration::from_millis(300));
+    futures::executor::block_on(worker.advance(&mut session));
+    assert!(!session.is_done());
+    assert_eq!(session.status, SessionStatus::Blocked);
+    let request = session.outbox.back().unwrap();
+    assert_eq!(request.reason.as_deref(), Some(REASON_USAGE_LIMIT));
+    assert!(machine.stopped.lock().is_empty());
+}
+
 /// The owner brought a session back from the archive: the worktree is on the machine and the
 /// agent session is known, so Ward clones nothing, writes no prompt and opens the tab with the
 /// resume flag. Without a worktree there is nothing to restore and the session fails.
@@ -2073,6 +2184,43 @@ fn an_orchestrator_with_questions_waits_for_the_owner_without_the_clock() {
     assert!(!session.is_done(), "{:?}", session.message);
     assert_eq!(session.status, SessionStatus::Preparing);
     assert!(session.prepare.as_ref().unwrap().waited >= Duration::from_millis(1200));
+}
+
+/// An orchestrator whose turn ended on an error of the API asked the owner nothing: the
+/// preparation fails with the error instead of waiting for an answer.
+#[test]
+fn an_orchestrator_whose_turn_ended_on_an_error_fails_the_preparation() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("agents-work");
+    let transcript = dir.path().join("rollout.jsonl");
+    let refused = concat!(
+        "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",",
+        "\"last_agent_message\":null,\"error\":{\"message\":\"stream disconnected before ",
+        "completion\",\"codex_error_info\":\"other\"}}}\n",
+    );
+    std::fs::write(&transcript, format!("{CODEX_TURN_STARTED}{refused}")).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let worker = offline_worker(dir.path(), machine.clone(), idle_timing());
+    let mut session = preparing_session(&root, &transcript, false);
+    session.provider = provider::by_id("codex").unwrap();
+
+    futures::executor::block_on(worker.advance(&mut session));
+    std::thread::sleep(Duration::from_millis(300));
+    futures::executor::block_on(worker.advance(&mut session));
+    assert!(session.is_done());
+    assert_eq!(session.status, SessionStatus::Failed);
+    let failed = session.outbox.back().unwrap();
+    assert_eq!(failed.reason.as_deref(), Some(REASON_PREPARE_FAILED));
+    let message = session.message.clone().unwrap_or_default();
+    assert!(message.contains("stream disconnected"), "{message}");
+    assert!(
+        session
+            .outbox
+            .iter()
+            .all(|request| request.reason.as_deref() != Some(REASON_OWNER_QUESTION)),
+        "an error is no question"
+    );
+    assert_eq!(*machine.stopped.lock(), vec![ORCHESTRATOR_PID]);
 }
 
 /// The agent asked the owner something and waits: the session calls the owner instead of being
