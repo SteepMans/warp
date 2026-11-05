@@ -50,6 +50,40 @@ fn the_header_names_the_machine_and_the_task() {
     );
 }
 
+/// The viewer titles its console with the state of the stream; the header reads it from there.
+#[test]
+fn the_state_of_the_stream_is_read_off_the_title_of_the_viewer() {
+    assert_eq!(
+        viewer_status("Ward: подключено"),
+        Some(ViewerStatus {
+            text: "подключено".to_owned(),
+            warning: false,
+        })
+    );
+    assert_eq!(
+        viewer_status("Ward! на steep-pc Ward старой версии: экран может задваиваться"),
+        Some(ViewerStatus {
+            text: "на steep-pc Ward старой версии: экран может задваиваться".to_owned(),
+            warning: true,
+        })
+    );
+    // The titles of the shell and of the agent are not a state of the stream.
+    for title in [
+        "",
+        "Windows PowerShell",
+        "✳ Claude Code",
+        "Ward:подключено",
+        "Ward:   ",
+        "ward: подключено",
+    ] {
+        assert_eq!(viewer_status(title), None, "{title}");
+    }
+    let long = format!("Ward: {}\u{1b}[31m", "я".repeat(500));
+    let status = viewer_status(&long).unwrap();
+    assert_eq!(status.text.chars().count(), MAX_STATUS_CHARS);
+    assert!(!status.text.contains('\u{1b}'));
+}
+
 #[test]
 fn closed_tabs_are_forgotten() {
     let kept = EntityId::new();

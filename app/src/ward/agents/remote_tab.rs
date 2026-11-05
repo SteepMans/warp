@@ -3,9 +3,10 @@
 //!
 //! - The tab goes into the group "Удалённое управление", its name starts with the machine and
 //!   its tab carries the remote icon; in the vertical tabs its row says which machine it is.
-//! - The pane header stays on while the tab lives: "Удалённое управление: steep-pc · #4726 …"
-//!   and how to disconnect. It is outside the terminal, so the output of the session cannot
-//!   overwrite it.
+//! - The pane header stays on while the tab lives: "Удалённое управление: steep-pc · #4726 …",
+//!   where the stream is and how to disconnect. It is outside the terminal, so the output of
+//!   the session cannot overwrite it. Where the stream is, the viewer says in the title of its
+//!   console ([`viewer_status`]).
 //! - The command that runs the viewer and the input box are hidden while the viewer runs. Once
 //!   it is over (disconnected, or the stream ended) the tab is a plain shell again and says so.
 //!
@@ -21,6 +22,39 @@ pub const GROUP_NAME: &str = "Удалённое управление";
 
 /// How to leave the remote tab, as the viewer reads it.
 pub const DETACH_HINT: &str = "Ctrl+] — отключиться";
+
+/// How the viewer titles its console with the state of the stream: `Ward: подключено`, and
+/// `Ward! …` for a warning (an older Ward there, the Ward gone and asked for again).
+pub const STATUS_PREFIX: &str = "Ward: ";
+pub const WARNING_PREFIX: &str = "Ward! ";
+const MAX_STATUS_CHARS: usize = 160;
+
+/// Where the stream of a remote tab is, as its viewer says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ViewerStatus {
+    pub text: String,
+    pub warning: bool,
+}
+
+/// The state of the stream in the title the viewer gives its console; `None` for any other
+/// title (the shell's, before the viewer runs).
+pub fn viewer_status(title: &str) -> Option<ViewerStatus> {
+    let (rest, warning) = if let Some(rest) = title.strip_prefix(STATUS_PREFIX) {
+        (rest, false)
+    } else {
+        (title.strip_prefix(WARNING_PREFIX)?, true)
+    };
+    let text: String = rest
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_STATUS_CHARS)
+        .collect();
+    let text = text.trim();
+    (!text.is_empty()).then(|| ViewerStatus {
+        text: text.to_owned(),
+        warning,
+    })
+}
 
 /// One tab of a session on another machine.
 #[derive(Clone, Debug, PartialEq, Eq)]

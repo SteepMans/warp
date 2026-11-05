@@ -273,6 +273,47 @@ fn the_viewer_passes_its_checks() {
     assert!(passed >= 19, "{report:#?}");
 }
 
+/// The header of the tab reads the states of the stream off the title the viewer gives its
+/// console: every one of them, the warnings as warnings.
+#[cfg(windows)]
+#[test]
+fn the_header_reads_every_state_the_viewer_titles_its_console_with() {
+    use super::super::remote_tab::viewer_status;
+
+    let report = run_viewer_checks();
+    let titles: Vec<(&str, &str)> = report
+        .iter()
+        .filter_map(|line| {
+            let mut parts = line.splitn(3, '\t');
+            (parts.next() == Some("title")).then(|| {
+                (
+                    parts.next().unwrap_or_default(),
+                    parts.next().unwrap_or_default(),
+                )
+            })
+        })
+        .collect();
+    assert_eq!(titles.len(), 6, "{report:#?}");
+    for (link, title) in titles {
+        let status = viewer_status(title).unwrap_or_else(|| panic!("{link}: {title}"));
+        assert_eq!(
+            status.warning,
+            matches!(link, "Legacy" | "Reconnecting"),
+            "{link}: {title}"
+        );
+    }
+}
+
+/// The prefixes of the titles are the ones the header reads.
+#[test]
+fn the_viewer_titles_its_console_as_the_header_reads_it() {
+    use super::super::remote_tab::{STATUS_PREFIX, WARNING_PREFIX};
+
+    assert!(SCRIPT.contains(&format!(r#"Prefix = "{STATUS_PREFIX}""#)));
+    assert!(SCRIPT.contains(&format!(r#"WarningPrefix = "{WARNING_PREFIX}""#)));
+    assert!(SCRIPT.contains("Console.Title = text"));
+}
+
 /// The output of the session goes through the filter before it is written here.
 #[test]
 fn the_viewer_writes_the_output_through_its_filter() {
