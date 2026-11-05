@@ -69,10 +69,19 @@ impl TerminalView {
 
     /// The tab was marked as remote, or its viewer started or ended: the header follows.
     pub fn ward_remote_tab_changed(&mut self, ctx: &mut ViewContext<Self>) {
+        self.refresh_pane_header(ctx);
         self.pane_configuration.update(ctx, |config, ctx| {
             config.notify_header_content_changed(ctx);
         });
         ctx.notify();
+    }
+
+    /// Whether the header leaves out the indicator of the active pane. A remote tab shows its
+    /// header even as the only pane of its tab, where Warp shows none: there the indicator
+    /// would only put a triangle of the accent color in the corner of the terminal. In a split
+    /// it marks the active pane, as for any other.
+    pub(super) fn ward_remote_hides_active_pane_indicator(&self, app: &AppContext) -> bool {
+        remote_tab::is_remote(self.view_id) && !self.split_pane_state(app).is_in_split_pane()
     }
 
     /// Whether the input box of this terminal is hidden for a remote tab: until its viewer is
