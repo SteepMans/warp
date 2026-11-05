@@ -215,3 +215,37 @@ fn the_end_of_the_stream_gives_the_tab_its_own_size_back() {
     assert_eq!(sizing.given(), None);
     assert_eq!(sizing.on_end(), None);
 }
+
+/// The tap gets the reads of the terminal as the PTY gave them. A synchronized frame of an
+/// agent's screen (`?2026h` … `?2026l`) came twice before: as the raw read and again as the
+/// frame the terminal flushed, so every viewer drew it twice and inserted its lines twice.
+#[test]
+fn the_tap_gets_a_synchronized_frame_once() {
+    use crate::terminal::event_listener::ChannelEventListener;
+    use crate::terminal::model::TerminalModel;
+    use crate::terminal::model::ansi::Processor;
+
+    let (wakeups_tx, _wakeups) = async_channel::unbounded();
+    let (events_tx, _events) = async_channel::unbounded::<crate::terminal::event::Event>();
+    let (reads_tx, mut reads) = async_broadcast::broadcast(64);
+    let mut model = TerminalModel::mock(
+        None,
+        Some(ChannelEventListener::new(wakeups_tx, events_tx, reads_tx)),
+    );
+    // A frame in one read, a frame across two reads, and plain output.
+    let pty: [&[u8]; 4] = [
+        b"\x1b[?2026h\x1b[1;1Hone\x1b[?2026l",
+        b"\x1b[?2026h\x1b[1;54r\x1b[54;1H\r\ntw",
+        b"o\x1b[r\x1b[?2026l",
+        b"three\r\n",
+    ];
+    let mut processor = Processor::new();
+    for read in pty {
+        processor.parse_bytes(&mut model, read, &mut std::io::sink());
+    }
+    let mut tapped = Vec::new();
+    while let Ok(bytes) = reads.try_recv() {
+        tapped.extend_from_slice(&bytes);
+    }
+    assert_eq!(tapped, pty.concat());
+}
