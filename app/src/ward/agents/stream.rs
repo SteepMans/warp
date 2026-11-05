@@ -27,8 +27,13 @@
 //! the service passes on only the latest). `{"type":"release"}` from the service, or the end of
 //! the stream, gives the tab back the size of its pane ([`Sizing`]). After the change the agent
 //! and the console redraw the screen at the new size, and the new size goes to the viewers at
-//! once. The hello tells a viewer that this Ward takes its size (`size`); a viewer that gets no
-//! hello is streamed by an older Ward and says so.
+//! once.
+//!
+//! A viewer is given the whole screen even when the tab has its size already and the recent
+//! output is empty or starts in the middle of the screen: the tab then takes a row less for a
+//! moment and the size of the viewer after ([`Resize::steps`]), so the console and the agent
+//! draw again. The hello tells a viewer that this Ward takes its size (`size`) and redraws
+//! (`redraw`); a viewer that gets no hello is streamed by an older Ward and says so.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -153,8 +158,9 @@ pub fn ping_message() -> String {
     serde_json::json!({ "type": "ping" }).to_string()
 }
 
-/// What the tab does for a viewer, as the hello says: it takes the size of the viewer's screen.
-pub const FEATURES: [&str; 1] = ["size"];
+/// What the tab does for a viewer, as the hello says: it takes the size of the viewer's screen
+/// (`size`) and draws the screen again even at a size it has already (`redraw`).
+pub const FEATURES: [&str; 2] = ["size", "redraw"];
 
 /// The first frame of a stream: which Ward streams and what it does for a viewer.
 pub fn hello_message(version: &str) -> String {
@@ -208,12 +214,29 @@ pub enum Resize {
     Back,
 }
 
+/// How long the tab keeps the other size of a redraw, see [`Resize::steps`].
+pub const REDRAW_PAUSE: std::time::Duration = std::time::Duration::from_millis(300);
+
 impl Resize {
     /// Columns and rows to give the tab; `None` for the size of its pane.
     pub fn size(self) -> Option<(usize, usize)> {
         match self {
             Resize::To { cols, rows } => Some((cols, rows)),
             Resize::Back => None,
+        }
+    }
+
+    /// The resizes of the PTY that carry this one out while the tab is `current`, in order and
+    /// [`REDRAW_PAUSE`] apart. A size the tab has already changes nothing in the PTY, so neither
+    /// the console nor the agent would draw the screen again for the viewer who asked: the tab
+    /// takes a row less (a row more at a single row) first.
+    pub fn steps(self, current: Option<(usize, usize)>) -> Vec<Resize> {
+        match self {
+            Resize::To { cols, rows } if current == Some((cols, rows)) => {
+                let other = if rows > 1 { rows - 1 } else { rows + 1 };
+                vec![Resize::To { cols, rows: other }, self]
+            }
+            _ => vec![self],
         }
     }
 }

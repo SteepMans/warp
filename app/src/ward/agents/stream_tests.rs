@@ -84,6 +84,7 @@ fn the_stream_starts_with_a_hello_that_names_what_the_tab_does() {
         .map(|feature| feature.as_str().unwrap())
         .collect();
     assert!(features.contains(&"size"), "{features:?}");
+    assert!(features.contains(&"redraw"), "{features:?}");
     // A viewer does not take the hello for a frame of its own.
     assert_eq!(parse_viewer_frame(&hello_message("v1")), None);
 }
@@ -173,6 +174,37 @@ fn the_tab_takes_the_size_of_the_last_viewer_and_gets_its_own_back() {
         .size(),
         Some((100, 30))
     );
+}
+
+/// A viewer of the size the tab has already gets a redraw all the same: a row less for a
+/// moment, then its size.
+#[test]
+fn a_size_the_tab_has_already_is_taken_through_another_one() {
+    let size = Resize::To {
+        cols: 173,
+        rows: 58,
+    };
+    assert_eq!(
+        size.steps(Some((173, 58))),
+        vec![
+            Resize::To {
+                cols: 173,
+                rows: 57
+            },
+            size
+        ]
+    );
+    let one_row = Resize::To { cols: 80, rows: 1 };
+    assert_eq!(
+        one_row.steps(Some((80, 1))),
+        vec![Resize::To { cols: 80, rows: 2 }, one_row]
+    );
+    // Another size redraws by itself.
+    assert_eq!(size.steps(Some((205, 61))), vec![size]);
+    assert_eq!(size.steps(Some((173, 57))), vec![size]);
+    assert_eq!(size.steps(None), vec![size]);
+    // The pane's own size back is never a redraw for a viewer.
+    assert_eq!(Resize::Back.steps(Some((173, 58))), vec![Resize::Back]);
 }
 
 #[test]

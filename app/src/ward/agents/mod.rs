@@ -602,13 +602,6 @@ async fn stream_tab(
                     let Some(resize) = resize else {
                         continue;
                     };
-                    let resized = pane.clone();
-                    let Ok(now) = spawner
-                        .spawn(move |_, ctx| resize_pane_for_viewer(&resized, resize.size(), ctx))
-                        .await
-                    else {
-                        break;
-                    };
                     match resize {
                         stream::Resize::To { cols, rows } => log::info!(
                             "Ward agents: the tab of a session takes the size of its viewer, \
@@ -618,17 +611,7 @@ async fn stream_tab(
                             "Ward agents: the tab of a session has the size of its pane again"
                         ),
                     }
-                    // The viewers learn the new size at once, ahead of the screen drawn at it.
-                    let Some(now) = now else {
-                        continue;
-                    };
-                    let changed = last_size.lock().replace(now) != Some(now);
-                    if changed
-                        && out_tx
-                            .send(Out::Text(stream::size_message(now.0, now.1)))
-                            .await
-                            .is_err()
-                    {
+                    if !resize_for_viewers(&spawner, &pane, resize, &last_size, &out_tx).await {
                         break;
                     }
                     continue;
@@ -658,6 +641,47 @@ async fn stream_tab(
     .map(|_| ());
     futures::future::join(write, producers).await;
     Ok(())
+}
+
+/// Carries out a resize a viewer asked for, step by step ([`stream::Resize::steps`]): every
+/// size the tab takes goes to the viewers at once, ahead of the screen drawn at it. `false` once
+/// the app or the stream is gone.
+async fn resize_for_viewers(
+    spawner: &ModelSpawner<AgentsModel>,
+    pane: &str,
+    resize: stream::Resize,
+    last_size: &parking_lot::Mutex<Option<(usize, usize)>>,
+    out_tx: &async_channel::Sender<Out>,
+) -> bool {
+    let steps = resize.steps(pane_size(spawner, pane).await);
+    if steps.len() > 1 {
+        log::info!("Ward agents: the tab of a session draws its screen again for a viewer");
+    }
+    for (index, step) in steps.into_iter().enumerate() {
+        if index > 0 {
+            async_io::Timer::after(stream::REDRAW_PAUSE).await;
+        }
+        let resized = pane.to_owned();
+        let Ok(now) = spawner
+            .spawn(move |_, ctx| resize_pane_for_viewer(&resized, step.size(), ctx))
+            .await
+        else {
+            return false;
+        };
+        let Some(now) = now else {
+            continue;
+        };
+        let changed = last_size.lock().replace(now) != Some(now);
+        if changed
+            && out_tx
+                .send(Out::Text(stream::size_message(now.0, now.1)))
+                .await
+                .is_err()
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// Bracketed paste markers: the agent's input box takes the text as one paste, newlines
