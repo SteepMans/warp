@@ -287,8 +287,13 @@ pub fn is_paused(app: &AppContext) -> bool {
     read_preference(PAUSED_KEY, app).is_some_and(|value| value == "true")
 }
 
+/// Turns "Take tasks" off (`paused`) or on. The worker tells the service with a heartbeat at
+/// once, not at the end of its interval: the service schedules by what the heartbeat says.
 pub fn set_paused(paused: bool, app: &AppContext) {
     write_preference(PAUSED_KEY, if paused { "true" } else { "" }, app);
+    if let Some(worker) = model(app).and_then(|model| model.worker.as_ref()) {
+        worker.heartbeat_now();
+    }
 }
 
 /// Everything the worker needs, or `None` without a key.

@@ -2,8 +2,9 @@
 //!
 //! - **Control**: reads the settings, registers (again after a 401 or a changed key), sends a
 //!   heartbeat every `heartbeatSec` with the load, the subscription usage, the session
-//!   statuses and the state of the machine profile, backing off while the service is
-//!   unreachable.
+//!   statuses, "Take tasks" and the state of the machine profile, backing off while the service
+//!   is unreachable. Turning "Take tasks" off or on sends a heartbeat at once
+//!   ([`Worker::heartbeat_now`]).
 //! - **Inbox**: long-polls `GET /inbox`, acks or refuses assignments and queues commands.
 //! - **Sessions**: moves every session through its phases (preparation, plan review, worktree,
 //!   tab, agent session found, exit code), ships the transcript every
@@ -899,6 +900,11 @@ pub struct Worker {
     ward_version: String,
     state: Mutex<State>,
     register_lock: futures::lock::Mutex<()>,
+    /// Asks the control loop for a heartbeat before its interval is over; see
+    /// [`Worker::heartbeat_now`]. One request waiting is enough: the heartbeat it brings reads
+    /// the settings as they are by then.
+    beat_requests: async_channel::Sender<()>,
+    beat_requested: async_channel::Receiver<()>,
 }
 
 fn now_ms() -> i64 {
@@ -922,6 +928,7 @@ impl Worker {
         timing: Timing,
         ward_version: String,
     ) -> Arc<Self> {
+        let (beat_requests, beat_requested) = async_channel::bounded(1);
         Arc::new(Self {
             host,
             machine,
@@ -935,7 +942,27 @@ impl Worker {
                 ..Default::default()
             }),
             register_lock: futures::lock::Mutex::new(()),
+            beat_requests,
+            beat_requested,
         })
+    }
+
+    /// Sends a heartbeat now instead of at the end of the interval: "Take tasks" was turned off
+    /// or on. The service schedules by `localPaused` of the heartbeat, so turned off, the
+    /// machine is not offered tasks it would only refuse, and turned on, it gets the waiting
+    /// ones at once. The settings are read again before that heartbeat, which also lets
+    /// admission see the change right away.
+    pub fn heartbeat_now(&self) {
+        // Full: a heartbeat is already asked for, and it reads the settings when it goes out.
+        let _ = self.beat_requests.try_send(());
+    }
+
+    /// Waits `delay` before the next heartbeat, or less when [`Worker::heartbeat_now`] asks
+    /// for one.
+    async fn wait_for_beat(&self, delay: Duration) {
+        let timer = std::pin::pin!(sleep(delay));
+        let requested = std::pin::pin!(self.beat_requested.recv());
+        futures::future::select(timer, requested).await;
     }
 
     /// Picks up the sessions of the run before and then runs the four loops; never returns.
@@ -1306,7 +1333,7 @@ impl Worker {
             };
             self.publish().await;
             if !delay.is_zero() {
-                sleep(delay).await;
+                self.wait_for_beat(delay).await;
             }
         }
     }
