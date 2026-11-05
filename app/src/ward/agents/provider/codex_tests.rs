@@ -7,6 +7,15 @@ const TOKEN_COUNT: &str = r#"{"timestamp":"2026-08-18T05:10:00.000Z","type":"eve
 
 const SESSION_META: &str = r#"{"timestamp":"2026-08-18T04:59:11.328Z","ordinal":0,"type":"session_meta","payload":{"session_id":"01a01337-8da8","id":"01a01337-8da8","timestamp":"2026-08-18T04:59:11Z","cwd":"C:\\agents-work\\o\\r\\.worktrees\\5f0e8a5b","originator":"codex_cli_rs","cli_version":"0.148.0"}}"#;
 
+/// The last `token_count` of a machine where Codex has not run since 20.08 (`info` left out):
+/// 94% of the weekly window, which reset on 24.08 at 05:49:18 UTC.
+const STALE_TOKEN_COUNT: &str = r#"{"timestamp":"2026-08-20T09:17:24.591Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"codex","limit_name":null,"primary":{"used_percent":94.0,"window_minutes":10080,"resets_at":1787550558},"secondary":null,"credits":{"has_credits":false,"unlimited":false,"balance":"0"},"individual_limit":null,"spend_control_reached":null,"plan_type":null,"rate_limit_reached_type":null}}}"#;
+
+/// Before the reset of [`TOKEN_COUNT`] and [`STALE_TOKEN_COUNT`].
+fn before_reset() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 8, 20, 12, 0, 0).unwrap()
+}
+
 #[test]
 fn parses_rate_limits_of_token_count() {
     let limits = parse_rate_limits(TOKEN_COUNT).unwrap();
@@ -49,7 +58,7 @@ fn usage_reports_name_primary_and_secondary() {
         r#""secondary":{"used_percent":80.5,"window_minutes":300,"resets_at":1787500000}"#,
     );
     let limits = parse_rate_limits(&with_secondary).unwrap();
-    let reports = usage_reports(Some(&limits));
+    let reports = usage_reports(Some(&limits), before_reset());
     assert_eq!(reports.len(), 2);
     assert_eq!(reports[0].provider, "codex");
     assert_eq!(reports[0].window, "primary");
@@ -63,10 +72,100 @@ fn usage_reports_name_primary_and_secondary() {
     assert_eq!(reports[1].window, "secondary");
     assert_eq!(reports[1].used_percent, Some(80.5));
 
-    let unknown = usage_reports(None);
+    let unknown = usage_reports(None, before_reset());
     assert_eq!(unknown.len(), 1);
     assert_eq!(unknown[0].used_percent, None);
     assert_eq!(unknown[0].source, "none");
+}
+
+#[test]
+fn a_window_past_its_reset_is_reported_empty() {
+    let limits = parse_rate_limits(STALE_TOKEN_COUNT).unwrap();
+    let reports = usage_reports(Some(&limits), before_reset());
+    assert_eq!(reports[0].used_percent, Some(94.0));
+    assert_eq!(
+        reports[0].resets_at.as_deref(),
+        Some("2026-08-24T05:49:18Z")
+    );
+
+    // Months later Codex has not run again: the window started over at its reset, and what is
+    // used since is unknown until the next Codex turn, so is the next reset.
+    let now = Utc.with_ymd_and_hms(2026, 11, 5, 6, 48, 0).unwrap();
+    let reports = usage_reports(Some(&limits), now);
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].window, "primary");
+    assert_eq!(reports[0].window_minutes, Some(10080));
+    assert_eq!(reports[0].used_percent, Some(0.0));
+    assert_eq!(reports[0].resets_at, None);
+    assert_eq!(
+        reports[0].observed_at.as_deref(),
+        Some("2026-08-24T05:49:18Z")
+    );
+    assert_eq!(reports[0].source, "rollout");
+
+    // The moment of the reset already belongs to the new window.
+    let at_reset = Utc.timestamp_opt(1787550558, 0).unwrap();
+    assert_eq!(
+        usage_reports(Some(&limits), at_reset)[0].used_percent,
+        Some(0.0)
+    );
+}
+
+#[test]
+fn only_the_window_that_started_over_is_emptied() {
+    // The 5-hour window reset an hour ago, the weekly one still runs.
+    let line = TOKEN_COUNT.replace(
+        r#""primary":{"used_percent":13.0,"window_minutes":10080,"resets_at":1787550558},"secondary":null"#,
+        r#""primary":{"used_percent":97.0,"window_minutes":300,"resets_at":1787500000},"secondary":{"used_percent":60.0,"window_minutes":10080,"resets_at":1787550558}"#,
+    );
+    let limits = parse_rate_limits(&line).unwrap();
+    let now = Utc.timestamp_opt(1787500000 + 3600, 0).unwrap();
+    let reports = usage_reports(Some(&limits), now);
+    assert_eq!(reports[0].window, "primary");
+    assert_eq!(reports[0].used_percent, Some(0.0));
+    assert_eq!(reports[0].resets_at, None);
+    assert_eq!(reports[1].window, "secondary");
+    assert_eq!(reports[1].used_percent, Some(60.0));
+    assert_eq!(
+        reports[1].resets_at.as_deref(),
+        Some("2026-08-24T05:49:18Z")
+    );
+    assert_eq!(
+        reports[1].observed_at.as_deref(),
+        Some("2026-08-18T05:10:00Z")
+    );
+}
+
+#[test]
+fn a_window_without_reset_time_starts_over_one_window_after_the_report() {
+    let line = TOKEN_COUNT.replace(
+        r#""window_minutes":10080,"resets_at":1787550558"#,
+        r#""window_minutes":300"#,
+    );
+    let limits = parse_rate_limits(&line).unwrap();
+    // Reported at 05:10; a 5-hour window cannot outlast 10:10.
+    let still = Utc.with_ymd_and_hms(2026, 8, 18, 10, 9, 0).unwrap();
+    assert_eq!(
+        usage_reports(Some(&limits), still)[0].used_percent,
+        Some(13.0)
+    );
+    let over = Utc.with_ymd_and_hms(2026, 8, 18, 10, 10, 0).unwrap();
+    let reports = usage_reports(Some(&limits), over);
+    assert_eq!(reports[0].used_percent, Some(0.0));
+    assert_eq!(reports[0].resets_at, None);
+    assert_eq!(reports[0].observed_at, None);
+
+    // Neither a reset time nor a window length: nothing to tell an old report by.
+    let bare = TOKEN_COUNT.replace(
+        r#""window_minutes":10080,"resets_at":1787550558"#,
+        r#""window_minutes":null"#,
+    );
+    let limits = parse_rate_limits(&bare).unwrap();
+    let much_later = Utc.with_ymd_and_hms(2026, 11, 5, 0, 0, 0).unwrap();
+    assert_eq!(
+        usage_reports(Some(&limits), much_later)[0].used_percent,
+        Some(13.0)
+    );
 }
 
 #[test]
@@ -177,8 +276,13 @@ fn finds_the_rollout_of_the_worktree() {
     assert_eq!(found.remote_control_url, None);
     assert_eq!(Codex.transcript(&homes, &worktree, &found), Some(rollout));
 
-    let usage = Codex.usage(&homes, &WardUsage::default(), Utc::now());
+    let usage = Codex.usage(&homes, &WardUsage::default(), before_reset());
     assert_eq!(usage[0].used_percent, Some(13.0));
+    // The same rollout read after the reset of its window.
+    let after_reset = Utc.with_ymd_and_hms(2026, 11, 5, 0, 0, 0).unwrap();
+    let usage = Codex.usage(&homes, &WardUsage::default(), after_reset);
+    assert_eq!(usage[0].used_percent, Some(0.0));
+    assert_eq!(usage[0].resets_at, None);
     std::fs::write(
         homes.codex_dir.join("auth.json"),
         r#"{"auth_mode":"chatgpt","tokens":{"access_token":"y"}}"#,
