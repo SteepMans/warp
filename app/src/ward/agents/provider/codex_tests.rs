@@ -197,6 +197,30 @@ fn limit_hit_from_error_event_or_reached_type() {
     );
 }
 
+/// Codex 0.147 and later end a refused turn with the error on `task_complete`, the refusal for
+/// the limit included; any other error there is no limit.
+#[test]
+fn limit_hit_from_the_error_of_task_complete() {
+    let started = r#"{"type":"event_msg","payload":{"type":"task_started"}}"#;
+    let full = TOKEN_COUNT.replace("13.0", "100.0");
+    let by_message = r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":null,"error":{"message":"You've hit your usage limit. Try again at 5:00 PM.","codex_error_info":"other"}}}"#;
+    assert_eq!(
+        parse_limit_hit(&format!("{started}\n{full}\n{by_message}\n")),
+        Some(LimitHit {
+            resets_at: Utc.timestamp_opt(1787550558, 0).single()
+        })
+    );
+    let by_kind = r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":null,"error":{"message":"","codex_error_info":"usage_limit_exceeded"}}}"#;
+    assert_eq!(
+        parse_limit_hit(&format!("{started}\n{by_kind}\n")),
+        Some(LimitHit { resets_at: None })
+    );
+    assert_eq!(
+        parse_limit_hit(&format!("{started}\n{MODEL_REFUSED}\n")),
+        None
+    );
+}
+
 #[test]
 fn account_skips_token_values() {
     let chatgpt = r#"{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{"id_token":"x","access_token":"y","refresh_token":"z","account_id":"a"},"last_refresh":"2026-10-01T00:00:00Z"}"#;

@@ -9,8 +9,9 @@
 //!   `plan_type`) in the newest rollouts. They are as fresh as the last Codex turn on this
 //!   machine, which may be weeks ago: a window that has started over since is reported empty
 //!   ([`usage_reports`]).
-//! - Limit refusal: after the last turn started, an `error` event about the usage limit or a
-//!   `token_count` with `rate_limit_reached_type`.
+//! - Limit refusal: after the last turn started, an `error` event about the usage limit, the
+//!   `error` of `task_complete` about it (Codex 0.147 and later) or a `token_count` with
+//!   `rate_limit_reached_type`.
 //! - Last turn: the newest event or item of the rollout that says something about it —
 //!   `task_complete` and `agent_message` end a turn, a `function_call` waits for its output,
 //!   `task_started` and `user_message` are a turn still going. A `task_complete` with an
@@ -127,6 +128,11 @@ fn event_type(value: &Value) -> Option<&str> {
         .flatten()
 }
 
+/// Whether the message of an error is Codex's refusal for the usage limit.
+fn is_usage_limit(message: &str) -> bool {
+    message.to_lowercase().contains("usage limit")
+}
+
 /// Whether the last turn in rollout text ended on the usage limit.
 pub fn parse_limit_hit(tail: &str) -> Option<LimitHit> {
     let mut latest_limits: Option<RateLimits> = None;
@@ -141,9 +147,19 @@ pub fn parse_limit_hit(tail: &str) -> Option<LimitHit> {
                 let message = value
                     .pointer("/payload/message")
                     .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_lowercase();
-                if message.contains("usage limit") {
+                    .unwrap_or_default();
+                if is_usage_limit(message) {
+                    hit = true;
+                }
+            }
+            Some("task_complete") => {
+                let payload = value.get("payload").unwrap_or(&Value::Null);
+                let info = payload
+                    .pointer("/error/codex_error_info")
+                    .and_then(Value::as_str);
+                if task_error(payload).is_some_and(is_usage_limit)
+                    || info == Some("usage_limit_exceeded")
+                {
                     hit = true;
                 }
             }
