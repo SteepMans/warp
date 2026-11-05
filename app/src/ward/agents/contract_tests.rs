@@ -117,6 +117,7 @@ fn heartbeat_request_shape() {
             session_id: "s1".to_owned(),
             status: SessionStatus::Running,
         }],
+        local_paused: false,
         profile: None,
     };
     assert_eq!(
@@ -128,8 +129,26 @@ fn heartbeat_request_shape() {
                 "usedPercent": null, "resetsAt": "2026-10-31T18:00:00Z", "observedAt": null,
                 "source": "rollout"
             }],
-            "sessions": [{"sessionId": "s1", "status": "running"}]
+            "sessions": [{"sessionId": "s1", "status": "running"}],
+            "localPaused": false
         })
+    );
+}
+
+/// "Take tasks" off in Ward goes out with every heartbeat: the service cannot see the setting
+/// any other way.
+#[test]
+fn heartbeat_request_carries_the_local_pause() {
+    let request = HeartbeatRequest {
+        resources: Resources::default(),
+        usage: Vec::new(),
+        sessions: Vec::new(),
+        local_paused: true,
+        profile: None,
+    };
+    assert_eq!(
+        serde_json::to_value(&request).unwrap()["localPaused"],
+        json!(true)
     );
 }
 
@@ -139,6 +158,7 @@ fn heartbeat_request_carries_the_profile_state() {
         resources: Resources::default(),
         usage: Vec::new(),
         sessions: Vec::new(),
+        local_paused: false,
         profile: Some(ProfileBeat {
             version: 7,
             ok: true,

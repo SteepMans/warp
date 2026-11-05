@@ -1224,6 +1224,7 @@ impl Worker {
             resources: resources.clone(),
             usage,
             sessions,
+            local_paused: config.paused,
             profile,
         };
         let api = Api {
