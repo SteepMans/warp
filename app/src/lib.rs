@@ -1889,6 +1889,8 @@ pub(crate) fn initialize_app(
         ward::codex_usage::model::init(ctx);
         ward::uri_launch::init();
         ward::announcements::init(ctx);
+        // Before the worker starts: "Take tasks" comes back on after an automatic update.
+        ward::auto_install::restore_task_pause(ctx);
         ward::agents::init(ctx);
     }
 
@@ -1969,6 +1971,8 @@ pub(crate) fn initialize_app(
 
     // Teach our app that sometimes option means meta.
     ctx.set_event_munger(move |event, ctx| {
+        // Ward installs updates by itself only after a while without input.
+        ward::auto_install::note_event(event);
         let extra_meta_keys = *KeysSettings::as_ref(ctx).extra_meta_keys;
         apply_extra_meta_keys(event, extra_meta_keys);
         apply_scroll_multiplier(event, ctx);
@@ -2552,6 +2556,8 @@ pub(crate) fn initialize_app(
     }
 
     AutoupdateState::register(ctx, server_api.clone());
+    // Installs a downloaded update by itself once nobody is disturbed (Ward on Windows).
+    ward::auto_install::init(ctx);
 
     ctx.add_singleton_model(LocalWorkflows::new);
 

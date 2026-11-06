@@ -933,14 +933,51 @@ pub fn apply_update(
 /// 2. Request a relaunch.
 /// 3. Terminate the app.
 pub fn initiate_relaunch_for_update(app: &mut AppContext) {
+    relaunch_for_update(app, false);
+}
+
+/// Relaunches into the downloaded update without the user: Ward found that nobody is disturbed
+/// (`crate::ward::auto_install`). Unlike [`initiate_relaunch_for_update`] the termination is
+/// forced, since the quit warning about running processes would wait for a user who is not
+/// there (the caller has checked what it warns about), and on Windows the installer runs
+/// without any window. Returns whether a relaunch started.
+pub fn initiate_unattended_relaunch_for_update(app: &mut AppContext) -> bool {
+    relaunch_for_update(app, true)
+}
+
+/// Whether an update can be installed without the user: the installer must not ask for
+/// administrator rights, so only a copy installed for the current user qualifies.
+pub fn can_install_unattended() -> bool {
+    cfg_if::cfg_if! {
+        if #[cfg(windows)] {
+            windows::is_per_user_install()
+        } else {
+            false
+        }
+    }
+}
+
+fn relaunch_for_update(app: &mut AppContext, unattended: bool) -> bool {
     let autoupdate_stage = &AutoupdateState::as_ref(app).stage;
+    let termination_mode = if unattended {
+        TerminationMode::ForceTerminate
+    } else {
+        TerminationMode::Cancellable
+    };
+    let request_relaunch: fn(&mut RelaunchModel, &mut ModelContext<'_, RelaunchModel>) =
+        if unattended {
+            RelaunchModel::request_unattended_relaunch
+        } else {
+            RelaunchModel::request_relaunch
+        };
 
     match autoupdate_stage {
         AutoupdateStage::UpdatedPendingRestart { .. } => {
             // The update was already fully applied, so all that's left to do is relaunch.
             log::info!("Relaunching to apply update");
-            RelaunchModel::handle(app).update(app, RelaunchModel::request_relaunch);
-            app.terminate_app(TerminationMode::Cancellable, None);
+            RelaunchModel::handle(app).update(app, request_relaunch);
+            app.terminate_app(termination_mode, None);
+            true
         }
         AutoupdateStage::UpdateReady {
             new_version,
@@ -963,7 +1000,7 @@ pub fn initiate_relaunch_for_update(app: &mut AppContext) {
             });
 
             // Record that we should relaunch the app after terminating.
-            RelaunchModel::handle(app).update(app, RelaunchModel::request_relaunch);
+            RelaunchModel::handle(app).update(app, request_relaunch);
 
             // If there are any update steps that are deferred until relaunching, perform them now
             // (this is only true on macOS). We do this *before* requesting termination so that, if
@@ -983,11 +1020,13 @@ pub fn initiate_relaunch_for_update(app: &mut AppContext) {
                 send_telemetry_sync_from_app_ctx!(event, app);
 
                 // Request termination of the app.
-                app.terminate_app(TerminationMode::Cancellable, None);
+                app.terminate_app(termination_mode, None);
             });
+            true
         }
         _ => {
             log::info!("No update ready to install, not relaunching");
+            false
         }
     }
 }
@@ -1094,7 +1133,8 @@ pub fn spawn_child_if_necessary(app: &mut AppContext) {
             } else if #[cfg(target_os = "linux")] {
                 let relaunch_status = linux::relaunch();
             } else if #[cfg(windows)] {
-                let relaunch_status = windows::relaunch();
+                let relaunch_status =
+                    windows::relaunch(relaunch_handle.as_ref(app).is_unattended_relaunch());
             } else {
                 let relaunch_status: Result<()> = Err(anyhow!("No autoupdate support on this platform!"));
             }
@@ -1166,6 +1206,9 @@ pub enum RelaunchStatus {
 #[derive(Clone, Copy, Default)]
 pub struct RelaunchModel {
     relaunch_status: RelaunchStatus,
+    /// The relaunch was not asked for by the user: Ward installs the update by itself, so the
+    /// installer must not show anything (see [`initiate_unattended_relaunch_for_update`]).
+    unattended: bool,
 }
 
 impl RelaunchModel {
@@ -1179,6 +1222,14 @@ impl RelaunchModel {
     /// or quit the app normally.
     fn request_relaunch(&mut self, ctx: &mut ModelContext<Self>) {
         self.relaunch_status = RelaunchStatus::Requested;
+        self.unattended = false;
+        ctx.notify();
+    }
+
+    /// Like [`Self::request_relaunch`], for an update Ward installs without the user.
+    fn request_unattended_relaunch(&mut self, ctx: &mut ModelContext<Self>) {
+        self.relaunch_status = RelaunchStatus::Requested;
+        self.unattended = true;
         ctx.notify();
     }
 
@@ -1187,10 +1238,17 @@ impl RelaunchModel {
         self.relaunch_status == RelaunchStatus::Requested
     }
 
+    /// Whether the requested relaunch installs the update without the user.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn is_unattended_relaunch(&self) -> bool {
+        self.is_relaunch_requested() && self.unattended
+    }
+
     /// Cancels a requested relaunch, if there was one. Returns the previous relaunch status.
     fn cancel_relaunch(&mut self, ctx: &mut ModelContext<Self>) -> RelaunchStatus {
         let previous_status = self.relaunch_status;
         self.relaunch_status = RelaunchStatus::None;
+        self.unattended = false;
         ctx.notify();
         previous_status
     }

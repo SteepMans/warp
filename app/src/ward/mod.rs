@@ -8,6 +8,7 @@ pub mod agents;
 pub mod agent_state;
 pub mod announcements;
 pub mod attention;
+pub mod auto_install;
 pub mod changelog;
 pub mod chimney;
 pub mod claude_launch;
