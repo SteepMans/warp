@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::Write as _;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use std::{fs, io};
 
@@ -269,7 +269,51 @@ pub(super) fn check_and_report_update_errors(ctx: &mut AppContext) {
     }
 }
 
-pub(super) fn relaunch() -> Result<()> {
+/// Inno Setup's uninstall key of the OSS channel (Ward): the `AppId` of
+/// `script/windows/windows-installer.iss` with `_is1`. A per-user install writes it under
+/// `HKEY_CURRENT_USER`, an install for all users under `HKEY_LOCAL_MACHINE`.
+const OSS_UNINSTALL_KEY: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\Uninstall\warp-terminal-oss_is1";
+
+/// Whether the running copy of Ward is the one installed for the current user only, so its
+/// installer updates it without administrator rights and without a UAC prompt. Read once: the
+/// install does not move while Ward runs.
+pub(super) fn is_per_user_install() -> bool {
+    static PER_USER: OnceLock<bool> = OnceLock::new();
+    *PER_USER.get_or_init(|| {
+        let per_user = read_per_user_install();
+        log::info!("Ward is installed for the current user only: {per_user}");
+        per_user
+    })
+}
+
+fn read_per_user_install() -> bool {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
+
+    if ChannelState::channel() != Channel::Oss {
+        return false;
+    }
+    let Ok(install_dir) = install_dir() else {
+        return false;
+    };
+    let Ok(key) = RegKey::predef(HKEY_CURRENT_USER).open_subkey(OSS_UNINSTALL_KEY) else {
+        return false;
+    };
+    let location = key
+        .get_value::<String, _>("InstallLocation")
+        .or_else(|_| key.get_value::<String, _>("Inno Setup: App Path"));
+    location.is_ok_and(|location| {
+        crate::ward::auto_install::same_install_dir(&location, &install_dir.to_string_lossy())
+    })
+}
+
+/// Starts the installer of the downloaded update; it waits for Ward to exit, installs and starts
+/// Ward again. `unattended`: Ward installs the update by itself, so nothing may show up — no
+/// progress window (`/VERYSILENT` instead of `/SILENT`) and no choice of the install mode, which
+/// `PrivilegesRequiredOverridesAllowed=dialog` offers unless the mode is given (`/CURRENTUSER`;
+/// the caller made sure this copy is a per-user install, see [`is_per_user_install`]).
+pub(super) fn relaunch(unattended: bool) -> Result<()> {
     let install_dir = install_dir()?;
     let Some(installer_path) = INSTALLER_PATH
         .lock()
@@ -291,27 +335,41 @@ pub(super) fn relaunch() -> Result<()> {
     // installing the update files.
     // https://jrsoftware.org/ishelp/index.php?topic=setupcmdline
     Command::new(&installer_path)
-        .args([
-            // Skip asking the user to confirm.
-            "/SP-",
-            // Do not prompt the user for anything. Note that we do not use "VERYSILENT" so that a
-            // progress bar is still shown. This is useful since the update process may take a few
-            // seconds.
-            "/SILENT",
-            // Do not provide a cancel button on the progress bar page.
-            "/NOCANCEL",
-            // Indicate that restarting Windows is not necessary.
-            "/NORESTART",
+        .args(installer_args(
+            unattended,
             &log_arg,
-            "/update=1",
-            // Do not forcibly kill Warp via RestartManager. The installer will wait for
-            // Warp to exit naturally by polling the single-instance mutex instead.
-            "/NOCLOSEAPPLICATIONS",
-            &format!("/DIR={}", install_dir.display()),
-        ])
+            &install_dir.display().to_string(),
+        ))
         .spawn()?;
 
     Ok(())
+}
+
+fn installer_args(unattended: bool, log_arg: &str, install_dir: &str) -> Vec<String> {
+    let mut args = vec![
+        // Skip asking the user to confirm.
+        "/SP-".to_owned(),
+        // Do not prompt the user for anything. Note that we do not use "VERYSILENT" for an update
+        // the user asked for, so that a progress bar is still shown. This is useful since the
+        // update process may take a few seconds. An unattended update shows nothing at all.
+        if unattended { "/VERYSILENT" } else { "/SILENT" }.to_owned(),
+        // Do not provide a cancel button on the progress bar page.
+        "/NOCANCEL".to_owned(),
+        // Indicate that restarting Windows is not necessary.
+        "/NORESTART".to_owned(),
+        log_arg.to_owned(),
+        "/update=1".to_owned(),
+        // Do not forcibly kill Warp via RestartManager. The installer will wait for
+        // Warp to exit naturally by polling the single-instance mutex instead.
+        "/NOCLOSEAPPLICATIONS".to_owned(),
+        format!("/DIR={install_dir}"),
+    ];
+    if unattended {
+        // Install for the current user, as before, without asking which mode: no dialog and no
+        // UAC prompt.
+        args.push("/CURRENTUSER".to_owned());
+    }
+    args
 }
 
 fn installer_file_name() -> Result<String> {

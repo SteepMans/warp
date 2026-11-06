@@ -1,4 +1,4 @@
-use super::{parse_forcekill_exit_code, parse_minidump_cleanup_exit_code};
+use super::{installer_args, parse_forcekill_exit_code, parse_minidump_cleanup_exit_code};
 
 fn log(line: &str) -> Vec<u8> {
     line.to_ascii_lowercase().into_bytes()
@@ -69,4 +69,31 @@ fn parses_unsigned_minidump_cleanup_exit_code() {
 fn returns_none_for_empty_log() {
     assert_eq!(parse_forcekill_exit_code(b""), None);
     assert_eq!(parse_minidump_cleanup_exit_code(b""), None);
+}
+
+#[test]
+fn update_the_user_asked_for_shows_progress() {
+    let args = installer_args(false, "/LOG=update.log", r"C:\Ward");
+    assert_eq!(
+        args,
+        [
+            "/SP-",
+            "/SILENT",
+            "/NOCANCEL",
+            "/NORESTART",
+            "/LOG=update.log",
+            "/update=1",
+            "/NOCLOSEAPPLICATIONS",
+            r"/DIR=C:\Ward",
+        ]
+    );
+}
+
+#[test]
+fn unattended_update_shows_nothing_and_asks_for_no_install_mode() {
+    let args = installer_args(true, "/LOG=update.log", r"C:\Ward");
+    assert!(args.iter().any(|arg| arg == "/VERYSILENT"));
+    assert!(!args.iter().any(|arg| arg == "/SILENT"));
+    assert!(args.iter().any(|arg| arg == "/CURRENTUSER"));
+    assert!(args.iter().any(|arg| arg == "/update=1"));
 }
