@@ -1,6 +1,8 @@
 //! Settings → Updates (Ward only): the running and the latest version, what the updater is
 //! doing right now and a "Check now" button that always answers. The logic lives in
 //! `crate::ward::updates`; this view renders it and re-renders on every autoupdate change.
+//! "Install updates automatically" and the reason a ready update still waits come from
+//! `crate::ward::auto_install`.
 
 use std::time::Duration;
 
@@ -13,12 +15,14 @@ use warpui::elements::{
 use warpui::fonts::Weight;
 use warpui::ui_components::button::ButtonVariant;
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
+use warpui::ui_components::switch::SwitchStateHandle;
 use warpui::{
     AppContext, Entity, EventContext, SingletonEntity, TypedActionView, View, ViewContext,
     ViewHandle,
 };
 
 use super::SettingsSection;
+use super::cli_agents_page::render_ward_toggle;
 use super::settings_page::{
     MatchData, PageType, SettingsPageEvent, SettingsPageMeta, SettingsPageViewHandle,
     SettingsWidget, render_sub_header,
@@ -27,6 +31,7 @@ use crate::appearance::Appearance;
 use crate::autoupdate::{AutoupdateState, fork_manifest};
 use crate::channel::ChannelState;
 use crate::server::server_api::ServerApiProvider;
+use crate::ward::auto_install::{self, AutoInstallModel};
 use crate::ward::changelog::{self, WardChangelog};
 use crate::ward::updates::{self, CheckInfo, CheckNowDecision, StatusAction, StatusKind};
 use crate::workspace::WorkspaceAction;
@@ -39,6 +44,7 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 #[derive(Clone, Debug)]
 pub enum UpdatesPageAction {
     CheckNow,
+    ToggleAutoInstall,
 }
 
 /// Release notes of the version the page describes.
@@ -67,6 +73,10 @@ impl UpdatesPageView {
             }
             ctx.notify();
         });
+        // The reason a ready update waits changes with every check.
+        if ctx.has_singleton_model::<AutoInstallModel>() {
+            ctx.observe(&AutoInstallModel::handle(ctx), |_, _, ctx| ctx.notify());
+        }
         Self {
             page: PageType::new_monolith(UpdatesWidget::default(), Some(PAGE_TITLE), true),
             check_now_decision: None,
@@ -145,6 +155,11 @@ impl TypedActionView for UpdatesPageView {
                 self.check_now_decision = Some(decision);
                 ctx.notify();
             }
+            UpdatesPageAction::ToggleAutoInstall => {
+                let enabled = auto_install::is_enabled(ctx);
+                auto_install::set_enabled(!enabled, ctx);
+                ctx.notify();
+            }
         }
     }
 }
@@ -166,6 +181,7 @@ struct UpdatesWidget {
     copy_version_button: MouseStateHandle,
     whats_new_link: MouseStateHandle,
     all_changes_link: MouseStateHandle,
+    auto_install_switch: SwitchStateHandle,
 }
 
 impl UpdatesWidget {
@@ -287,6 +303,13 @@ impl UpdatesWidget {
                 .finish(),
         );
 
+        if let Some(text) = auto_install::status_text(app) {
+            children.push(
+                Container::new(Self::sub_text(appearance, text))
+                    .with_margin_top(8.)
+                    .finish(),
+            );
+        }
         if let Some(note) = view
             .check_now_decision
             .and_then(|decision| decision.note(state.is_polling_started()))
@@ -306,6 +329,30 @@ impl UpdatesWidget {
             .finish(),
         );
         children
+    }
+
+    /// "Install updates automatically", where Ward can install by itself (Windows).
+    fn render_auto_install(
+        &self,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Option<Box<dyn Element>> {
+        auto_install::model(app)?;
+        Some(render_ward_toggle(
+            "Install updates automatically",
+            &format!(
+                "Ward installs a downloaded update by itself and comes back with the same tabs \
+                 once it disturbs nobody: no input in Ward for {} minutes, no command running in \
+                 any tab and no agent in the middle of a turn. New agent tasks are paused for the \
+                 restart. Off: updates wait for Install and restart.",
+                auto_install::IDLE_BEFORE_INSTALL.as_secs() / 60
+            ),
+            auto_install::is_enabled(app),
+            self.auto_install_switch.clone(),
+            UpdatesPageAction::ToggleAutoInstall,
+            appearance,
+            app,
+        ))
     }
 
     fn render_versions(&self, appearance: &Appearance, app: &AppContext) -> Vec<Box<dyn Element>> {
@@ -472,7 +519,7 @@ impl SettingsWidget for UpdatesWidget {
     type View = UpdatesPageView;
 
     fn search_terms(&self) -> &str {
-        "updates update check version install restart what's new changelog ward"
+        "updates update check version install restart automatically what's new changelog ward"
     }
 
     fn render(
@@ -493,10 +540,13 @@ impl SettingsWidget for UpdatesWidget {
         };
         let mut versions = vec![render_sub_header(appearance, "Version", None)];
         versions.extend(self.render_versions(appearance, app));
-        Flex::column()
+        let mut page = Flex::column()
             .with_cross_axis_alignment(CrossAxisAlignment::Start)
-            .with_child(section(self.render_status(view, appearance, app), 8.))
-            .with_child(section(versions, 28.))
+            .with_child(section(self.render_status(view, appearance, app), 8.));
+        if let Some(toggle) = self.render_auto_install(appearance, app) {
+            page.add_child(section(vec![toggle], 28.));
+        }
+        page.with_child(section(versions, 28.))
             .with_child(section(self.render_notes(view, appearance), 28.))
             .finish()
     }
