@@ -516,6 +516,12 @@ impl Provider for Claude {
     fn said(&self, entry: &Value) -> Vec<Said> {
         parse_said(entry)
     }
+
+    /// Remote Control of [`Provider::command`] shows the sessions of the other machines, and
+    /// `--dangerously-skip-permissions` lets the agent write to them without asking.
+    fn messages_peers(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
