@@ -61,6 +61,7 @@ use super::git::{self, WorktreeSpec};
 use super::journal::Journal;
 use super::launch::{self, RunnerKind};
 use super::machine::{self, Machine};
+use super::peers;
 use super::plan::{self, Plan};
 use super::prepare;
 use super::profile::{self, Vault};
@@ -2296,7 +2297,8 @@ impl Worker {
     /// Writes the session files and opens its tab. `resume`: the agent session to continue
     /// instead of a new one — then the prompt is not written, the agent has it in its history.
     /// The prompt ends with Ward's note on `about.json` ([`about`]), which keeps the description
-    /// of the session on the Agents screen current.
+    /// of the session on the Agents screen current, and, for an agent that can write to the
+    /// owner's other sessions, the note on them ([`peers`]).
     async fn launch(
         &self,
         session: &Session,
@@ -2309,17 +2311,27 @@ impl Worker {
             .ok_or_else(|| "no pwsh or Git Bash".to_owned())?;
         let agents = launch::agents_dir(worktree);
         std::fs::create_dir_all(&agents).map_err(|err| err.to_string())?;
+        let name = launch::session_name(&session.assignment.task_ref, &session.assignment.title);
         if resume.is_none() {
-            let prompt = about::with_instruction(
+            let mut prompt = about::with_instruction(
                 &session.assignment.prompt,
                 &agents.join(about::ABOUT_FILE),
             );
+            if session.provider.messages_peers() {
+                let worker_name = self
+                    .state
+                    .lock()
+                    .config
+                    .as_ref()
+                    .map(|config| config.name.clone())
+                    .unwrap_or_default();
+                prompt = peers::with_instruction(&prompt, &name, &worker_name);
+            }
             std::fs::write(agents.join(launch::PROMPT_FILE), prompt)
                 .map_err(|err| err.to_string())?;
         }
         let _ = std::fs::remove_file(agents.join(launch::EXIT_CODE_FILE));
         let _ = std::fs::remove_file(agents.join(launch::RUNNER_PID_FILE));
-        let name = launch::session_name(&session.assignment.task_ref, &session.assignment.title);
         // The model may come from the plan, and the orchestrator may have meant another agent.
         let model = provider::launch_model(session.provider, session.assignment.model.as_deref());
         let command = session.provider.command(&name, model, resume);

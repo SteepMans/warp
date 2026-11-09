@@ -595,13 +595,24 @@ fn full_cycle_against_a_fake_service() {
         .join(".worktrees")
         .join("s-good");
     let agents = worktree.join(".agents");
-    // The prompt of the assignment, then Ward's note on the file about the session.
+    // The prompt of the assignment, then Ward's notes on the file about the session and on the
+    // other sessions.
     let prompt = std::fs::read_to_string(agents.join("prompt.md")).unwrap();
     assert!(
         prompt.starts_with("Do the demo task\n\n## Для экрана агентов"),
         "{prompt}"
     );
     assert!(prompt.contains("/.agents/about.json"), "{prompt}");
+    // Claude also gets the note on the owner's other sessions, under its Remote Control name.
+    assert!(prompt.contains("\n\n## Другие сессии\n\n"), "{prompt}");
+    assert!(
+        prompt.contains("Твоя сессия называется «4700 Demo task», машина test-pc."),
+        "{prompt}"
+    );
+    assert!(
+        prompt.find("## Для экрана агентов").unwrap() < prompt.find("## Другие сессии").unwrap(),
+        "{prompt}"
+    );
     assert!(agents.join(RunnerKind::Pwsh.file_name()).is_file());
     {
         let tabs = host.tabs.lock();

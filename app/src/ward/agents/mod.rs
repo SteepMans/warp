@@ -48,6 +48,7 @@ pub mod git;
 pub mod journal;
 pub mod launch;
 pub mod machine;
+pub mod peers;
 pub mod plan;
 pub mod prepare;
 pub mod presence;

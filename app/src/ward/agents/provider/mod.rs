@@ -287,6 +287,12 @@ pub trait Provider: Send + Sync {
     /// that is no reply (a tool result, a snapshot, a token count), one line for a message,
     /// several for a message that also called tools. See [`chat`].
     fn said(&self, entry: &serde_json::Value) -> Vec<Said>;
+
+    /// Whether the agent can find the owner's other sessions and write to them (`ListAgents`,
+    /// `SendMessage`), so its prompt gets the note of [`super::peers`].
+    fn messages_peers(&self) -> bool {
+        false
+    }
 }
 
 static CLAUDE: claude::Claude = claude::Claude;
