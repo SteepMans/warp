@@ -376,6 +376,10 @@ const MESSAGE_RESUMED_WORKTREE: &str =
 const MESSAGE_WAITING_AFTER_RESTART: &str = "Ward перезапустился, ждём, вернётся ли процесс агента";
 const MESSAGE_AGENT_GONE: &str =
     "Ward перезапустился, процесс агента не выжил: работа сессии прервана на середине";
+const MESSAGE_ANSWER_AGENT_GONE: &str =
+    "Ward перезапустился, процесс агента не выжил. Работа была готова и ждёт проверки";
+const MESSAGE_ANSWER_AGENT_EXITED: &str =
+    "Агент завершился без кода выхода, пока работа ждала проверки. Результат остаётся на проверке";
 const MESSAGE_PREPARE_AGENT_GONE: &str =
     "Ward перезапустился, процесс оркестратора не выжил, плана он не оставил";
 const MESSAGE_NO_TAB: &str = "Сообщение не доставлено: открытой вкладки сессии не нашлось";
@@ -1947,7 +1951,9 @@ impl Worker {
     /// The executor: picked up while its process is still there, closed honestly when it is
     /// not. An exit code the runner managed to leave is the end of the session, whatever Ward
     /// was doing at the time; without one the restart is what ended it, and the message says
-    /// that instead of "never started" or a `review` nobody earned.
+    /// that instead of "never started" or a `review` nobody earned. A session that waited for
+    /// the owner over a finished answer keeps it: `review` stays, and nothing about it is
+    /// reported again ([`report_picked_up`], [`Worker::fail_after_restart`]).
     fn restore_launched(&self, session: &mut Session, saved: &SavedSession, launched_at: Instant) {
         let Some(worktree) = session.worktree.clone() else {
             self.fail_after_restart(session, MESSAGE_AGENT_GONE);
@@ -1962,21 +1968,12 @@ impl Worker {
                 launched_at_ms: saved.launched_at_ms,
                 at: launched_at,
             };
-            // A session that was waiting for the owner goes on waiting; anything else is
-            // running again.
-            let blocked = saved.status == SessionStatus::Blocked;
-            let mut request = session.status_request(if blocked {
-                SessionStatus::Blocked
-            } else {
-                SessionStatus::Running
-            });
-            request.reason = saved.reason.clone().filter(|_| blocked);
-            request.message = Some(session.with_worktree_note(MESSAGE_RESUMED));
             log::info!(
                 "Ward agents: session {} is picked up after the restart of Ward",
                 session.assignment.session_id
             );
-            session.set_status(request);
+            let message = session.with_worktree_note(MESSAGE_RESUMED);
+            report_picked_up(session, message);
             return;
         }
         if let Some(code) = read_exit_code(&agents) {
@@ -1996,6 +1993,12 @@ impl Worker {
             at: Instant::now(),
         };
         session.restarted = true;
+        // The answer the session waited with is with the service already, and waiting for the
+        // agent changes nothing about it: no `running` for an agent that is not working.
+        if session.status == SessionStatus::Review {
+            session.message = Some(MESSAGE_WAITING_AFTER_RESTART.to_owned());
+            return;
+        }
         let mut request = session.status_request(session.status);
         request.reason = session.reason.clone();
         request.message = Some(MESSAGE_WAITING_AFTER_RESTART.to_owned());
@@ -2019,18 +2022,14 @@ impl Worker {
     ) -> bool {
         if self.revive(session, cwd, launched_at_ms, role) {
             session.restarted = false;
-            let status = if role == ROLE_EXECUTOR {
-                SessionStatus::Running
+            if role == ROLE_EXECUTOR {
+                let message = session.with_worktree_note(MESSAGE_RESUMED);
+                report_picked_up(session, message);
             } else {
-                SessionStatus::Preparing
-            };
-            let mut request = session.status_request(status);
-            request.message = Some(session.with_worktree_note(if role == ROLE_EXECUTOR {
-                MESSAGE_RESUMED
-            } else {
-                MESSAGE_RESUMED_PREPARING
-            }));
-            session.set_status(request);
+                let mut request = session.status_request(SessionStatus::Preparing);
+                request.message = Some(session.with_worktree_note(MESSAGE_RESUMED_PREPARING));
+                session.set_status(request);
+            }
             return false;
         }
         if launched_at.elapsed() < self.timing.session_start_grace {
@@ -2044,7 +2043,9 @@ impl Worker {
         true
     }
 
-    /// Closes a session whose agent did not survive the restart of Ward.
+    /// Closes a session whose agent did not survive the restart of Ward. Its work was cut off,
+    /// unless the session waited for the owner over a finished answer: that work is done, and
+    /// the session ends keeping its `review` ([`close_answered`]).
     fn fail_after_restart(&self, session: &mut Session, message: &str) {
         log::info!(
             "Ward agents: session {} did not survive the restart of Ward",
@@ -2052,6 +2053,10 @@ impl Worker {
         );
         self.stop_agent(session);
         self.read_journal(session);
+        if session.status == SessionStatus::Review {
+            close_answered(session, MESSAGE_ANSWER_AGENT_GONE);
+            return;
+        }
         let mut request = session.status_request(SessionStatus::Failed);
         request.reason = Some(REASON_WARD_RESTARTED.to_owned());
         request.message = Some(message.to_owned());
@@ -3203,6 +3208,17 @@ impl Worker {
     /// The agent exited (`code`) or vanished (`None`): the final status.
     fn end(&self, session: &mut Session, code: Option<i32>) {
         self.read_journal(session);
+        // The agent went without a word while its answer waited for the owner (the tab was
+        // closed, or the process Ward took for it after a restart was another one): the work
+        // is done all the same.
+        if code.is_none() && session.stop.is_none() && session.status == SessionStatus::Review {
+            log::info!(
+                "Ward agents: the agent of session {} went while its answer waited for the owner",
+                session.assignment.session_id
+            );
+            close_answered(session, MESSAGE_ANSWER_AGENT_EXITED);
+            return;
+        }
         let mut request = if let Some((reason, _)) = session.stop {
             let mut request = session.status_request(SessionStatus::Failed);
             request.message = Some(reason.to_owned());
@@ -3550,6 +3566,38 @@ fn finish(session: &mut Session, request: StatusRequest) {
     session.phase = Phase::Done;
 }
 
+/// The status of an executor picked up after a restart of Ward whose agent is there. A session
+/// that waited for the owner goes on waiting: `blocked` is reported again for the same reason,
+/// and `review` is not reported at all, because the service has that answer already and a
+/// repeat would only move its time of finishing. Anything else is running again — never as
+/// work taken up again ([`StatusRequest::resumed`]): the restart is not the owner's doing.
+fn report_picked_up(session: &mut Session, message: String) {
+    match session.status {
+        SessionStatus::Review => session.message = Some(message),
+        SessionStatus::Blocked => {
+            let mut request = session.status_request(SessionStatus::Blocked);
+            request.reason = session.reason.clone();
+            request.message = Some(message);
+            session.set_status(request);
+        }
+        _ => {
+            let mut request = session.status_request(SessionStatus::Running);
+            request.message = Some(message);
+            session.set_status(request);
+        }
+    }
+}
+
+/// Ends a session whose agent is gone while it waited for the owner over a finished answer.
+/// The work is done and the service holds it as `review`, so nothing is reported: the card
+/// keeps the answer and the column the owner put it in, and the session does not end on a
+/// `failed` it did not earn. Only the session of this Ward ends; the owner accepts the result
+/// or takes the work up again as with any finished session.
+fn close_answered(session: &mut Session, message: &str) {
+    session.message = Some(message.to_owned());
+    session.phase = Phase::Done;
+}
+
 /// The message of a preparation whose orchestrator ended its turn on an error of the API, with
 /// the error.
 fn agent_error_message(error: &str) -> String {
@@ -3573,8 +3621,11 @@ fn agent_error_waits_message(error: &str) -> String {
     }
 }
 
-/// Whether the service takes this status from a worker (`FROM_WORKER` of the contract): a
-/// session that has not started yet has nothing to report.
+/// Whether a session still going reports its status again as it is, with a message about Ward
+/// closing, the restart or a message that was not delivered. A session that has not started
+/// yet has nothing to report. `review` is with the service already and a repeat would only move
+/// its time of finishing; it is not a session that has not started either, so a restart never
+/// turns it into `running`.
 fn is_reportable(status: SessionStatus) -> bool {
     matches!(
         status,
