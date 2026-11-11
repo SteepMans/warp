@@ -1493,6 +1493,8 @@ impl Worker {
                     };
                     let mut request = session.status_request(SessionStatus::Running);
                     request.message = Some(MESSAGE_RESTORED.to_owned());
+                    // The owner brought the session back to work.
+                    request.resumed = true;
                     session.set_status(request);
                 }
                 Err(err) => {
@@ -3187,9 +3189,11 @@ impl Worker {
                 request.message = Some(MESSAGE_PREPARING.to_owned());
                 session.set_status(request);
             }
+            // The owner wrote into the session, or the agent went on by itself: work again.
             (SessionStatus::Blocked | SessionStatus::Review, None) => {
                 let mut request = session.status_request(SessionStatus::Running);
                 request.message = Some(MESSAGE_RUNNING.to_owned());
+                request.resumed = true;
                 session.set_status(request);
             }
             _ => {}

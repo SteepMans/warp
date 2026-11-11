@@ -420,6 +420,16 @@ fn status_request_carries_what_the_session_is_about_only_when_known() {
 }
 
 #[test]
+fn status_request_says_resumed_only_for_work_taken_up_again() {
+    let mut request = StatusRequest::new(SessionStatus::Running);
+    let body = serde_json::to_value(&request).unwrap();
+    assert!(body.get("resumed").is_none(), "{body}");
+    request.resumed = true;
+    let body = serde_json::to_value(&request).unwrap();
+    assert_eq!(body["resumed"], true);
+}
+
+#[test]
 fn ack_bodies() {
     assert_eq!(
         serde_json::to_value(AckRequest::accept()).unwrap(),

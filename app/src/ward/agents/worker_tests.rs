@@ -1935,11 +1935,13 @@ fn an_executor_that_answered_and_went_quiet_waits_for_the_owner() {
     assert_eq!(session.outbox.len(), reported);
     assert_eq!(session.status, SessionStatus::Review);
 
-    // The agent went on by itself (a background job it was waiting for): the session runs again.
+    // The agent went on by itself (a background job it was waiting for): the session runs again,
+    // and the service learns it is work taken up again, not a start.
     let more = assistant_line("{\"type\":\"text\",\"text\":\"Заливка закончилась\"}");
     std::fs::write(&transcript, format!("{PROMPT_LINE}{answer}{more}")).unwrap();
     futures::executor::block_on(worker.advance(&mut session));
     assert_eq!(session.status, SessionStatus::Running);
+    assert!(session.outbox.back().unwrap().resumed);
     assert!(!session.is_done());
 }
 
@@ -2086,6 +2088,8 @@ fn a_restored_session_resumes_the_agent_in_its_worktree() {
     let session = state.sessions.last().unwrap();
     assert!(!session.is_done());
     assert_eq!(session.status, SessionStatus::Running);
+    // The owner brought it back: work taken up again, which moves the card back to work.
+    assert!(session.outbox.back().unwrap().resumed);
     assert_eq!(session.worktree.as_deref(), Some(worktree.as_path()));
     // The agent session is known in advance: the transcript is found by its id.
     assert_eq!(
@@ -2397,6 +2401,8 @@ fn a_restart_picks_up_a_live_agent() {
     assert_eq!(running.status, SessionStatus::Running);
     assert_eq!(running.reason, None);
     assert_eq!(running.agent_session_id.as_deref(), Some(AGENT_SESSION_ID));
+    // A pick-up is not work taken up again: the card stays where the owner put it.
+    assert!(!running.resumed);
     // The agent was left alone, and the session holds the slot of the machine again.
     assert!(machine.stopped.lock().is_empty());
     assert_eq!(after.state.lock().known_ids.len(), 1);
