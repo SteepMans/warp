@@ -504,6 +504,13 @@ pub struct StatusRequest {
     /// Project tags from the same file; left out while empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// `running` that is work taken up again: the session waited for the owner (`review` or
+    /// `blocked`) and its transcript grew, or the owner restored it. The service moves the card
+    /// back to work by it; the start of a session, a repeat of `running` and a session picked up
+    /// after a restart of Ward go without it. Left out while false, so an older service sees the
+    /// body it always saw.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub resumed: bool,
 }
 
 impl StatusRequest {
@@ -523,6 +530,7 @@ impl StatusRequest {
             resets_at: None,
             summary: None,
             tags: Vec::new(),
+            resumed: false,
         }
     }
 }

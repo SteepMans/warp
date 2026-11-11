@@ -1935,11 +1935,13 @@ fn an_executor_that_answered_and_went_quiet_waits_for_the_owner() {
     assert_eq!(session.outbox.len(), reported);
     assert_eq!(session.status, SessionStatus::Review);
 
-    // The agent went on by itself (a background job it was waiting for): the session runs again.
+    // The agent went on by itself (a background job it was waiting for): the session runs again,
+    // and the service learns it is work taken up again, not a start.
     let more = assistant_line("{\"type\":\"text\",\"text\":\"Заливка закончилась\"}");
     std::fs::write(&transcript, format!("{PROMPT_LINE}{answer}{more}")).unwrap();
     futures::executor::block_on(worker.advance(&mut session));
     assert_eq!(session.status, SessionStatus::Running);
+    assert!(session.outbox.back().unwrap().resumed);
     assert!(!session.is_done());
 }
 
@@ -2086,6 +2088,8 @@ fn a_restored_session_resumes_the_agent_in_its_worktree() {
     let session = state.sessions.last().unwrap();
     assert!(!session.is_done());
     assert_eq!(session.status, SessionStatus::Running);
+    // The owner brought it back: work taken up again, which moves the card back to work.
+    assert!(session.outbox.back().unwrap().resumed);
     assert_eq!(session.worktree.as_deref(), Some(worktree.as_path()));
     // The agent session is known in advance: the transcript is found by its id.
     assert_eq!(
@@ -2397,6 +2401,8 @@ fn a_restart_picks_up_a_live_agent() {
     assert_eq!(running.status, SessionStatus::Running);
     assert_eq!(running.reason, None);
     assert_eq!(running.agent_session_id.as_deref(), Some(AGENT_SESSION_ID));
+    // A pick-up is not work taken up again: the card stays where the owner put it.
+    assert!(!running.resumed);
     // The agent was left alone, and the session holds the slot of the machine again.
     assert!(machine.stopped.lock().is_empty());
     assert_eq!(after.state.lock().known_ids.len(), 1);
@@ -2923,6 +2929,247 @@ fn a_restart_follows_an_agent_that_came_back_without_its_runner() {
     assert!(session.is_done());
     assert_eq!(session.status, SessionStatus::Failed);
     assert_eq!(session.outbox.back().unwrap().exit_code, None);
+}
+
+/// A session whose agent ended its turn with `last` and went quiet, saved the way the run before
+/// a restart of Ward left it: waiting for the owner, the agent still there and every line of the
+/// transcript with the service. Returns the transcript written.
+fn waiting_and_saved(
+    dir: &Path,
+    machine: &Arc<WatchedMachine>,
+    transcript: &Path,
+    last: &str,
+) -> String {
+    let root = dir.join("agents-work");
+    let text = format!("{PROMPT_LINE}{last}");
+    std::fs::write(transcript, &text).unwrap();
+    let worker = offline_worker(dir, machine.clone(), idle_timing());
+    let mut session = launched_session(&root, Some(transcript));
+    session.role = Some(ROLE_EXECUTOR);
+    futures::executor::block_on(worker.advance(&mut session));
+    std::thread::sleep(Duration::from_millis(300));
+    futures::executor::block_on(worker.advance(&mut session));
+    assert!(matches!(
+        session.status,
+        SessionStatus::Review | SessionStatus::Blocked
+    ));
+    take_journal(&mut session);
+    save_session_state(&mut session, &root);
+    text
+}
+
+/// The closing answer of the agent in the tests below.
+fn answer_line() -> String {
+    assistant_line("{\"type\":\"text\",\"text\":\"Готово, PR открыт\"}")
+}
+
+/// The session file Claude Code keeps for a running agent of the worktree of the tests.
+fn write_agent_session_file(dir: &Path, worktree: &Path, pid: u32) {
+    let sessions_dir = dir.join("home").join(".claude").join("sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    let session_file = serde_json::json!({
+        "pid": pid,
+        "sessionId": AGENT_SESSION_ID,
+        "cwd": worktree.to_string_lossy(),
+        "startedAt": now_ms(),
+    });
+    std::fs::write(
+        sessions_dir.join(format!("{pid}.json")),
+        session_file.to_string(),
+    )
+    .unwrap();
+}
+
+/// Ward restarted while the agent waited for the owner over its answer, and the agent did not
+/// survive. It was not working, so no `running` goes out — the service would take the card of a
+/// finished task back to work by it. Given up, the session keeps its answer for review instead
+/// of a `failed` saying the work was cut off in the middle.
+#[test]
+fn a_restart_keeps_an_answer_whose_agent_is_gone_for_review() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("agents-work");
+    let transcript = dir.path().join("executor.jsonl");
+    let machine = Arc::new(WatchedMachine::default());
+    waiting_and_saved(dir.path(), &machine, &transcript, &answer_line());
+
+    *machine.alive.lock() = false;
+    let timing = Timing {
+        session_start_grace: Duration::from_millis(100),
+        ..idle_timing()
+    };
+    let after = offline_worker(dir.path(), machine.clone(), timing);
+    let mut sessions = restored_sessions(&after);
+    assert_eq!(sessions.len(), 1);
+    let session = &mut sessions[0];
+
+    // The agent is waited for, as for any session, but the service hears nothing of it.
+    assert!(!session.is_done());
+    assert_eq!(session.status, SessionStatus::Review);
+    assert!(session.outbox.is_empty(), "{:?}", session.outbox);
+    let waiting = session.message.clone().unwrap_or_default();
+    assert!(waiting.contains("ждём"), "{waiting}");
+    futures::executor::block_on(after.advance(session));
+    assert!(!session.is_done());
+    assert!(session.outbox.is_empty(), "{:?}", session.outbox);
+
+    // Nothing comes back: the session ends, and the answer stays for review.
+    std::thread::sleep(Duration::from_millis(150));
+    futures::executor::block_on(after.advance(session));
+    assert!(session.is_done());
+    assert_eq!(session.status, SessionStatus::Review);
+    assert!(session.outbox.is_empty(), "{:?}", session.outbox);
+    let message = session.message.clone().unwrap_or_default();
+    assert!(message.contains("ждёт проверки"), "{message}");
+    save_session_state(session, &root);
+    assert!(resume::scan(&root).is_empty());
+}
+
+/// Ward restarted while the agent waited for the owner over its answer, and the agent is still
+/// there: the session goes on waiting without a word to the service, and only the owner's next
+/// message puts it back to work — as work taken up again.
+#[test]
+fn a_restart_leaves_an_answer_with_a_live_agent_waiting() {
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("executor.jsonl");
+    let machine = Arc::new(WatchedMachine::default());
+    let text = waiting_and_saved(dir.path(), &machine, &transcript, &answer_line());
+
+    let after = offline_worker(dir.path(), machine.clone(), idle_timing());
+    let mut sessions = restored_sessions(&after);
+    let session = &mut sessions[0];
+    assert!(!session.is_done());
+    assert_eq!(session.status, SessionStatus::Review);
+    assert!(session.outbox.is_empty(), "{:?}", session.outbox);
+    let message = session.message.clone().unwrap_or_default();
+    assert!(message.contains("подхвачена"), "{message}");
+
+    // As quiet after the restart as before it: the same answer, not reported again.
+    std::thread::sleep(Duration::from_millis(300));
+    futures::executor::block_on(after.advance(session));
+    assert!(!session.is_done());
+    assert_eq!(session.status, SessionStatus::Review);
+    assert!(session.outbox.is_empty(), "{:?}", session.outbox);
+
+    // The owner wrote into the session.
+    std::fs::write(&transcript, format!("{text}{PROMPT_LINE}")).unwrap();
+    futures::executor::block_on(after.advance(session));
+    assert_eq!(session.status, SessionStatus::Running);
+    let running = session.outbox.back().unwrap();
+    assert_eq!(running.status, SessionStatus::Running);
+    assert!(running.resumed);
+}
+
+/// After the restart the agent of an answer turned up again under a process that then went
+/// without an exit code: its tab was closed, or the process only had the pid that the agent's
+/// old session file named. The work was done before all of it, so the answer stays for review.
+#[test]
+fn an_answer_whose_agent_comes_back_and_goes_stays_for_review() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("agents-work");
+    let worktree = root.join("worktree");
+    std::fs::create_dir_all(&worktree).unwrap();
+    let transcript = dir.path().join("executor.jsonl");
+    let machine = Arc::new(WatchedMachine::default());
+    waiting_and_saved(dir.path(), &machine, &transcript, &answer_line());
+
+    machine.gone.lock().extend([RUNNER_PID, EXECUTOR_PID]);
+    let timing = Timing {
+        exit_grace: Duration::from_millis(50),
+        ..idle_timing()
+    };
+    let after = offline_worker(dir.path(), machine.clone(), timing);
+    let mut sessions = restored_sessions(&after);
+    let session = &mut sessions[0];
+    assert!(session.outbox.is_empty(), "{:?}", session.outbox);
+
+    // The agent is back: the session still waits for the owner, and says nothing.
+    write_agent_session_file(dir.path(), &worktree, RESUMED_PID);
+    futures::executor::block_on(after.advance(session));
+    assert!(!session.is_done());
+    assert_eq!(session.status, SessionStatus::Review);
+    assert_eq!(
+        session.found.as_ref().map(|found| found.pid),
+        Some(Some(RESUMED_PID))
+    );
+    assert!(session.outbox.is_empty(), "{:?}", session.outbox);
+
+    // And gone again, without an exit code.
+    machine.gone.lock().push(RESUMED_PID);
+    futures::executor::block_on(after.advance(session));
+    std::thread::sleep(Duration::from_millis(100));
+    futures::executor::block_on(after.advance(session));
+    assert!(session.is_done());
+    assert_eq!(session.status, SessionStatus::Review);
+    assert!(session.outbox.is_empty(), "{:?}", session.outbox);
+    let message = session.message.clone().unwrap_or_default();
+    assert!(message.contains("ждала проверки"), "{message}");
+}
+
+/// A session that asked the owner and whose agent turned up again after the restart still
+/// waits for the answer: `blocked` for the same reason, not `running`.
+#[test]
+fn a_question_whose_agent_comes_back_still_waits_for_the_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("agents-work");
+    let worktree = root.join("worktree");
+    std::fs::create_dir_all(&worktree).unwrap();
+    let transcript = dir.path().join("executor.jsonl");
+    let machine = Arc::new(WatchedMachine::default());
+    let question =
+        assistant_line("{\"type\":\"tool_use\",\"name\":\"AskUserQuestion\",\"input\":{}}");
+    waiting_and_saved(dir.path(), &machine, &transcript, &question);
+
+    machine.gone.lock().extend([RUNNER_PID, EXECUTOR_PID]);
+    let after = offline_worker(dir.path(), machine.clone(), idle_timing());
+    let mut sessions = restored_sessions(&after);
+    let session = &mut sessions[0];
+    assert_eq!(session.status, SessionStatus::Blocked);
+
+    write_agent_session_file(dir.path(), &worktree, RESUMED_PID);
+    futures::executor::block_on(after.advance(session));
+    assert!(!session.is_done());
+    assert_eq!(session.status, SessionStatus::Blocked);
+    let blocked = session.outbox.back().unwrap();
+    assert_eq!(blocked.status, SessionStatus::Blocked);
+    assert_eq!(blocked.reason.as_deref(), Some(REASON_OWNER_QUESTION));
+    assert!(
+        session
+            .outbox
+            .iter()
+            .all(|request| request.status != SessionStatus::Running),
+        "{:?}",
+        session.outbox
+    );
+}
+
+/// The owner closed the tab of a session whose answer waited for review: the session ends, but
+/// the answer is still the result, not a failure.
+#[test]
+fn closing_the_tab_of_an_answer_keeps_it_for_review() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("agents-work");
+    let transcript = dir.path().join("executor.jsonl");
+    std::fs::write(&transcript, format!("{PROMPT_LINE}{}", answer_line())).unwrap();
+    let machine = Arc::new(WatchedMachine::default());
+    let timing = Timing {
+        exit_grace: Duration::from_millis(50),
+        ..idle_timing()
+    };
+    let worker = offline_worker(dir.path(), machine.clone(), timing);
+    let mut session = launched_session(&root, Some(transcript.as_path()));
+    futures::executor::block_on(worker.advance(&mut session));
+    std::thread::sleep(Duration::from_millis(300));
+    futures::executor::block_on(worker.advance(&mut session));
+    assert_eq!(session.status, SessionStatus::Review);
+    let reported = session.outbox.len();
+
+    machine.gone.lock().push(RUNNER_PID);
+    futures::executor::block_on(worker.advance(&mut session));
+    std::thread::sleep(Duration::from_millis(100));
+    futures::executor::block_on(worker.advance(&mut session));
+    assert!(session.is_done());
+    assert_eq!(session.status, SessionStatus::Review);
+    assert_eq!(session.outbox.len(), reported, "{:?}", session.outbox);
 }
 
 /// The agent finished while Ward was away: its exit code is the end of the session, not the
