@@ -3533,16 +3533,21 @@ fn render_shortcut_hint(label: &str, appearance: &Appearance) -> Box<dyn Element
 }
 
 /// Row title line with its trailing indicators — the synchronized-inputs link
-/// icon followed by the unread-activity dot — pinned to the right edge. Returns
-/// `title` untouched when the row has no indicator to show.
+/// icon, Ward's agent activity mark and the unread-activity dot — pinned to the
+/// right edge. Returns `title` untouched when the row has no indicator to show.
 fn render_row_title_line(
     title: Box<dyn Element>,
     shows_synced_inputs: bool,
+    agent_activity: Option<Box<dyn Element>>,
     shows_activity_indicator: bool,
     shortcut_hint: Option<Box<dyn Element>>,
     theme: &WarpTheme,
 ) -> Box<dyn Element> {
-    if !shows_synced_inputs && !shows_activity_indicator && shortcut_hint.is_none() {
+    if !shows_synced_inputs
+        && agent_activity.is_none()
+        && !shows_activity_indicator
+        && shortcut_hint.is_none()
+    {
         return title;
     }
 
@@ -3552,6 +3557,10 @@ fn render_row_title_line(
         .with_spacing(4.);
     if shows_synced_inputs {
         indicators.add_child(render_synced_inputs_indicator());
+    }
+    // Ward: what the agent of the row is doing (working, waiting for the user, failed).
+    if let Some(agent_activity) = agent_activity {
+        indicators.add_child(agent_activity);
     }
     if shows_activity_indicator {
         indicators.add_child(render_title_indicator(theme));
@@ -4744,6 +4753,7 @@ fn render_terminal_row_content(
     let first_line_element = render_row_title_line(
         first_line,
         row_shows_synced_inputs_indicator(props, app),
+        ward::render_agent_activity(terminal_view.id(), app),
         has_unread_activity(&props.typed, app),
         shortcut_hint_label(props, app).map(|label| render_shortcut_hint(&label, appearance)),
         theme,
@@ -5043,9 +5053,16 @@ fn render_summary_tab_item(
             }
         }
     }
+    let agent_activity = match &props.typed {
+        TypedPane::Terminal(terminal_pane) => {
+            ward::render_agent_activity(terminal_pane.terminal_view(app).id(), app)
+        }
+        _ => None,
+    };
     text_col.add_child(render_row_title_line(
         title_region.finish(),
         row_shows_synced_inputs_indicator(&props, app),
+        agent_activity,
         summary.has_unread_activity,
         shortcut_hint_label(&props, app).map(|label| render_shortcut_hint(&label, appearance)),
         theme,
@@ -7648,9 +7665,16 @@ fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn El
         };
 
     // Title row with optional indicators
+    let agent_activity = match &props.typed {
+        TypedPane::Terminal(terminal_pane) => {
+            ward::render_agent_activity(terminal_pane.terminal_view(app).id(), app)
+        }
+        _ => None,
+    };
     let title_row = render_row_title_line(
         title_element,
         row_shows_synced_inputs_indicator(&props, app),
+        agent_activity,
         has_indicator,
         shortcut_hint_label(&props, app).map(|label| render_shortcut_hint(&label, appearance)),
         theme,

@@ -21,6 +21,7 @@ use crate::ward::agent_state::{AgentState, agent_snapshot, format_in_state};
 use crate::ward::agents::remote_tab::Link;
 use crate::ward::attention::{self, AgentStatusFilter, AttentionCounts};
 use crate::ward::project_groups::remote_control_session_name;
+use crate::ward::tab_activity;
 use crate::workspace::Workspace;
 use crate::workspace::action::WorkspaceAction;
 use crate::workspace::tab_settings::VerticalTabsDisplayGranularity;
@@ -36,6 +37,15 @@ pub(super) fn row_attention_color(terminal_view_id: EntityId, app: &AppContext) 
         .state
         .needs_attention()
         .then(|| snapshot.state.color(Appearance::as_ref(app).theme()))
+}
+
+/// What the agent of a terminal row is doing, for the trailing indicators of the row title:
+/// animated dots while it works, the state glyph while it waits for the user or has failed.
+pub(super) fn render_agent_activity(
+    terminal_view_id: EntityId,
+    app: &AppContext,
+) -> Option<Box<dyn Element>> {
+    tab_activity::render_tab_activity(terminal_view_id, STATE_GLYPH_SIZE, app)
 }
 
 /// Background of an attention row. A plain tab color tint (15%) mixes with the group color
