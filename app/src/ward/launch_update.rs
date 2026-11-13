@@ -102,7 +102,7 @@ fn installers_in(temp_dir: &Path) -> Vec<(String, u64)> {
         return Vec::new();
     };
     entries
-        .filter_map(Result::ok)
+        .flatten()
         .filter_map(|entry| {
             let name = entry.file_name().into_string().ok()?;
             if !name.starts_with(INSTALLER_PREFIX) {
