@@ -38,7 +38,7 @@ use crate::terminal::ShellLaunchData;
 use crate::ward::uri_launch::{self, UriTab};
 use crate::workspace::Workspace;
 
-const FILE_NAME: &str = "ward_session_handoff.json";
+pub const FILE_NAME: &str = "ward_session_handoff.json";
 
 /// Bumped whenever the fields below change meaning; a file of another version is ignored.
 const FORMAT_VERSION: u32 = 1;

@@ -957,6 +957,19 @@ pub fn can_install_unattended() -> bool {
     }
 }
 
+/// The file name of the installer Ward downloads (`WarpOssSetup.exe`).
+#[cfg(windows)]
+pub fn installer_file_name() -> Result<String> {
+    windows::installer_file_name()
+}
+
+/// Starts an installer downloaded before this start of Ward, before any window is open
+/// (`crate::ward::launch_update`). It waits for Ward to exit, installs and starts Ward again.
+#[cfg(windows)]
+pub fn spawn_installer_at_launch(installer_path: &std::path::Path) -> Result<()> {
+    windows::spawn_installer_at_launch(installer_path)
+}
+
 fn relaunch_for_update(app: &mut AppContext, unattended: bool) -> bool {
     let autoupdate_stage = &AutoupdateState::as_ref(app).stage;
     let termination_mode = if unattended {
@@ -1133,6 +1146,13 @@ pub fn spawn_child_if_necessary(app: &mut AppContext) {
             } else if #[cfg(target_os = "linux")] {
                 let relaunch_status = linux::relaunch();
             } else if #[cfg(windows)] {
+                // The session is saved by now (the tab handoff and the closed session
+                // database): a copy of it goes aside before the installer can run.
+                if crate::features::is_fork_oss() {
+                    let _ = crate::ward::session_backup::backup_now(
+                        ChannelState::app_version().unwrap_or("unknown"),
+                    );
+                }
                 let relaunch_status =
                     windows::relaunch(relaunch_handle.as_ref(app).is_unattended_relaunch());
             } else {

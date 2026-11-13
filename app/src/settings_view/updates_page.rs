@@ -32,6 +32,7 @@ use crate::autoupdate::{AutoupdateState, fork_manifest};
 use crate::channel::ChannelState;
 use crate::server::server_api::ServerApiProvider;
 use crate::ward::auto_install::{self, AutoInstallModel};
+use crate::ward::launch_update;
 use crate::ward::changelog::{self, WardChangelog};
 use crate::ward::updates::{self, CheckInfo, CheckNowDecision, StatusAction, StatusKind};
 use crate::workspace::WorkspaceAction;
@@ -45,6 +46,7 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 pub enum UpdatesPageAction {
     CheckNow,
     ToggleAutoInstall,
+    ToggleLaunchInstall,
 }
 
 /// Release notes of the version the page describes.
@@ -160,6 +162,11 @@ impl TypedActionView for UpdatesPageView {
                 auto_install::set_enabled(!enabled, ctx);
                 ctx.notify();
             }
+            UpdatesPageAction::ToggleLaunchInstall => {
+                let enabled = launch_update::is_enabled(ctx);
+                launch_update::set_enabled(!enabled, ctx);
+                ctx.notify();
+            }
         }
     }
 }
@@ -182,6 +189,7 @@ struct UpdatesWidget {
     whats_new_link: MouseStateHandle,
     all_changes_link: MouseStateHandle,
     auto_install_switch: SwitchStateHandle,
+    launch_install_switch: SwitchStateHandle,
 }
 
 impl UpdatesWidget {
@@ -355,6 +363,27 @@ impl UpdatesWidget {
         ))
     }
 
+    /// "Install updates when Ward starts", where Ward can install by itself (Windows).
+    fn render_launch_install(
+        &self,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Option<Box<dyn Element>> {
+        auto_install::model(app)?;
+        Some(render_ward_toggle(
+            "Install updates when Ward starts",
+            "When Ward starts and a newer version was already downloaded, Ward installs it \
+             before opening any window (the installer shows its progress) and then opens the \
+             new version with the same windows and tabs. A copy of the saved session is kept \
+             before every install. Starts from a link or with arguments are never delayed.",
+            launch_update::is_enabled(app),
+            self.launch_install_switch.clone(),
+            UpdatesPageAction::ToggleLaunchInstall,
+            appearance,
+            app,
+        ))
+    }
+
     fn render_versions(&self, appearance: &Appearance, app: &AppContext) -> Vec<Box<dyn Element>> {
         let ui_builder = appearance.ui_builder();
         let state = AutoupdateState::as_ref(app);
@@ -519,7 +548,7 @@ impl SettingsWidget for UpdatesWidget {
     type View = UpdatesPageView;
 
     fn search_terms(&self) -> &str {
-        "updates update check version install restart automatically what's new changelog ward"
+        "updates update check version install restart automatically start launch what's new changelog ward"
     }
 
     fn render(
@@ -545,6 +574,9 @@ impl SettingsWidget for UpdatesWidget {
             .with_child(section(self.render_status(view, appearance, app), 8.));
         if let Some(toggle) = self.render_auto_install(appearance, app) {
             page.add_child(section(vec![toggle], 28.));
+        }
+        if let Some(toggle) = self.render_launch_install(appearance, app) {
+            page.add_child(section(vec![toggle], 16.));
         }
         page.with_child(section(versions, 28.))
             .with_child(section(self.render_notes(view, appearance), 28.))
