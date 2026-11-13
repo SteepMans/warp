@@ -1187,6 +1187,18 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
     ::settings::set_settings_mode(launch_mode.settings_mode());
 
     let private_preferences = settings::init_private_user_preferences();
+
+    // Ward installs an update it downloaded earlier before it opens anything, so the session is
+    // neither read nor written by this start; the installer starts the new version, which
+    // restores it as after any restart.
+    #[cfg(windows)]
+    if matches!(launch_mode, LaunchMode::App { .. })
+        && ward::launch_update::before_start(private_preferences.deref())
+            == ward::launch_update::BeforeStart::Exit
+    {
+        return Ok(());
+    }
+
     let (public_preferences, startup_toml_parse_error) = settings::init_public_user_preferences();
 
     // When the SettingsFile feature flag is enabled, public settings live in

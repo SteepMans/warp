@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use std::{fs, io};
@@ -50,9 +50,15 @@ pub(super) async fn download_update_and_cleanup(
 
     // Create a temporary file that we'll write the download into.
     let mut already_exists = false;
+    // The name is fixed per version, so a start of Ward finds the installer again after a
+    // restart (`crate::ward::launch_update`).
     let mut new_installer = tempfile::Builder::new()
+        .prefix(crate::ward::launch_update::INSTALLER_PREFIX)
         .rand_bytes(0)
-        .suffix(&format!("{}-{}", version_info.version, installer_file_name))
+        .suffix(&crate::ward::launch_update::installer_suffix(
+            &version_info.version,
+            &installer_file_name,
+        ))
         .make(|path| {
             // Treat a 0-byte file as missing.
             let non_empty = path.metadata().map(|m| m.len() > 0).unwrap_or(false);
@@ -314,7 +320,6 @@ fn read_per_user_install() -> bool {
 /// `PrivilegesRequiredOverridesAllowed=dialog` offers unless the mode is given (`/CURRENTUSER`;
 /// the caller made sure this copy is a per-user install, see [`is_per_user_install`]).
 pub(super) fn relaunch(unattended: bool) -> Result<()> {
-    let install_dir = install_dir()?;
     let Some(installer_path) = INSTALLER_PATH
         .lock()
         .as_ref()
@@ -322,7 +327,18 @@ pub(super) fn relaunch(unattended: bool) -> Result<()> {
     else {
         bail!("No installer path");
     };
+    spawn_installer(&installer_path, unattended, unattended)
+}
 
+/// Starts the installer Ward downloaded before this start (`crate::ward::launch_update`), while
+/// no window is open yet. Its progress window is what the user sees of the update; the install
+/// mode is given (the caller made sure this copy is a per-user install), so it asks nothing.
+pub(super) fn spawn_installer_at_launch(installer_path: &Path) -> Result<()> {
+    spawn_installer(installer_path, false, true)
+}
+
+fn spawn_installer(installer_path: &Path, unattended: bool, current_user: bool) -> Result<()> {
+    let install_dir = install_dir()?;
     let log_arg = match autoupdate_log_file() {
         Ok(dir) => format!("/LOG={}", dir.display()),
         Err(e) => {
@@ -334,9 +350,10 @@ pub(super) fn relaunch(unattended: bool) -> Result<()> {
     // The Inno Setup install wizard will run without user input. It will re-launch Warp after
     // installing the update files.
     // https://jrsoftware.org/ishelp/index.php?topic=setupcmdline
-    Command::new(&installer_path)
+    Command::new(installer_path)
         .args(installer_args(
             unattended,
+            current_user,
             &log_arg,
             &install_dir.display().to_string(),
         ))
@@ -345,7 +362,12 @@ pub(super) fn relaunch(unattended: bool) -> Result<()> {
     Ok(())
 }
 
-fn installer_args(unattended: bool, log_arg: &str, install_dir: &str) -> Vec<String> {
+fn installer_args(
+    unattended: bool,
+    current_user: bool,
+    log_arg: &str,
+    install_dir: &str,
+) -> Vec<String> {
     let mut args = vec![
         // Skip asking the user to confirm.
         "/SP-".to_owned(),
@@ -364,7 +386,7 @@ fn installer_args(unattended: bool, log_arg: &str, install_dir: &str) -> Vec<Str
         "/NOCLOSEAPPLICATIONS".to_owned(),
         format!("/DIR={install_dir}"),
     ];
-    if unattended {
+    if current_user {
         // Install for the current user, as before, without asking which mode: no dialog and no
         // UAC prompt.
         args.push("/CURRENTUSER".to_owned());
@@ -372,7 +394,7 @@ fn installer_args(unattended: bool, log_arg: &str, install_dir: &str) -> Vec<Str
     args
 }
 
-fn installer_file_name() -> Result<String> {
+pub(super) fn installer_file_name() -> Result<String> {
     let app_name_prefix = app_name_prefix(ChannelState::channel());
 
     // For example, on arm64 this is WarpSetup-arm64.exe and on x64 this is

@@ -73,7 +73,7 @@ fn returns_none_for_empty_log() {
 
 #[test]
 fn update_the_user_asked_for_shows_progress() {
-    let args = installer_args(false, "/LOG=update.log", r"C:\Ward");
+    let args = installer_args(false, false, "/LOG=update.log", r"C:\Ward");
     assert_eq!(
         args,
         [
@@ -91,9 +91,19 @@ fn update_the_user_asked_for_shows_progress() {
 
 #[test]
 fn unattended_update_shows_nothing_and_asks_for_no_install_mode() {
-    let args = installer_args(true, "/LOG=update.log", r"C:\Ward");
+    let args = installer_args(true, true, "/LOG=update.log", r"C:\Ward");
     assert!(args.iter().any(|arg| arg == "/VERYSILENT"));
     assert!(!args.iter().any(|arg| arg == "/SILENT"));
     assert!(args.iter().any(|arg| arg == "/CURRENTUSER"));
     assert!(args.iter().any(|arg| arg == "/update=1"));
+}
+
+#[test]
+fn update_at_launch_shows_progress_and_asks_for_no_install_mode() {
+    let args = installer_args(false, true, "/LOG=update.log", r"C:\Ward");
+    assert!(args.iter().any(|arg| arg == "/SILENT"));
+    assert!(!args.iter().any(|arg| arg == "/VERYSILENT"));
+    assert!(args.iter().any(|arg| arg == "/CURRENTUSER"));
+    assert!(args.iter().any(|arg| arg == "/update=1"));
+    assert!(args.iter().any(|arg| arg == "/NOCLOSEAPPLICATIONS"));
 }
