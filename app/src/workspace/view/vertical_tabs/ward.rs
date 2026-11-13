@@ -14,6 +14,7 @@ use warpui::text_layout::ClipConfig;
 use warpui::{AppContext, EntityId, SingletonEntity};
 
 use crate::appearance::Appearance;
+use crate::features::FeatureFlag;
 use crate::pane_group::PaneId;
 use crate::terminal::TerminalView;
 use crate::ui_components::icons::Icon;
@@ -46,6 +47,33 @@ pub(super) fn render_agent_activity(
     app: &AppContext,
 ) -> Option<Box<dyn Element>> {
     tab_activity::render_tab_activity(terminal_view_id, STATE_GLYPH_SIZE, app)
+}
+
+/// Keeps the title line of a pinned row clear of the pin drawn over its top-right corner, so the
+/// trailing indicators (agent activity, unread dot) are not hidden under it. Rows are padded by
+/// [`ROW_PADDING`]; the pin ends [`super::PIN_INDICATOR_CORNER_INSET`] plus its size from the
+/// edge.
+pub(super) fn with_pin_clearance(
+    title_line: Box<dyn Element>,
+    is_pinned: bool,
+) -> Box<dyn Element> {
+    if !(crate::features::is_fork_oss() && FeatureFlag::PinnedTabs.is_enabled() && is_pinned) {
+        return title_line;
+    }
+    Container::new(title_line)
+        .with_padding_right(pin_clearance())
+        .finish()
+}
+
+/// Inner padding of a vertical tab row (`Padding::uniform(8.)` in every row layout).
+const ROW_PADDING: f32 = 8.;
+
+/// Gap between the last indicator and the pin.
+const PIN_GAP: f32 = 2.;
+
+fn pin_clearance() -> f32 {
+    (super::PIN_INDICATOR_CORNER_INSET + super::PIN_INDICATOR_ICON_SIZE + PIN_GAP - ROW_PADDING)
+        .max(0.)
 }
 
 /// Background of an attention row. A plain tab color tint (15%) mixes with the group color

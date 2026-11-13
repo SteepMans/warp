@@ -4758,6 +4758,7 @@ fn render_terminal_row_content(
         shortcut_hint_label(props, app).map(|label| render_shortcut_hint(&label, appearance)),
         theme,
     );
+    let first_line_element = ward::with_pin_clearance(first_line_element, props.is_pinned);
 
     let mut content = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
@@ -5059,13 +5060,16 @@ fn render_summary_tab_item(
         }
         _ => None,
     };
-    text_col.add_child(render_row_title_line(
-        title_region.finish(),
-        row_shows_synced_inputs_indicator(&props, app),
-        agent_activity,
-        summary.has_unread_activity,
-        shortcut_hint_label(&props, app).map(|label| render_shortcut_hint(&label, appearance)),
-        theme,
+    text_col.add_child(ward::with_pin_clearance(
+        render_row_title_line(
+            title_region.finish(),
+            row_shows_synced_inputs_indicator(&props, app),
+            agent_activity,
+            summary.has_unread_activity,
+            shortcut_hint_label(&props, app).map(|label| render_shortcut_hint(&label, appearance)),
+            theme,
+        ),
+        props.is_pinned,
     ));
 
     // Working-directory region.
@@ -7679,6 +7683,7 @@ fn render_compact_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn El
         shortcut_hint_label(&props, app).map(|label| render_shortcut_hint(&label, appearance)),
         theme,
     );
+    let title_row = ward::with_pin_clearance(title_row, props.is_pinned);
 
     // Assemble text column: title + optional subtitle
     // Top-align the icon when there are two lines of content; center for single-line rows.
