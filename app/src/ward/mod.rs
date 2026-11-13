@@ -19,6 +19,7 @@ pub mod metrics;
 pub mod overview;
 pub mod palette;
 pub mod project_groups;
+pub mod session_backup;
 pub mod session_handoff;
 pub mod tab_activity;
 pub mod updates;
