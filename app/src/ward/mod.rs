@@ -13,6 +13,7 @@ pub mod changelog;
 pub mod chimney;
 pub mod claude_launch;
 pub mod claude_usage;
+pub mod codex_threads;
 pub mod codex_usage;
 pub mod labels;
 pub mod launch_update;
