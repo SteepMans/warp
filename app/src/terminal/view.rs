@@ -11806,6 +11806,25 @@ impl TerminalView {
     fn on_user_block_completed(&mut self, block_id: &BlockId, ctx: &mut ViewContext<Self>) {
         self.model.lock().end_notify_on_ssh_login_complete();
 
+        // Ward: `codex resume <id>` of a child thread (a Guardian review, a sub-agent) fails
+        // and names the parent session; run the resume again with it. The saved session follows
+        // once the new Codex process is detected.
+        if crate::features::is_fork_oss() {
+            let retry = {
+                let model = self.model.lock();
+                model.block_list().block_with_id(block_id).and_then(|block| {
+                    crate::ward::codex_threads::retry_after_failed_resume(
+                        &block.command_to_string(),
+                        &block.output_to_string(),
+                    )
+                })
+            };
+            if let Some(command) = retry {
+                log::info!("Ward: Codex refused a child thread, resuming its parent session");
+                self.set_pending_command_queue(vec![command], ctx);
+            }
+        }
+
         // If the block that just ended was an agent-requested long running command for which the user took over control,
         // and the user exited the command, we should resume the conversation.
         let conversation_id_to_resume = {
