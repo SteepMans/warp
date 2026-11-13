@@ -438,3 +438,14 @@ fn the_error_of_a_turn_is_a_line_of_wards_in_the_chat() {
             .is_empty()
     );
 }
+
+#[test]
+fn child_threads_are_not_the_session() {
+    let root = r#"{"type":"session_meta","payload":{"id":"01a09473-8407-7391-a64f-dc3385603d60","session_id":"01a09473-8407-7391-a64f-dc3385603d60","cwd":"C:/w","source":"cli","thread_source":"user"}}"#;
+    let guardian = r#"{"type":"session_meta","payload":{"id":"01a1d412-f5f5-7e50-b215-aed4851f118e","session_id":"01a09473-8407-7391-a64f-dc3385603d60","cwd":"C:/w","source":{"subagent":"guardian"}}}"#;
+    let sub_agent = r#"{"type":"session_meta","payload":{"id":"01a1e000-0000-7000-8000-000000000001","parent_thread_id":"01a09473-8407-7391-a64f-dc3385603d60","cwd":"C:/w","thread_source":"subagent"}}"#;
+    assert!(!is_child_thread(root));
+    assert!(is_child_thread(guardian));
+    assert!(is_child_thread(sub_agent));
+    assert!(!is_child_thread(TOKEN_COUNT));
+}

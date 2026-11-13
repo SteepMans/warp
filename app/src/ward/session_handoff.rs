@@ -352,7 +352,11 @@ fn uri_tab(tab: &HandoffTab, ctx: &AppContext) -> UriTab {
             ..Default::default()
         },
         title: tab.title.clone(),
-        command: tab.resume_command.clone(),
+        // A Codex child thread cannot be resumed; its root session is.
+        command: tab.resume_command.as_deref().map(|command| {
+            crate::ward::codex_threads::resume_root_command_here(command)
+                .unwrap_or_else(|| command.to_owned())
+        }),
         ack: None,
     }
 }

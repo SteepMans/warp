@@ -426,6 +426,15 @@ pub fn parse_session_meta(first_line: &str) -> Option<(String, String)> {
     Some((id, cwd))
 }
 
+/// Whether a rollout's `session_meta` is a child thread of a session (see
+/// [`crate::ward::codex_threads`]).
+pub fn is_child_thread(first_line: &str) -> bool {
+    crate::ward::codex_threads::parse_session_meta(first_line).is_some_and(|payload| {
+        crate::ward::codex_threads::thread_origin(&payload)
+            != crate::ward::codex_threads::ThreadOrigin::Root
+    })
+}
+
 fn read_first_line(path: &Path) -> Option<String> {
     let mut file = File::open(path).ok()?;
     let mut buffer = vec![0u8; 64 * 1024];
@@ -480,9 +489,15 @@ impl Provider for Codex {
         model: Option<&str>,
         resume: Option<&str>,
     ) -> AgentCommand {
-        // `resume` is a subcommand of Codex and goes before the flags.
+        // `resume` is a subcommand of Codex and goes before the flags. A session saved before
+        // child threads were told apart may name one; its root session is resumed instead.
         let mut args = match resume {
-            Some(id) => vec!["resume".to_owned(), id.to_owned()],
+            Some(id) => vec![
+                "resume".to_owned(),
+                crate::ward::codex_threads::sessions_dir()
+                    .map(|dir| crate::ward::codex_threads::root_session_id(&dir, id))
+                    .unwrap_or_else(|| id.to_owned()),
+            ],
             None => Vec::new(),
         };
         args.push("--dangerously-bypass-approvals-and-sandbox".to_owned());
@@ -516,7 +531,13 @@ impl Provider for Codex {
             .into_iter()
             .filter(|(_, modified, _)| *modified + Duration::from_secs(5) >= launched_at)
             .find_map(|(path, _, _)| {
-                let (id, cwd) = parse_session_meta(&read_first_line(&path)?)?;
+                let first_line = read_first_line(&path)?;
+                // A Guardian review or a sub-agent of the session has a rollout of its own in
+                // the worktree, and it can be the newest one; only the root session resumes.
+                if is_child_thread(&first_line) {
+                    return None;
+                }
+                let (id, cwd) = parse_session_meta(&first_line)?;
                 super::same_path(&cwd, worktree).then_some(FoundSession {
                     agent_session_id: id,
                     pid: None,

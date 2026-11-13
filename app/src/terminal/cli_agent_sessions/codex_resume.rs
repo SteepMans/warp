@@ -9,12 +9,12 @@
 //! Two Codex processes in the same directory are indistinguishable this way; the most recently
 //! active session wins.
 
-use std::io::BufRead as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use super::claude_resume::{ClaudeResumeInfo, quote_arg};
 use crate::terminal::shell::ShellType;
+use crate::ward::codex_threads;
 
 /// Flags carried over to `codex resume`, along with whether they take a value. Only flags that
 /// `codex resume` accepts are listed.
@@ -58,22 +58,6 @@ const INTERACTIVE_SUBCOMMANDS: &[&str] = &["resume", "fork"];
 /// modification time with the process start time.
 const START_TIME_SLACK: Duration = Duration::from_secs(5);
 
-#[derive(serde::Deserialize)]
-struct RolloutLine {
-    #[serde(rename = "type")]
-    kind: String,
-    payload: SessionMeta,
-}
-
-#[derive(serde::Deserialize)]
-struct SessionMeta {
-    id: String,
-    #[serde(default)]
-    cwd: Option<String>,
-    #[serde(default)]
-    thread_source: Option<String>,
-}
-
 /// The parsed command line of a Codex process.
 #[derive(Debug, PartialEq, Eq)]
 struct CodexLaunch {
@@ -83,7 +67,7 @@ struct CodexLaunch {
 }
 
 fn sessions_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".codex").join("sessions"))
+    codex_threads::sessions_dir()
 }
 
 /// Looks for a Codex process in the process tree of the given shell and returns the command
@@ -146,11 +130,13 @@ pub fn detect(shell_pid: u32, shell_type: Option<ShellType>) -> Option<ClaudeRes
     let process_cwd = process.cwd().map(Path::to_path_buf);
     let started = SystemTime::UNIX_EPOCH + Duration::from_secs(process.start_time());
 
-    let (session_id, cwd) = latest_session(&sessions_dir()?, started, process_cwd.as_deref())
+    let sessions_dir = sessions_dir()?;
+    let (session_id, cwd) = latest_session(&sessions_dir, started, process_cwd.as_deref())
         .or_else(|| {
-            launch.resumed_id.clone().map(|id| {
+            launch.resumed_id.as_deref().map(|id| {
                 (
-                    id,
+                    // A resumed child thread stands for its root session.
+                    codex_threads::root_session_id(&sessions_dir, id),
                     process_cwd.as_ref().map(|cwd| cwd.display().to_string()),
                 )
             })
@@ -244,11 +230,12 @@ fn is_known_subcommand(arg: &str) -> bool {
 }
 
 fn looks_like_session_id(arg: &str) -> bool {
-    arg.len() == 36 && arg.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+    codex_threads::looks_like_session_id(arg)
 }
 
-/// Finds the most recently written top-level session in `cwd` among rollouts touched since
-/// `started`. Returns the session id and the session's directory.
+/// Finds the most recently written session in `cwd` among rollouts touched since `started`.
+/// A child thread (a sub-agent, a Guardian review) stands for the root session it belongs to;
+/// one that names no parent is skipped. Returns the session id and the session's directory.
 fn latest_session(
     sessions_dir: &Path,
     started: SystemTime,
@@ -276,18 +263,28 @@ fn latest_session(
             if modified < threshold || best.as_ref().is_some_and(|(time, ..)| *time >= modified) {
                 continue;
             }
-            let Some(meta) = read_session_meta(&path) else {
+            let Some(meta) = codex_threads::read_session_meta(&path) else {
                 continue;
             };
-            if meta.thread_source.as_deref() == Some("subagent") {
-                continue;
-            }
-            if let (Some(cwd), Some(session_cwd)) = (cwd, meta.cwd.as_deref()) {
+            let session_cwd = meta
+                .get("cwd")
+                .and_then(|cwd| cwd.as_str())
+                .map(str::to_owned);
+            if let (Some(cwd), Some(session_cwd)) = (cwd, session_cwd.as_deref()) {
                 if !same_dir(cwd, Path::new(session_cwd)) {
                     continue;
                 }
             }
-            best = Some((modified, meta.id, meta.cwd));
+            let id = match codex_threads::thread_origin(&meta) {
+                codex_threads::ThreadOrigin::Root => codex_threads::thread_id(&meta),
+                codex_threads::ThreadOrigin::Child { parent } => {
+                    parent.map(|parent| codex_threads::root_session_id(sessions_dir, &parent))
+                }
+            };
+            let Some(id) = id else {
+                continue;
+            };
+            best = Some((modified, id, session_cwd));
         }
     }
     best.map(|(_, id, cwd)| (id, cwd))
@@ -327,16 +324,6 @@ fn day_dirs_since(root: &Path, first_day: &str) -> Vec<PathBuf> {
         }
     }
     days
-}
-
-fn read_session_meta(path: &Path) -> Option<SessionMeta> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut first_line = String::new();
-    std::io::BufReader::new(file)
-        .read_line(&mut first_line)
-        .ok()?;
-    let line: RolloutLine = serde_json::from_str(&first_line).ok()?;
-    (line.kind == "session_meta" && !line.payload.id.is_empty()).then_some(line.payload)
 }
 
 fn same_dir(a: &Path, b: &Path) -> bool {
