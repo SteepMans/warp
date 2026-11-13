@@ -106,7 +106,10 @@ pub fn backup(
             return Err(err);
         }
     }
-    prune(&root, KEEP)?;
+    // The new copy is complete; an old one that cannot be removed only takes space.
+    if let Err(err) = prune(&root, KEEP) {
+        log::warn!("Ward: could not remove old session copies: {err}");
+    }
     Ok(Some(dir))
 }
 
