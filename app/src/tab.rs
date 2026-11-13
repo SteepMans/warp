@@ -1096,6 +1096,11 @@ enum Indicator {
     AmbientAgent,
     /// Ward: the tab of a session on another machine (remote control).
     Remote,
+    /// Ward: a CLI agent in the focused pane works, waits for the user or has failed.
+    WardAgent {
+        state: crate::ward::agent_state::AgentState,
+        in_state: Duration,
+    },
 }
 
 impl From<TerminalViewState> for Indicator {
@@ -1278,6 +1283,8 @@ impl<'a> TabComponent<'a> {
             Indicator::None
         } else if are_inputs_synced {
             Indicator::Synced
+        } else if let Some(agent) = Self::ward_agent_indicator(tab, ctx) {
+            agent
         } else if let Some(agent) = Self::agent_indicator(tab, ctx) {
             agent
         } else if let Some(shell_indicator_type) = shell_indicator_type {
@@ -1360,6 +1367,18 @@ impl<'a> TabComponent<'a> {
     pub fn with_multi_tab_selection(mut self, is_in_multi_tab_selection: bool) -> Self {
         self.is_in_multi_tab_selection = is_in_multi_tab_selection;
         self
+    }
+
+    /// Ward: the activity of the CLI agent in the focused pane, when it has any to show (see
+    /// [`crate::ward::tab_activity::TabActivity`]).
+    fn ward_agent_indicator(tab: &TabData, app: &AppContext) -> Option<Indicator> {
+        let terminal_view = tab.pane_group.as_ref(app).focused_session_view(app)?;
+        let snapshot = crate::ward::agent_state::agent_snapshot(terminal_view.id(), app)?;
+        crate::ward::tab_activity::TabActivity::of(snapshot.state)?;
+        Some(Indicator::WardAgent {
+            state: snapshot.state,
+            in_state: snapshot.in_state,
+        })
     }
 
     /// Returns the agent indicator for the focused session's active conversation,
@@ -1739,6 +1758,12 @@ impl<'a> TabComponent<'a> {
                 Icon::Sharing
                     .to_warpui_icon(self.styles.sharing_color.into())
                     .finish(),
+            ),
+            Indicator::WardAgent { state, in_state } => crate::ward::tab_activity::render_activity(
+                *state,
+                *in_state,
+                self.appearance.theme(),
+                9.,
             ),
             Indicator::Remote => Some(
                 Icon::Laptop
