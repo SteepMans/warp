@@ -1721,6 +1721,11 @@ impl PaneGroup {
                 // executed once the shell has bootstrapped, like a launch config command.
                 if let Some(resume_command) = terminal_snapshot.cli_agent_resume_command {
                     log::info!("Resuming CLI agent session in restored pane");
+                    // Ward: a Codex child thread (a Guardian review, a sub-agent) cannot be
+                    // resumed; its root session is.
+                    let resume_command =
+                        crate::ward::codex_threads::resume_root_command_here(&resume_command)
+                            .unwrap_or(resume_command);
                     crate::terminal::cli_agent_sessions::claude_resume::terminate_orphaned_sessions(
                         &resume_command,
                     );
