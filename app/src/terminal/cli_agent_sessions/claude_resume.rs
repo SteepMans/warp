@@ -248,7 +248,7 @@ pub fn terminate_orphaned_sessions(resume_command: &str) {
 pub fn terminate_orphaned_sessions(_resume_command: &str) {}
 
 /// The session id is the last argument of a command built by [`build_resume_command`].
-fn session_id_from_resume_command(command: &str) -> Option<&str> {
+pub(crate) fn session_id_from_resume_command(command: &str) -> Option<&str> {
     let id = command.rsplit(' ').next()?.trim_matches('\'');
     (!id.is_empty() && command.contains("--resume ")).then_some(id)
 }

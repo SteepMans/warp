@@ -332,10 +332,16 @@ fn uri_tab(tab: &HandoffTab, ctx: &AppContext) -> UriTab {
         .shell
         .as_deref()
         .and_then(|name| uri_launch::find_shell(name, ctx));
-    let env_vars = tab
-        .resume_command
+    // A Codex child thread cannot be resumed; its root session is.
+    let command = tab.resume_command.as_deref().map(|command| {
+        crate::ward::codex_threads::resume_root_command_here(command)
+            .unwrap_or_else(|| command.to_owned())
+    });
+    // The tab's own session id goes into its environment as well, so that a shell profile hook
+    // does not start another conversation in it.
+    let env_vars = command
         .as_deref()
-        .map(|command| crate::ward::claude_launch::env_vars_for_command(command, ctx))
+        .map(|command| crate::ward::claude_launch::env_vars_for_resume(command, ctx))
         .unwrap_or_default();
     // A directory that is gone (a removed agent worktree) would fail the shell, so the tab
     // opens in the default directory instead.
@@ -352,11 +358,7 @@ fn uri_tab(tab: &HandoffTab, ctx: &AppContext) -> UriTab {
             ..Default::default()
         },
         title: tab.title.clone(),
-        // A Codex child thread cannot be resumed; its root session is.
-        command: tab.resume_command.as_deref().map(|command| {
-            crate::ward::codex_threads::resume_root_command_here(command)
-                .unwrap_or_else(|| command.to_owned())
-        }),
+        command,
         ack: None,
     }
 }

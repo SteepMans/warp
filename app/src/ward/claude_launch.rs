@@ -69,6 +69,42 @@ pub fn env_vars_for_command(command: &str, app: &AppContext) -> HashMap<OsString
     launch_env_vars(command, is_no_flicker_enabled(app))
 }
 
+/// Set in the shell of a tab Ward reopens with its own CLI agent session, to that session's id.
+///
+/// The shell profile runs before Ward types the resume command. A profile hook that starts an
+/// agent in the tab's directory (a pending launch left for "the next tab opened in this repo")
+/// would otherwise fire in every reopened tab of that directory at once, and all of them would
+/// show the same conversation instead of their own. The hook skips a tab that has this variable.
+pub const RESUME_SESSION_ENV_VAR: &str = "WARD_RESUME_SESSION";
+
+/// The session id a saved resume command reopens: `claude ... --resume <id>` or
+/// `codex resume ... <id>`.
+pub fn resumed_session_id(command: &str) -> Option<&str> {
+    if is_claude_command(command) {
+        crate::terminal::cli_agent_sessions::claude_resume::session_id_from_resume_command(command)
+    } else {
+        crate::ward::codex_threads::resumed_id(command)
+    }
+}
+
+/// Extra environment of a reopened tab that runs the resume command `command`: the launch
+/// environment plus [`RESUME_SESSION_ENV_VAR`] with the tab's own session id.
+pub fn resume_env_vars(command: &str, no_flicker: bool) -> HashMap<OsString, OsString> {
+    let mut env_vars = launch_env_vars(command, no_flicker);
+    if let Some(session_id) = resumed_session_id(command) {
+        env_vars.insert(
+            OsString::from(RESUME_SESSION_ENV_VAR),
+            OsString::from(session_id),
+        );
+    }
+    env_vars
+}
+
+/// [`resume_env_vars`] with the user's setting.
+pub fn env_vars_for_resume(command: &str, app: &AppContext) -> HashMap<OsString, OsString> {
+    resume_env_vars(command, is_no_flicker_enabled(app))
+}
+
 #[cfg(test)]
 #[path = "claude_launch_tests.rs"]
 mod tests;

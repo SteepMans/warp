@@ -1693,11 +1693,22 @@ impl PaneGroup {
                             },
                         )
                 };
-                // Ward: a resumed Claude Code session gets the same environment as a new one.
-                let env_vars = terminal_snapshot
-                    .cli_agent_resume_command
+                // Ward: a Codex child thread (a Guardian review, a sub-agent) cannot be resumed;
+                // its root session is.
+                let resume_command =
+                    terminal_snapshot
+                        .cli_agent_resume_command
+                        .clone()
+                        .map(|command| {
+                            crate::ward::codex_threads::resume_root_command_here(&command)
+                                .unwrap_or(command)
+                        });
+                // Ward: a resumed Claude Code session gets the same environment as a new one,
+                // plus the id of the pane's own session, so that a shell profile hook does not
+                // start another conversation in it.
+                let env_vars = resume_command
                     .as_deref()
-                    .map(|command| crate::ward::claude_launch::env_vars_for_command(command, ctx))
+                    .map(|command| crate::ward::claude_launch::env_vars_for_resume(command, ctx))
                     .unwrap_or_default();
                 let (terminal_view, terminal_manager) = PaneGroup::create_session(
                     startup_directory,
@@ -1719,13 +1730,8 @@ impl PaneGroup {
 
                 // Resume the CLI agent session that was running in this pane. The command is
                 // executed once the shell has bootstrapped, like a launch config command.
-                if let Some(resume_command) = terminal_snapshot.cli_agent_resume_command {
+                if let Some(resume_command) = resume_command {
                     log::info!("Resuming CLI agent session in restored pane");
-                    // Ward: a Codex child thread (a Guardian review, a sub-agent) cannot be
-                    // resumed; its root session is.
-                    let resume_command =
-                        crate::ward::codex_threads::resume_root_command_here(&resume_command)
-                            .unwrap_or(resume_command);
                     crate::terminal::cli_agent_sessions::claude_resume::terminate_orphaned_sessions(
                         &resume_command,
                     );
