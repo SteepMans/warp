@@ -4,16 +4,16 @@
 //! Unlike Claude Code, Codex has no registry of live processes. It records every session in a
 //! rollout file `~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl` whose first line is a
 //! `session_meta` record with the session id and `cwd`, and it appends to that file as the
-//! conversation goes on. The session of a running process is therefore the most recently
-//! written rollout for the process's directory that was touched after the process started.
-//! Two Codex processes in the same directory are indistinguishable this way; the most recently
-//! active session wins.
+//! conversation goes on. Which of them a running process holds is decided in
+//! [`crate::ward::codex_session`]: the files the process holds open, the id it was resumed with,
+//! and only then the rollouts of its directory that no other running Codex process holds.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use super::claude_resume::{ClaudeResumeInfo, quote_arg};
 use crate::terminal::shell::ShellType;
+use crate::ward::codex_session::{self, Launch, ProcessKey, Rollout, START_TIME_SLACK};
 use crate::ward::codex_threads;
 
 /// Flags carried over to `codex resume`, along with whether they take a value. Only flags that
@@ -54,16 +54,14 @@ const DROPPED_FLAGS_WITH_VALUE: &[&str] = &[
 /// `login`, `mcp`, ...) is not resumable.
 const INTERACTIVE_SUBCOMMANDS: &[&str] = &["resume", "fork"];
 
-/// Slack for clock and file system timestamp granularity when comparing a rollout's
-/// modification time with the process start time.
-const START_TIME_SLACK: Duration = Duration::from_secs(5);
-
 /// The parsed command line of a Codex process.
 #[derive(Debug, PartialEq, Eq)]
 struct CodexLaunch {
     preserved: Vec<String>,
-    /// The session id passed to `codex resume <id>`, if any.
+    /// The session id passed to `codex resume <id>` (or `codex fork <id>`), if any.
     resumed_id: Option<String>,
+    /// `resume` or `fork`; `None` for a plain `codex`.
+    subcommand: Option<String>,
 }
 
 fn sessions_dir() -> Option<PathBuf> {
@@ -91,12 +89,15 @@ pub fn detect(shell_pid: u32, shell_type: Option<ShellType>) -> Option<ClaudeRes
     );
 
     let shell_pid = Pid::from_u32(shell_pid);
+    let codex_pids: Vec<Pid> = system
+        .processes()
+        .iter()
+        .filter(|(_, process)| is_codex_executable(&process.name().to_string_lossy()))
+        .map(|(pid, _)| *pid)
+        .collect();
     // The depth below the shell of each Codex process that runs inside this pane.
     let mut matches: Vec<(usize, Pid)> = Vec::new();
-    for (pid, process) in system.processes() {
-        if !is_codex_executable(&process.name().to_string_lossy()) {
-            continue;
-        }
+    for pid in &codex_pids {
         let mut current = *pid;
         for depth in 0..MAX_DEPTH {
             let Some(parent) = system.process(current).and_then(|process| process.parent()) else {
@@ -113,6 +114,13 @@ pub fn detect(shell_pid: u32, shell_type: Option<ShellType>) -> Option<ClaudeRes
     // Prefer the outermost Codex process: the CLI spawns helper processes of its own.
     matches.sort();
     let (_, pid) = matches.into_iter().next()?;
+    // The command lines of all Codex processes: the sessions the others were resumed with are
+    // not this pane's.
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&codex_pids),
+        false, /* remove_dead_processes */
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+    );
     system.refresh_processes_specifics(
         ProcessesToUpdate::Some(&[pid]),
         false, /* remove_dead_processes */
@@ -120,27 +128,75 @@ pub fn detect(shell_pid: u32, shell_type: Option<ShellType>) -> Option<ClaudeRes
             .with_cmd(UpdateKind::Always)
             .with_cwd(UpdateKind::Always),
     );
+    let argv_of = |pid: Pid| -> Option<Vec<String>> {
+        Some(
+            system
+                .process(pid)?
+                .cmd()
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect(),
+        )
+    };
     let process = system.process(pid)?;
-    let argv: Vec<String> = process
-        .cmd()
-        .iter()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect();
-    let launch = parse_launch(&argv)?;
+    let launch = parse_launch(&argv_of(pid)?)?;
     let process_cwd = process.cwd().map(Path::to_path_buf);
-    let started = SystemTime::UNIX_EPOCH + Duration::from_secs(process.start_time());
+    let key = ProcessKey {
+        pid: pid.as_u32(),
+        started: process.start_time(),
+    };
+    let started = SystemTime::UNIX_EPOCH + Duration::from_secs(key.started);
 
     let sessions_dir = sessions_dir()?;
-    let (session_id, cwd) = latest_session(&sessions_dir, started, process_cwd.as_deref())
-        .or_else(|| {
-            launch.resumed_id.as_deref().map(|id| {
-                (
-                    // A resumed child thread stands for its root session.
-                    codex_threads::root_session_id(&sessions_dir, id),
-                    process_cwd.as_ref().map(|cwd| cwd.display().to_string()),
-                )
-            })
-        })?;
+    let others: Vec<(ProcessKey, Option<String>)> = codex_pids
+        .iter()
+        .filter(|other| **other != pid)
+        .filter_map(|other| {
+            let process = system.process(*other)?;
+            let resumed = argv_of(*other)
+                .and_then(|argv| parse_launch(&argv))
+                .filter(|launch| launch.subcommand.as_deref() == Some("resume"))
+                .and_then(|launch| launch.resumed_id);
+            Some((
+                ProcessKey {
+                    pid: other.as_u32(),
+                    started: process.start_time(),
+                },
+                resumed,
+            ))
+        })
+        .collect();
+    let session_launch = match launch.subcommand.as_deref() {
+        Some("resume") => Launch::Resume(
+            launch
+                .resumed_id
+                .as_deref()
+                // A resumed child thread stands for its root session.
+                .map(|id| codex_threads::root_session_id(&sessions_dir, id)),
+        ),
+        _ => Launch::New,
+    };
+    let mut open: Vec<String> = Vec::new();
+    for id in codex_session::open_thread_ids(key.pid).unwrap_or_default() {
+        let root = codex_threads::root_session_id(&sessions_dir, &id);
+        if !open.contains(&root) {
+            open.push(root);
+        }
+    }
+    let rollouts = recent_rollouts(&sessions_dir, started);
+    let session_id = codex_session::assign(
+        key,
+        &session_launch,
+        &open,
+        &rollouts,
+        process_cwd.as_deref(),
+        &others,
+    )?;
+    let cwd = rollouts
+        .iter()
+        .find(|rollout| rollout.id == session_id)
+        .and_then(|rollout| rollout.cwd.clone())
+        .or_else(|| process_cwd.as_ref().map(|cwd| cwd.display().to_string()));
     Some(ClaudeResumeInfo {
         command: build_resume_command(&launch.preserved, &session_id, shell_type),
         session_id,
@@ -204,6 +260,7 @@ fn parse_launch(argv: &[String]) -> Option<CodexLaunch> {
     Some(CodexLaunch {
         preserved,
         resumed_id,
+        subcommand: subcommand.map(str::to_owned),
     })
 }
 
@@ -233,21 +290,21 @@ fn looks_like_session_id(arg: &str) -> bool {
     codex_threads::looks_like_session_id(arg)
 }
 
-/// Finds the most recently written session in `cwd` among rollouts touched since `started`.
-/// A child thread (a sub-agent, a Guardian review) stands for the root session it belongs to;
-/// one that names no parent is skipped. Returns the session id and the session's directory.
-fn latest_session(
-    sessions_dir: &Path,
-    started: SystemTime,
-    cwd: Option<&Path>,
-) -> Option<(String, Option<String>)> {
+/// The rollouts written since `started`, a child thread (a sub-agent, a Guardian review) under
+/// the root session it belongs to; one that names no parent is skipped.
+fn recent_rollouts(sessions_dir: &Path, started: SystemTime) -> Vec<Rollout> {
     let threshold = started.checked_sub(START_TIME_SLACK).unwrap_or(started);
     // Rollouts live in day directories named after their creation time; only the days since
     // the process started (plus one for time zones) can hold a session it created. A session
-    // resumed from an older day is covered by the `resume <id>` fallback in `detect`.
-    let first_day = day_key(threshold.checked_sub(Duration::from_secs(24 * 60 * 60))?);
+    // resumed from an older day is known by its `resume <id>`.
+    let Some(first_day) = threshold
+        .checked_sub(Duration::from_secs(24 * 60 * 60))
+        .map(day_key)
+    else {
+        return Vec::new();
+    };
 
-    let mut best: Option<(SystemTime, String, Option<String>)> = None;
+    let mut rollouts = Vec::new();
     for path in day_dirs_since(sessions_dir, &first_day) {
         let Ok(entries) = std::fs::read_dir(&path) else {
             continue;
@@ -257,37 +314,55 @@ fn latest_session(
             if path.extension().is_none_or(|ext| ext != "jsonl") {
                 continue;
             }
-            let Some(modified) = entry.metadata().ok().and_then(|m| m.modified().ok()) else {
+            let Ok(metadata) = entry.metadata() else {
                 continue;
             };
-            if modified < threshold || best.as_ref().is_some_and(|(time, ..)| *time >= modified) {
+            let Ok(modified) = metadata.modified() else {
+                continue;
+            };
+            if modified < threshold {
                 continue;
             }
             let Some(meta) = codex_threads::read_session_meta(&path) else {
                 continue;
             };
-            let session_cwd = meta
+            let cwd = meta
                 .get("cwd")
                 .and_then(|cwd| cwd.as_str())
                 .map(str::to_owned);
-            if let (Some(cwd), Some(session_cwd)) = (cwd, session_cwd.as_deref()) {
-                if !same_dir(cwd, Path::new(session_cwd)) {
-                    continue;
-                }
-            }
-            let id = match codex_threads::thread_origin(&meta) {
-                codex_threads::ThreadOrigin::Root => codex_threads::thread_id(&meta),
-                codex_threads::ThreadOrigin::Child { parent } => {
-                    parent.map(|parent| codex_threads::root_session_id(sessions_dir, &parent))
-                }
+            let (id, created) = match codex_threads::thread_origin(&meta) {
+                codex_threads::ThreadOrigin::Root => (
+                    codex_threads::thread_id(&meta),
+                    Some(
+                        created_at(&meta)
+                            .or_else(|| metadata.created().ok())
+                            .unwrap_or(modified),
+                    ),
+                ),
+                codex_threads::ThreadOrigin::Child { parent } => (
+                    parent.map(|parent| codex_threads::root_session_id(sessions_dir, &parent)),
+                    None,
+                ),
             };
             let Some(id) = id else {
                 continue;
             };
-            best = Some((modified, id, session_cwd));
+            rollouts.push(Rollout {
+                id,
+                cwd,
+                created,
+                modified,
+            });
         }
     }
-    best.map(|(_, id, cwd)| (id, cwd))
+    rollouts
+}
+
+/// The creation time `session_meta` records (`timestamp`).
+fn created_at(meta: &serde_json::Value) -> Option<SystemTime> {
+    let timestamp = meta.get("timestamp")?.as_str()?;
+    let datetime = chrono::DateTime::parse_from_rfc3339(timestamp).ok()?;
+    Some(datetime.with_timezone(&chrono::Utc).into())
 }
 
 /// `YYYY/MM/DD` of a timestamp in UTC, matching the layout of the sessions directory.
@@ -324,16 +399,6 @@ fn day_dirs_since(root: &Path, first_day: &str) -> Vec<PathBuf> {
         }
     }
     days
-}
-
-fn same_dir(a: &Path, b: &Path) -> bool {
-    let normalize = |path: &Path| {
-        path.to_string_lossy()
-            .trim_end_matches(['/', '\\'])
-            .replace('\\', "/")
-            .to_lowercase()
-    };
-    normalize(a) == normalize(b)
 }
 
 /// Builds `codex resume <preserved flags> <session id>`.
