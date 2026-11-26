@@ -78,7 +78,7 @@ fn write_rollout(dir: &Path, name: &str, id: &str, cwd: &str, thread_source: &st
 }
 
 #[test]
-fn picks_latest_top_level_session_in_cwd() {
+fn lists_rollouts_since_start_with_child_threads_under_their_root() {
     let root = tempfile::tempdir().unwrap();
     let day = root.path().join(day_key(SystemTime::now()));
     std::fs::create_dir_all(&day).unwrap();
@@ -87,19 +87,16 @@ fn picks_latest_top_level_session_in_cwd() {
 
     write_rollout(&old_day, "rollout-old.jsonl", "old", "C:\\repo", "user");
     write_rollout(&day, "rollout-a.jsonl", "a", "C:\\repo", "user");
-    std::thread::sleep(Duration::from_millis(50));
-    write_rollout(
-        &day,
-        "rollout-other.jsonl",
-        "other",
-        "C:\\elsewhere",
-        "user",
-    );
     write_rollout(&day, "rollout-sub.jsonl", "sub", "C:\\repo", "subagent");
 
     let started = SystemTime::now() - Duration::from_secs(60);
-    let found = latest_session(root.path(), started, Some(Path::new("c:/repo/"))).unwrap();
-    assert_eq!(found, ("a".to_owned(), Some("C:\\repo".to_owned())));
+    let mut ids: Vec<(String, bool)> = recent_rollouts(root.path(), started)
+        .into_iter()
+        .map(|rollout| (rollout.id, rollout.created.is_some()))
+        .collect();
+    ids.sort();
+    // The sub-agent names no parent and is skipped; the old day is not read.
+    assert_eq!(ids, vec![("a".to_owned(), true)]);
 }
 
 #[test]
@@ -110,5 +107,17 @@ fn ignores_rollouts_older_than_process() {
     write_rollout(&day, "rollout-a.jsonl", "a", "C:\\repo", "user");
 
     let started = SystemTime::now() + Duration::from_secs(60);
-    assert_eq!(latest_session(root.path(), started, None), None);
+    assert!(recent_rollouts(root.path(), started).is_empty());
+}
+
+#[test]
+fn tells_resume_from_fork_and_new() {
+    let id = "01a0198b-ac42-7602-91d9-db473d42b664";
+    let fork = parse_launch(&argv(&["codex", "fork", id])).unwrap();
+    assert_eq!(fork.subcommand.as_deref(), Some("fork"));
+    let resume = parse_launch(&argv(&["codex", "resume", "--last"])).unwrap();
+    assert_eq!(resume.subcommand.as_deref(), Some("resume"));
+    assert_eq!(resume.resumed_id, None);
+    let new = parse_launch(&argv(&["codex", "fix it"])).unwrap();
+    assert_eq!(new.subcommand, None);
 }
