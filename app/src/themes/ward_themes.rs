@@ -161,7 +161,43 @@ const WARD_LATTE: WardPalette = WardPalette {
     ],
 };
 
-pub(super) static WARD_PALETTES: [(ThemeKind, &WardPalette); 8] = [
+/// Lavender of TGeshka: the accent of its night theme (`#9A86E8`), the light end of the logo
+/// gradient (`#BCAAF7`) for the cursor, the day accent (`#8470DE`) darkened for the light variant.
+const WARD_LAVENDER: WardPalette = WardPalette {
+    name: "Ward Lavender",
+    light: false,
+    background: &[0x1B1530FF],
+    foreground: 0xECE6FAFF,
+    accent: &[0x9A86E8FF],
+    cursor: 0xBCAAF7FF,
+    normal: [
+        0x2A2140FF, 0xF0708AFF, 0x8FD9A8FF, 0xF2CB7AFF, 0x82AAF5FF, 0xC89AF5FF, 0x7AD4D9FF,
+        0xCFC6E6FF,
+    ],
+    bright: [
+        0x7A6FA0FF, 0xFF96ACFF, 0xB0EDC4FF, 0xFFDE9EFF, 0xA8C4FFFF, 0xDDBDFFFF, 0xA0E8ECFF,
+        0xFAF7FFFF,
+    ],
+};
+
+const WARD_LAVENDER_LIGHT: WardPalette = WardPalette {
+    name: "Ward Lavender Light",
+    light: true,
+    background: &[0xF4F0FCFF],
+    foreground: 0x2E2445FF,
+    accent: &[0x7059C9FF],
+    cursor: 0x7059C9FF,
+    normal: [
+        0x2E2445FF, 0xB8304AFF, 0x3D7A4AFF, 0x8A6100FF, 0x3A62B0FF, 0x8A44B8FF, 0x1F7A82FF,
+        0xDCD4ECFF,
+    ],
+    bright: [
+        0x625880FF, 0xCC4560FF, 0x4A8F5AFF, 0xA07400FF, 0x4A75C8FF, 0x9E58CCFF, 0x2A8E96FF,
+        0xFFFFFFFF,
+    ],
+};
+
+pub(super) static WARD_PALETTES: [(ThemeKind, &WardPalette); 10] = [
     (ThemeKind::WardEmber, &WARD_EMBER),
     (ThemeKind::WardAbyss, &WARD_ABYSS),
     (ThemeKind::WardAurora, &WARD_AURORA),
@@ -170,6 +206,8 @@ pub(super) static WARD_PALETTES: [(ThemeKind, &WardPalette); 8] = [
     (ThemeKind::WardMono, &WARD_MONO),
     (ThemeKind::WardPaper, &WARD_PAPER),
     (ThemeKind::WardLatte, &WARD_LATTE),
+    (ThemeKind::WardLavender, &WARD_LAVENDER),
+    (ThemeKind::WardLavenderLight, &WARD_LAVENDER_LIGHT),
 ];
 
 fn ansi_colors(colors: &[u32; 8]) -> AnsiColors {

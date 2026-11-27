@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="250" viewBox="0 0 560 250" font-family="Consolas, Menlo, monospace" font-size="14">
+<defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1B1530"/><stop offset="1" stop-color="#1B1530"/></linearGradient><linearGradient id="ac" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#9A86E8"/><stop offset="1" stop-color="#9A86E8"/></linearGradient></defs>
+<rect width="560" height="250" rx="10" fill="url(#bg)"/>
+<rect x="0" y="0" width="560" height="6" rx="3" fill="url(#ac)"/>
+<text x="20" y="34" fill="#ECE6FA" font-size="16" font-weight="bold">Ward Lavender</text>
+<text x="20" y="64" fill="#8FD9A8">~/ward</text><text x="80" y="64" fill="#ECE6FA">$ claude --resume</text><rect x="222" y="51" width="9" height="17" fill="#BCAAF7"/>
+<text x="20" y="88" fill="#F2CB7A">? Waiting for answer</text><text x="210" y="88" fill="#F0708A">x Error: build failed</text>
+<text x="20" y="112" fill="#82AAF5">fn</text><text x="44" y="112" fill="#7AD4D9">main</text><text x="84" y="112" fill="#ECE6FA">() {</text><text x="124" y="112" fill="#C89AF5">"ok"</text><text x="172" y="112" fill="#7A6FA0">// comment</text>
+<rect x="20" y="136" width="58" height="30" rx="4" fill="#2A2140" stroke="#ECE6FA" stroke-opacity="0.15"/>
+<rect x="85" y="136" width="58" height="30" rx="4" fill="#F0708A" stroke="#ECE6FA" stroke-opacity="0.15"/>
+<rect x="150" y="136" width="58" height="30" rx="4" fill="#8FD9A8" stroke="#ECE6FA" stroke-opacity="0.15"/>
+<rect x="215" y="136" width="58" height="30" rx="4" fill="#F2CB7A" stroke="#ECE6FA" stroke-opacity="0.15"/>
+<rect x="280" y="136" width="58" height="30" rx="4" fill="#82AAF5" stroke="#ECE6FA" stroke-opacity="0.15"/>
+<rect x="345" y="136" width="58" height="30" rx="4" fill="#C89AF5" stroke="#ECE6FA" stroke-opacity="0.15"/>
+<rect x="410" y="136" width="58" height="30" rx="4" fill="#7AD4D9" stroke="#ECE6FA" stroke-opacity="0.15"/>
+<rect x="475" y="136" width="58" height="30" rx="4" fill="#CFC6E6" stroke="#ECE6FA" stroke-opacity="0.15"/>
+<rect x="20" y="184" width="58" height="30" rx="4" fill="#7A6FA0" stroke="#ECE6FA" stroke-opacity="0.15"/>
+<rect x="85" y="184" width="58" height="30" rx="4" fill="#FF96AC" stroke="#ECE6FA" stroke-opacity="0.15"/>
+<rect x="150" y="184" width="58" height="30" rx="4" fill="#B0EDC4" stroke="#ECE6FA" stroke-opacity="0.15"/>
+<rect x="215" y="184" width="58" height="30" rx="4" fill="#FFDE9E" stroke="#ECE6FA" stroke-opacity="0.15"/>
+<rect x="280" y="184" width="58" height="30" rx="4" fill="#A8C4FF" stroke="#ECE6FA" stroke-opacity="0.15"/>
+<rect x="345" y="184" width="58" height="30" rx="4" fill="#DDBDFF" stroke="#ECE6FA" stroke-opacity="0.15"/>
+<rect x="410" y="184" width="58" height="30" rx="4" fill="#A0E8EC" stroke="#ECE6FA" stroke-opacity="0.15"/>
+<rect x="475" y="184" width="58" height="30" rx="4" fill="#FAF7FF" stroke="#ECE6FA" stroke-opacity="0.15"/>
+<text x="20" y="240" fill="#7A6FA0" font-size="11">normal / bright ANSI: black red green yellow blue magenta cyan white</text>
+</svg>
