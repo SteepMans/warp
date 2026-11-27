@@ -1,4 +1,5 @@
-# Runs the unit tests of the fork's own modules (`app/src/ward`) on a hosted runner, so the
+# Runs the unit tests of the fork's own modules (`app/src/ward` and the Ward themes in
+# `app/src/themes/ward_themes.rs`) on a hosted runner, so the
 # fork does not depend on the upstream `Warp CI`, which is skipped here. The toolchain steps
 # match `fork_windows.yml`.
 #
@@ -73,7 +74,7 @@ jobs:
 
       - name: Test the Ward modules
         shell: pwsh
-        run: "cargo test -p warp --lib -- ward::"
+        run: "cargo test -p warp --lib -- ward:: ward_themes::"
 
   # Clippy compiles in check mode and shares nothing with the test build: as a step after the
   # tests it added 12 minutes to every run, as a job of its own it runs alongside them.

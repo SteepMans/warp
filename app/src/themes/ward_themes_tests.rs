@@ -136,3 +136,36 @@ fn ward_theme_agent_status_colors_stay_recognizable() {
         );
     }
 }
+
+/// The lavender pair is in the list Ward adds to the built-in themes, after the other Ward
+/// themes in the theme chooser, and keeps the TGeshka lavender accent.
+#[test]
+fn ward_lavender_themes_are_listed() {
+    let themes: Vec<(ThemeKind, WarpTheme)> = ward_themes().collect();
+    for (kind, name, light) in [
+        (ThemeKind::WardLavender, "Ward Lavender", false),
+        (ThemeKind::WardLavenderLight, "Ward Lavender Light", true),
+    ] {
+        let (_, theme) = themes
+            .iter()
+            .find(|(k, _)| *k == kind)
+            .unwrap_or_else(|| panic!("{name} is not among the Ward themes"));
+        assert_eq!(theme.name().as_deref(), Some(name));
+        let palette = WARD_PALETTES
+            .iter()
+            .find(|(k, _)| *k == kind)
+            .map(|(_, p)| *p)
+            .unwrap();
+        assert_eq!(palette.light, light, "{name}");
+        assert!(
+            kind > ThemeKind::WardLatte,
+            "{name} sorts before the older Ward themes"
+        );
+    }
+    let dark = WARD_PALETTES
+        .iter()
+        .find(|(k, _)| *k == ThemeKind::WardLavender)
+        .map(|(_, p)| *p)
+        .unwrap();
+    assert_eq!(dark.accent, &[0x9A86E8FF]);
+}

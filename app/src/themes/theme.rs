@@ -104,6 +104,10 @@ pub enum ThemeKind {
     WardPaper,
     #[schemars(description = "Ward Latte")]
     WardLatte,
+    #[schemars(description = "Ward Lavender")]
+    WardLavender,
+    #[schemars(description = "Ward Lavender Light")]
+    WardLavenderLight,
     #[schemars(description = "A user-provided custom theme loaded from a file.")]
     Custom(CustomTheme),
     /// Base16 themes are a special case of custom themes with their own semantics for ANSI colors that override "bright" color variants.
@@ -155,6 +159,8 @@ impl std::fmt::Display for ThemeKind {
             ThemeKind::WardMono => "Ward Mono",
             ThemeKind::WardPaper => "Ward Paper",
             ThemeKind::WardLatte => "Ward Latte",
+            ThemeKind::WardLavender => "Ward Lavender",
+            ThemeKind::WardLavenderLight => "Ward Lavender Light",
             ThemeKind::SentReferralReward => "Warp Referral",
             ThemeKind::ReceivedReferralReward => "Referred to Warp",
             ThemeKind::Custom(custom_theme) => custom_theme.name.as_str(),
